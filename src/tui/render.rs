@@ -11,10 +11,10 @@
 //! makes the ratatui code a trivial, decision-free sink.
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 
 use super::state::{ArtifactState, Mode, TuiState};
 
@@ -58,6 +58,25 @@ fn kind_glyph(kind: &str) -> &'static str {
     }
 }
 
+/// Column widths (chars) — the projection pads/truncates to these so the
+/// table aligns regardless of how long an identifier is.
+const W_KIND: usize = 8;
+const W_REPO: usize = 46;
+const W_TAG: usize = 12;
+
+/// Truncate `s` to `width` *display chars* (ellipsis on overflow) then
+/// left-pad to exactly `width`, so every cell is the same width and the
+/// table never skews on a long repository path.
+fn fit(s: &str, width: usize) -> String {
+    let n = s.chars().count();
+    if n > width {
+        let keep: String = s.chars().take(width.saturating_sub(1)).collect();
+        format!("{keep}…")
+    } else {
+        format!("{s:<width$}")
+    }
+}
+
 /// One table row in the render model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderRow {
@@ -90,6 +109,8 @@ pub struct RenderModel {
     pub legend: String,
     /// Whether the detail pane is the focused element.
     pub detail_focused: bool,
+    /// Whether the help overlay is showing.
+    pub show_help: bool,
 }
 
 /// Project `state` into a [`RenderModel`]. Pure — no I/O, no ratatui.
@@ -119,9 +140,9 @@ pub fn frame(state: &TuiState) -> RenderModel {
             let (glyph, label, color) = status_view(r.state);
             RenderRow {
                 columns: [
-                    format!("{} {}", kind_glyph(&r.kind), r.kind),
-                    r.repo.clone(),
-                    r.latest_tag.clone(),
+                    fit(&format!("{} {}", kind_glyph(&r.kind), r.kind), W_KIND),
+                    fit(&r.repo, W_REPO),
+                    fit(&r.latest_tag, W_TAG),
                     format!("{glyph} {label}"),
                 ],
                 selected: pos == state.selected,
@@ -155,10 +176,10 @@ pub fn frame(state: &TuiState) -> RenderModel {
     } else if state.loading {
         "loading catalog…".to_string()
     } else if state.marked.is_empty() {
-        "↑/↓ move  space mark  / search  i install  u update  d delete  g scope  r refresh  q quit".to_string()
+        "↑/↓ move  space mark  i/u/d act  g scope  / search  r refresh  ? help  q quit".to_string()
     } else {
         format!(
-            "{} marked  i install  u update  d delete  a all  c clear  q quit",
+            "{} marked  i install  u update  d delete  a all  c clear  ? help  q quit",
             state.marked.len()
         )
     };
@@ -172,6 +193,7 @@ pub fn frame(state: &TuiState) -> RenderModel {
         status,
         legend: "✓ installed   ↑ outdated   ✱ modified   ⚠ integrity-missing   · not-installed".to_string(),
         detail_focused: state.mode == Mode::Detail,
+        show_help: state.mode == Mode::Help,
     }
 }
 
@@ -190,25 +212,39 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
         ])
         .split(f.area());
 
+    let accent = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+
+    // Title — bright, scope segment stands out (it carries `[scope]`).
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             model.title.clone(),
-            Style::default().add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
         ))),
         chunks[0],
     );
 
     f.render_widget(
-        Paragraph::new(model.search.clone()).block(Block::default().borders(Borders::ALL)),
+        Paragraph::new(Span::styled(model.search.clone(), Style::default().fg(Color::White))).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Blue))
+                .title(Span::styled("Search", accent)),
+        ),
         chunks[1],
     );
 
     let header = ListItem::new(Line::from(Span::styled(
         format!(
-            "   {:<8}  {:<40}  {:<10}  {}",
-            model.headers[0], model.headers[1], model.headers[2], model.headers[3]
+            "   {:<kw$}  {:<rw$}  {:<tw$}  {}",
+            model.headers[0],
+            model.headers[1],
+            model.headers[2],
+            model.headers[3],
+            kw = W_KIND,
+            rw = W_REPO,
+            tw = W_TAG,
         ),
-        Style::default().add_modifier(Modifier::BOLD),
+        accent.add_modifier(Modifier::UNDERLINED),
     )));
     let mut items: Vec<ListItem> = vec![header];
     let mut selected_index: Option<usize> = None;
@@ -216,47 +252,152 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
         if r.selected {
             selected_index = Some(idx + 1); // +1 for the header row
         }
-        // A leading mark cell, then a plain prefix; the status cell
-        // carries its own state color so a glance reads the catalog
-        // without entering detail.
-        let mark = if r.marked { " ▣ " } else { "   " };
+        // Every cell is its own colored span; columns are already
+        // fixed-width from `fit()` so the table never skews.
         let line = Line::from(vec![
             Span::styled(
-                mark.to_string(),
-                Style::default().fg(if r.marked { Color::Cyan } else { Color::Reset }),
+                if r.marked { " ▣ " } else { "   " }.to_string(),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             ),
-            Span::raw(format!(
-                "{:<8}  {:<40}  {:<10}  ",
-                r.columns[0], r.columns[1], r.columns[2]
-            )),
-            Span::styled(r.columns[3].clone(), Style::default().fg(color_for(r.status_color))),
+            Span::styled(
+                format!("{}  ", r.columns[0]),
+                Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("{}  ", r.columns[1]), Style::default().fg(Color::White)),
+            Span::styled(format!("{}  ", r.columns[2]), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                r.columns[3].clone(),
+                Style::default()
+                    .fg(color_for(r.status_color))
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]);
         items.push(ListItem::new(line));
     }
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("Catalog"))
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Blue))
+                .title(Span::styled("Catalog", accent)),
+        )
+        .highlight_symbol("▶ ")
+        .highlight_style(
+            Style::default()
+                .bg(Color::Indexed(236))
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
     let mut list_state = ListState::default();
     list_state.select(selected_index);
     f.render_stateful_widget(list, chunks[2], &mut list_state);
 
-    let detail_block = Block::default().borders(Borders::ALL).title("Detail");
-    let detail_block = if model.detail_focused {
-        detail_block.border_style(Style::default().add_modifier(Modifier::BOLD))
-    } else {
-        detail_block
-    };
-    f.render_widget(Paragraph::new(model.detail.clone()).block(detail_block), chunks[3]);
+    let detail_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(if model.detail_focused { Color::Cyan } else { Color::Blue }))
+        .title(Span::styled("Detail", accent));
+    f.render_widget(
+        Paragraph::new(Span::styled(model.detail.clone(), Style::default().fg(Color::White))).block(detail_block),
+        chunks[3],
+    );
+
+    f.render_widget(Paragraph::new(legend_line()), chunks[4]);
 
     f.render_widget(
         Paragraph::new(Span::styled(
-            model.legend.clone(),
-            Style::default().add_modifier(Modifier::DIM),
+            model.status.clone(),
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
         )),
-        chunks[4],
+        chunks[5],
     );
 
-    f.render_widget(Paragraph::new(model.status.clone()), chunks[5]);
+    if model.show_help {
+        draw_help(f);
+    }
+}
+
+/// The status-glyph legend as colored spans (each glyph in its state
+/// color), so the legend itself demonstrates the palette.
+fn legend_line() -> Line<'static> {
+    let pairs = [
+        ("✓ installed", ColorKey::Installed),
+        ("  ↑ outdated", ColorKey::Outdated),
+        ("  ✱ modified", ColorKey::Modified),
+        ("  ⚠ integrity-missing", ColorKey::IntegrityMissing),
+        ("  · not-installed", ColorKey::NotInstalled),
+    ];
+    Line::from(
+        pairs
+            .into_iter()
+            .map(|(t, k)| Span::styled(t.to_string(), Style::default().fg(color_for(k))))
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// A centered help overlay listing every keybinding.
+fn draw_help(f: &mut Frame) {
+    let rows = [
+        ("↑ / ↓", "move selection"),
+        ("space", "mark / unmark the selected row"),
+        ("a / c", "mark all visible / clear marks"),
+        ("i / u / d", "install / update / uninstall (marked set or selection)"),
+        ("g", "toggle scope: project ⇄ global"),
+        ("/", "search; type to filter, enter to commit"),
+        ("enter", "open the detail pane"),
+        ("r", "refresh the catalog from the registry"),
+        ("? ", "this help (any key closes)"),
+        ("q / esc", "quit"),
+    ];
+    let mut lines: Vec<Line> = vec![
+        Line::from(Span::styled(
+            "Keybindings",
+            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
+    for (k, d) in rows {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {k:<10}"),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(d.to_string(), Style::default().fg(Color::White)),
+        ]));
+    }
+    let area = centered_rect(60, 50, f.area());
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(Span::styled(
+                    " help ",
+                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                )),
+        ),
+        area,
+    );
+}
+
+/// A `pct_x` × `pct_y` percent rectangle centered in `area`.
+fn centered_rect(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
+    let vert = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - pct_y) / 2),
+            Constraint::Percentage(pct_y),
+            Constraint::Percentage((100 - pct_y) / 2),
+        ])
+        .split(area);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - pct_x) / 2),
+            Constraint::Percentage(pct_x),
+            Constraint::Percentage((100 - pct_x) / 2),
+        ])
+        .split(vert[1])[1]
 }
 
 /// Map a pure [`ColorKey`] to a concrete ratatui [`Color`]. Named ANSI
@@ -300,15 +441,13 @@ mod tests {
         assert_eq!(m.search, "Search: ");
         assert_eq!(m.headers, ["Kind", "Repo", "Tag", "Status"]);
         assert_eq!(m.rows.len(), 2);
-        assert_eq!(
-            m.rows[0].columns,
-            [
-                "◆ skill".to_string(),
-                "r/alpha".to_string(),
-                "latest".to_string(),
-                "✓ installed".to_string()
-            ]
-        );
+        // Columns are fixed-width (padded/truncated by `fit`) so the
+        // table aligns; status keeps its glyph+label verbatim.
+        assert_eq!(m.rows[0].columns[0], fit("◆ skill", W_KIND));
+        assert_eq!(m.rows[0].columns[1], fit("r/alpha", W_REPO));
+        assert_eq!(m.rows[0].columns[2], fit("latest", W_TAG));
+        assert_eq!(m.rows[0].columns[3], "✓ installed");
+        assert_eq!(m.rows[0].columns[1].chars().count(), W_REPO);
         assert_eq!(m.rows[0].status_color, ColorKey::Installed);
         assert_eq!(m.rows[1].status_color, ColorKey::NotInstalled);
         assert!(m.rows[0].selected, "first row selected by default");
@@ -345,6 +484,26 @@ mod tests {
         assert_eq!(kind_glyph("skill"), "◆");
         assert_eq!(kind_glyph("rule"), "▸");
         assert_eq!(kind_glyph("-"), "•");
+    }
+
+    #[test]
+    fn fit_pads_short_and_ellipsizes_long() {
+        assert_eq!(fit("abc", 6), "abc   ");
+        assert_eq!(fit("abc", 3), "abc");
+        // Over-long: last char becomes the ellipsis, exact width kept.
+        let long = "registry.example.com/very/long/repository/path";
+        let out = fit(long, 10);
+        assert_eq!(out.chars().count(), 10);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn help_mode_sets_show_help() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![row("r/a", ArtifactState::Installed)]);
+        assert!(!frame(&s).show_help);
+        s.enter_help();
+        assert!(frame(&s).show_help);
     }
 
     #[test]

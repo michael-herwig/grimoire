@@ -43,6 +43,8 @@ pub enum TuiInput {
     ClearMarks,
     /// Toggle the active scope (Global ⇄ Project).
     ScopeToggle,
+    /// Show the keybinding help overlay.
+    Help,
     /// Rebuild the catalog.
     Refresh,
     /// Quit the TUI.
@@ -89,7 +91,19 @@ pub enum TuiAction {
 pub fn handle(state: &mut TuiState, input: TuiInput) -> TuiAction {
     match state.mode {
         Mode::Search => handle_search(state, input),
+        Mode::Help => handle_help(state, input),
         Mode::List | Mode::Detail => handle_browse(state, input),
+    }
+}
+
+/// Help-overlay keys: `q` quits, anything else dismisses back to the list.
+fn handle_help(state: &mut TuiState, input: TuiInput) -> TuiAction {
+    match input {
+        TuiInput::Char('q') | TuiInput::Quit => TuiAction::Quit,
+        _ => {
+            state.back();
+            TuiAction::None
+        }
     }
 }
 
@@ -132,6 +146,7 @@ fn handle_search(state: &mut TuiState, input: TuiInput) -> TuiAction {
         | TuiInput::MarkAll
         | TuiInput::ClearMarks
         | TuiInput::ScopeToggle
+        | TuiInput::Help
         | TuiInput::Refresh => TuiAction::None,
     }
 }
@@ -192,6 +207,10 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
         }
         TuiInput::Char('r') | TuiInput::Refresh => TuiAction::Refresh,
         TuiInput::Char('g') | TuiInput::ScopeToggle => TuiAction::ToggleScope,
+        TuiInput::Char('?') | TuiInput::Help => {
+            state.enter_help();
+            TuiAction::None
+        }
         // Any other printable in list mode is inert.
         TuiInput::Char(_) => TuiAction::None,
         TuiInput::Backspace => TuiAction::None,
@@ -363,6 +382,20 @@ mod tests {
         assert_eq!(handle(&mut s, TuiInput::Char(' ')), TuiAction::None);
         assert_eq!(s.query, " ", "space is a literal query char in search");
         assert!(s.marked.is_empty(), "no marking while typing");
+    }
+
+    #[test]
+    fn help_overlay_opens_and_any_key_closes() {
+        let mut s = seeded();
+        assert_eq!(handle(&mut s, TuiInput::Char('?')), TuiAction::None);
+        assert_eq!(s.mode, Mode::Help);
+        // Any non-quit key dismisses back to the list.
+        assert_eq!(handle(&mut s, TuiInput::Down), TuiAction::None);
+        assert_eq!(s.mode, Mode::List);
+        // `q` from help quits.
+        handle(&mut s, TuiInput::Help);
+        assert_eq!(s.mode, Mode::Help);
+        assert_eq!(handle(&mut s, TuiInput::Char('q')), TuiAction::Quit);
     }
 
     #[test]

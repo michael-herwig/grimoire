@@ -58,6 +58,8 @@ pub enum Mode {
     Search,
     /// Viewing the selected row's detail pane.
     Detail,
+    /// Viewing the keybinding help overlay.
+    Help,
 }
 
 /// One catalog row, projected from a [`crate::catalog::registry_catalog::CatalogEntry`]
@@ -241,7 +243,12 @@ impl TuiState {
         self.mode = Mode::Search;
     }
 
-    /// Leave detail / search and return to the list.
+    /// Show the keybinding help overlay.
+    pub fn enter_help(&mut self) {
+        self.mode = Mode::Help;
+    }
+
+    /// Leave detail / search / help and return to the list.
     pub fn back(&mut self) {
         self.mode = Mode::List;
     }

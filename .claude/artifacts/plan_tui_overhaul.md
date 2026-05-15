@@ -191,3 +191,4 @@ visible legend/affordance, no new mechanism.
 | 2026-05-16 | Phase 3 done: uninstall seam + `grim uninstall` command + acceptance tests + TUI delete (BatchOp) |
 | 2026-05-16 | Phase 4 done: runtime Global⇄Project scope toggle (`g`), in-place scope swap + state recompute, scope in title |
 | 2026-05-16 | Phase 5: manual-rig README TUI scenario documented. Impl complete (all 5 phases); formal /swarm-review left to the user (billed/user-triggered). `task verify` green throughout. |
+| 2026-05-16 | Polish (user feedback): fixed-width `fit()` columns (no skew on long ids), full per-cell colorization + colored borders/legend/selection, `?` help overlay, scope shown in title; +6 unit tests (40 TUI total) |
