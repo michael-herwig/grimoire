@@ -65,6 +65,8 @@ pub struct RenderRow {
     pub columns: [String; 4],
     /// Whether this row is the current selection.
     pub selected: bool,
+    /// Whether this row is marked for a batch action.
+    pub marked: bool,
     /// The color the status cell should render in.
     pub status_color: ColorKey,
 }
@@ -107,8 +109,8 @@ pub fn frame(state: &TuiState) -> RenderModel {
         .filtered
         .iter()
         .enumerate()
-        .filter_map(|(pos, &i)| state.rows.get(i).map(|r| (pos, r)))
-        .map(|(pos, r)| {
+        .filter_map(|(pos, &i)| state.rows.get(i).map(|r| (pos, i, r)))
+        .map(|(pos, i, r)| {
             let (glyph, label, color) = status_view(r.state);
             RenderRow {
                 columns: [
@@ -118,6 +120,7 @@ pub fn frame(state: &TuiState) -> RenderModel {
                     format!("{glyph} {label}"),
                 ],
                 selected: pos == state.selected,
+                marked: state.is_row_marked(i),
                 status_color: color,
             }
         })
@@ -146,8 +149,13 @@ pub fn frame(state: &TuiState) -> RenderModel {
         state.status_line.clone()
     } else if state.loading {
         "loading catalog…".to_string()
+    } else if state.marked.is_empty() {
+        "↑/↓ move  space mark  / search  i install  u update  r refresh  q quit".to_string()
     } else {
-        "↑/↓ move  enter detail  / search  i install  u update  r refresh  q quit".to_string()
+        format!(
+            "{} marked  i install  u update  a all  c clear  q quit",
+            state.marked.len()
+        )
     };
 
     RenderModel {
@@ -192,7 +200,7 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
 
     let header = ListItem::new(Line::from(Span::styled(
         format!(
-            "{:<8}  {:<40}  {:<10}  {}",
+            "   {:<8}  {:<40}  {:<10}  {}",
             model.headers[0], model.headers[1], model.headers[2], model.headers[3]
         ),
         Style::default().add_modifier(Modifier::BOLD),
@@ -203,9 +211,15 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
         if r.selected {
             selected_index = Some(idx + 1); // +1 for the header row
         }
-        // Plain prefix; the status cell carries its own state color so a
-        // glance reads the catalog without entering detail.
+        // A leading mark cell, then a plain prefix; the status cell
+        // carries its own state color so a glance reads the catalog
+        // without entering detail.
+        let mark = if r.marked { " ▣ " } else { "   " };
         let line = Line::from(vec![
+            Span::styled(
+                mark.to_string(),
+                Style::default().fg(if r.marked { Color::Cyan } else { Color::Reset }),
+            ),
             Span::raw(format!(
                 "{:<8}  {:<40}  {:<10}  ",
                 r.columns[0], r.columns[1], r.columns[2]

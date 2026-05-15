@@ -29,10 +29,16 @@ pub enum TuiInput {
     Enter,
     /// Cancel: leave detail/search, else request quit.
     Esc,
-    /// Install the selected artifact.
+    /// Install the selected / marked artifact(s).
     Install,
-    /// Update the selected artifact.
+    /// Update the selected / marked artifact(s).
     Update,
+    /// Toggle the mark on the selected row.
+    Mark,
+    /// Toggle marks on all visible rows.
+    MarkAll,
+    /// Clear all marks.
+    ClearMarks,
     /// Rebuild the catalog.
     Refresh,
     /// Quit the TUI.
@@ -42,12 +48,12 @@ pub enum TuiInput {
 /// What the app must do after a transition. `None` = state-only change.
 ///
 /// Closed internal enum — matches stay total, no `#[non_exhaustive]`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Not `Copy` (the batch variant carries a `Vec`).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TuiAction {
-    /// Install the row at this `filtered` index.
-    Install(usize),
-    /// Update the row at this `filtered` index.
-    Update(usize),
+    /// Install (`update=false`) or update (`update=true`) the given
+    /// `rows` indices (the marked set, else the single selection).
+    Batch { update: bool, rows: Vec<usize> },
     /// Rebuild the catalog from the registry.
     Refresh,
     /// Exit the TUI cleanly.
@@ -98,9 +104,25 @@ fn handle_search(state: &mut TuiState, input: TuiInput) -> TuiAction {
             TuiAction::None
         }
         TuiInput::Quit => TuiAction::Quit,
-        // Install/Update/Refresh are not triggerable mid-typing — the
+        // Action/mark inputs are not triggerable mid-typing — the
         // characters would have been captured above. Ignore defensively.
-        TuiInput::Install | TuiInput::Update | TuiInput::Refresh => TuiAction::None,
+        TuiInput::Install
+        | TuiInput::Update
+        | TuiInput::Mark
+        | TuiInput::MarkAll
+        | TuiInput::ClearMarks
+        | TuiInput::Refresh => TuiAction::None,
+    }
+}
+
+/// A batch action over the current targets (marked set, else selection).
+/// `None` when there is nothing to act on.
+fn batch(state: &TuiState, update: bool) -> TuiAction {
+    let rows = state.action_targets();
+    if rows.is_empty() {
+        TuiAction::None
+    } else {
+        TuiAction::Batch { update, rows }
     }
 }
 
@@ -132,14 +154,20 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
             TuiAction::None
         }
         TuiInput::Char('q') | TuiInput::Quit => TuiAction::Quit,
-        TuiInput::Char('i') | TuiInput::Install => match state.selected_row() {
-            Some(_) => TuiAction::Install(state.selected),
-            None => TuiAction::None,
-        },
-        TuiInput::Char('u') | TuiInput::Update => match state.selected_row() {
-            Some(_) => TuiAction::Update(state.selected),
-            None => TuiAction::None,
-        },
+        TuiInput::Char('i') | TuiInput::Install => batch(state, false),
+        TuiInput::Char('u') | TuiInput::Update => batch(state, true),
+        TuiInput::Char(' ') | TuiInput::Mark => {
+            state.toggle_mark_selected();
+            TuiAction::None
+        }
+        TuiInput::Char('a') | TuiInput::MarkAll => {
+            state.toggle_mark_all_filtered();
+            TuiAction::None
+        }
+        TuiInput::Char('c') | TuiInput::ClearMarks => {
+            state.clear_marks();
+            TuiAction::None
+        }
         TuiInput::Char('r') | TuiInput::Refresh => TuiAction::Refresh,
         // Any other printable in list mode is inert.
         TuiInput::Char(_) => TuiAction::None,
@@ -202,13 +230,71 @@ mod tests {
     }
 
     #[test]
-    fn install_and_update_emit_action_with_selected_index() {
+    fn install_update_no_marks_target_selection() {
         let mut s = seeded();
-        s.move_selection(1);
-        assert_eq!(handle(&mut s, TuiInput::Char('i')), TuiAction::Install(1));
-        assert_eq!(handle(&mut s, TuiInput::Install), TuiAction::Install(1));
-        assert_eq!(handle(&mut s, TuiInput::Char('u')), TuiAction::Update(1));
-        assert_eq!(handle(&mut s, TuiInput::Update), TuiAction::Update(1));
+        s.move_selection(1); // select row index 1
+        assert_eq!(
+            handle(&mut s, TuiInput::Char('i')),
+            TuiAction::Batch {
+                update: false,
+                rows: vec![1]
+            }
+        );
+        assert_eq!(
+            handle(&mut s, TuiInput::Install),
+            TuiAction::Batch {
+                update: false,
+                rows: vec![1]
+            }
+        );
+        assert_eq!(
+            handle(&mut s, TuiInput::Update),
+            TuiAction::Batch {
+                update: true,
+                rows: vec![1]
+            }
+        );
+    }
+
+    #[test]
+    fn marks_drive_batch_over_selection() {
+        let mut s = seeded();
+        // Mark row 0 and row 2.
+        handle(&mut s, TuiInput::Mark);
+        s.move_selection(2);
+        handle(&mut s, TuiInput::Mark);
+        // Selection is row 2 but the marked set wins.
+        assert_eq!(
+            handle(&mut s, TuiInput::Install),
+            TuiAction::Batch {
+                update: false,
+                rows: vec![0, 2]
+            }
+        );
+        // Clear marks ⇒ falls back to the single selection (row 2).
+        handle(&mut s, TuiInput::ClearMarks);
+        assert_eq!(
+            handle(&mut s, TuiInput::Update),
+            TuiAction::Batch {
+                update: true,
+                rows: vec![2]
+            }
+        );
+    }
+
+    #[test]
+    fn mark_all_toggles_visible_set() {
+        let mut s = seeded();
+        handle(&mut s, TuiInput::MarkAll);
+        assert_eq!(
+            handle(&mut s, TuiInput::Install),
+            TuiAction::Batch {
+                update: false,
+                rows: vec![0, 1, 2]
+            }
+        );
+        handle(&mut s, TuiInput::MarkAll); // all marked ⇒ clears
+        assert!(s.marked.is_empty());
     }
 
     #[test]
@@ -217,6 +303,18 @@ mod tests {
         s.set_rows(vec![]);
         assert_eq!(handle(&mut s, TuiInput::Install), TuiAction::None);
         assert_eq!(handle(&mut s, TuiInput::Update), TuiAction::None);
+    }
+
+    #[test]
+    fn space_marks_but_is_literal_in_search() {
+        let mut s = seeded();
+        handle(&mut s, TuiInput::Char(' '));
+        assert!(s.is_row_marked(0), "space marks in list mode");
+        s.clear_marks();
+        handle(&mut s, TuiInput::Char('/'));
+        assert_eq!(handle(&mut s, TuiInput::Char(' ')), TuiAction::None);
+        assert_eq!(s.query, " ", "space is a literal query char in search");
+        assert!(s.marked.is_empty(), "no marking while typing");
     }
 
     #[test]

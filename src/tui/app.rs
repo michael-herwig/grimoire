@@ -132,11 +132,8 @@ pub async fn run(ctx: TuiContext) -> anyhow::Result<()> {
                 terminal.draw(|f| draw(f, &frame(&state)))?;
                 reload_into(&ctx, &mut state, true).await;
             }
-            TuiAction::Install(idx) => {
-                run_artifact_action(&ctx, &mut state, idx, false).await;
-            }
-            TuiAction::Update(idx) => {
-                run_artifact_action(&ctx, &mut state, idx, true).await;
+            TuiAction::Batch { update, rows } => {
+                run_batch(&ctx, &mut state, &rows, update).await;
             }
         }
         terminal.draw(|f| draw(f, &frame(&state)))?;
@@ -261,46 +258,52 @@ fn load_scope_for_badges(ctx: &TuiContext) -> (Option<GrimoireLock>, InstallStat
     (lock, state)
 }
 
-/// Reuse the `install`/`update` path for the selected row.
-///
-/// This does **not** fork install logic: it builds a single-artifact
-/// [`DesiredSet`] from the catalog row, runs the same
-/// [`resolve_lock`] resolver and the same [`install_all`] +
-/// [`DefaultMaterializer`] the commands use (`force = true` for update,
-/// matching the command's rolling-release contract), then refreshes the
-/// affected row's badge from the updated install-state.
-async fn run_artifact_action(ctx: &TuiContext, state: &mut TuiState, idx: usize, is_update: bool) {
-    let Some(row) = state.filtered.get(idx).and_then(|&i| state.rows.get(i)).cloned() else {
-        return;
-    };
+/// Run install/update over a batch of `rows` indices (the marked set, or
+/// the single selection), reusing the **same** resolve → lock →
+/// materialize path the `install`/`update` commands use (no forked
+/// logic). Each row's state is refreshed from the updated record; the
+/// status line aggregates the outcome (`n ok, m failed`).
+async fn run_batch(ctx: &TuiContext, state: &mut TuiState, rows: &[usize], is_update: bool) {
     if ctx.offline {
         state.set_status("offline — cannot install/update");
         return;
     }
+    let verb = if is_update { "update" } else { "install" };
+    let total = rows.len();
+    let (mut ok, mut failed) = (0usize, 0usize);
+    let mut last_err: Option<String> = None;
 
-    let verb = if is_update { "updating" } else { "installing" };
-    state.set_status(format!("{verb} {}…", row.repo));
-
-    match perform(ctx, &row, is_update).await {
-        Ok(outcome) => {
-            // Refresh just this row's state from the now-updated record.
-            let (lock, install_state) = load_scope_for_badges(ctx);
-            if let Some((registry, repository)) = split_repo(&row.repo) {
-                let st = derive_artifact_state(&registry, &repository, lock.as_ref(), &install_state);
-                if let Some(&i) = state.filtered.get(idx)
+    for (n, &i) in rows.iter().enumerate() {
+        let Some(row) = state.rows.get(i).cloned() else {
+            continue;
+        };
+        state.set_status(format!("{verb} {}/{total}: {}…", n + 1, row.repo));
+        match perform(ctx, &row, is_update).await {
+            Ok(_) => {
+                ok += 1;
+                let (lock, install_state) = load_scope_for_badges(ctx);
+                if let Some((registry, repository)) = split_repo(&row.repo)
                     && let Some(r) = state.rows.get_mut(i)
                 {
-                    r.state = st;
+                    r.state = derive_artifact_state(&registry, &repository, lock.as_ref(), &install_state);
                 }
             }
-            state.set_status(format!(
-                "{}: {} ({outcome})",
-                row.repo,
-                if is_update { "updated" } else { "installed" }
-            ));
+            Err(e) => {
+                failed += 1;
+                last_err = Some(format!("{}: {e}", row.repo));
+            }
         }
-        Err(e) => state.set_status(format!("{}: failed — {e}", row.repo)),
     }
+
+    // A completed batch consumes the marks (they describe past intent).
+    state.clear_marks();
+    let verbed = if is_update { "updated" } else { "installed" };
+    state.set_status(match (total, failed, last_err) {
+        (1, 0, _) => format!("{verbed} ({ok} ok)"),
+        (_, 0, _) => format!("{verbed} {ok}/{total}"),
+        (_, _, Some(err)) => format!("{verbed} {ok}/{total}, {failed} failed — {err}"),
+        (_, _, None) => format!("{verbed} {ok}/{total}, {failed} failed"),
+    });
 }
 
 /// Human label for an install outcome (status-line only).

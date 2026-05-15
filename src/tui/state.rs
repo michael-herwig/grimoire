@@ -97,6 +97,9 @@ pub struct TuiState {
     pub offline: bool,
     /// A one-line status / hint shown at the bottom.
     pub status_line: String,
+    /// Marked rows for batch actions, as indices into `rows` (stable
+    /// across filter changes — a mark survives a query edit).
+    pub marked: std::collections::BTreeSet<usize>,
 }
 
 impl Default for TuiState {
@@ -110,6 +113,7 @@ impl Default for TuiState {
             loading: true,
             offline: false,
             status_line: String::new(),
+            marked: std::collections::BTreeSet::new(),
         }
     }
 }
@@ -127,6 +131,58 @@ impl TuiState {
         self.loading = false;
         self.recompute_filter();
         self.selected = 0;
+        // Row identities changed wholesale — stale marks would point at
+        // unrelated rows.
+        self.marked.clear();
+    }
+
+    /// The `rows` index of the current selection, if any.
+    pub fn selected_row_index(&self) -> Option<usize> {
+        self.filtered.get(self.selected).copied()
+    }
+
+    /// Whether the row at `rows` index `i` is marked.
+    pub fn is_row_marked(&self, i: usize) -> bool {
+        self.marked.contains(&i)
+    }
+
+    /// Toggle the mark on the currently-selected row. No-op without a
+    /// selectable row.
+    pub fn toggle_mark_selected(&mut self) {
+        if let Some(i) = self.selected_row_index()
+            && !self.marked.insert(i)
+        {
+            self.marked.remove(&i);
+        }
+    }
+
+    /// Mark every currently-visible (filtered) row; if all visible rows
+    /// are already marked, clear those instead (toggle-all).
+    pub fn toggle_mark_all_filtered(&mut self) {
+        let all_marked = !self.filtered.is_empty() && self.filtered.iter().all(|i| self.marked.contains(i));
+        if all_marked {
+            for i in &self.filtered {
+                self.marked.remove(i);
+            }
+        } else {
+            self.marked.extend(self.filtered.iter().copied());
+        }
+    }
+
+    /// Clear all marks.
+    pub fn clear_marks(&mut self) {
+        self.marked.clear();
+    }
+
+    /// The `rows` indices a batch action should target: the marked set
+    /// when non-empty, otherwise the single selected row. Always returned
+    /// sorted and de-duplicated for deterministic, stable batch order.
+    pub fn action_targets(&self) -> Vec<usize> {
+        if self.marked.is_empty() {
+            self.selected_row_index().into_iter().collect()
+        } else {
+            self.marked.iter().copied().collect()
+        }
     }
 
     /// Set the loading flag.
@@ -238,6 +294,48 @@ mod tests {
             row("r/gamma", "third thing", &["rust", "lint"], ArtifactState::Outdated),
         ]);
         s
+    }
+
+    #[test]
+    fn marks_toggle_and_action_targets() {
+        let mut s = seeded();
+        // No marks ⇒ target is the selected row's index.
+        assert_eq!(s.action_targets(), vec![0]);
+        s.move_selection(1);
+        assert_eq!(s.action_targets(), vec![1]);
+        // Mark beta (sel=1) and gamma (sel=2).
+        s.toggle_mark_selected();
+        s.move_selection(1);
+        s.toggle_mark_selected();
+        assert!(s.is_row_marked(1) && s.is_row_marked(2));
+        assert_eq!(s.action_targets(), vec![1, 2]);
+        // Toggling off removes it.
+        s.toggle_mark_selected();
+        assert!(!s.is_row_marked(2));
+        assert_eq!(s.action_targets(), vec![1]);
+    }
+
+    #[test]
+    fn marks_survive_filter_change_and_clear_on_reload() {
+        let mut s = seeded();
+        s.toggle_mark_selected(); // mark row 0 (alpha)
+        s.apply_query("beta"); // alpha filtered out
+        assert!(s.is_row_marked(0), "mark keyed by row index, survives filter");
+        s.clear_marks();
+        assert!(s.marked.is_empty());
+        s.toggle_mark_selected();
+        s.set_rows(vec![row("r/x", "d", &[], ArtifactState::NotInstalled)]);
+        assert!(s.marked.is_empty(), "reload drops stale marks");
+    }
+
+    #[test]
+    fn toggle_mark_all_filtered_is_toggle() {
+        let mut s = seeded();
+        s.apply_query("rust"); // alpha + gamma visible
+        s.toggle_mark_all_filtered();
+        assert_eq!(s.action_targets(), vec![0, 2]);
+        s.toggle_mark_all_filtered(); // all marked ⇒ clears them
+        assert!(s.marked.is_empty());
     }
 
     #[test]
