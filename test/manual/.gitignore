@@ -1,0 +1,6 @@
+# Ephemeral rig state — recreated by scripts/bootstrap.sh
+.grim-home/
+project/.claude/
+project/.opencode/
+project/.github/
+project/grimoire.lock

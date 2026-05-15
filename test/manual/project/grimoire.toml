@@ -1,0 +1,20 @@
+# A ready-made consumer project for the manual rig.
+#
+#   cd test/manual/project
+#   grim lock && grim install && grim status
+#
+# The skill/rule entries use the FLOATING major tag `:1`, so after the
+# bootstrap script publishes a 1.1.0 of `code-reviewer`, `grim update`
+# rolls the pin forward from 1.0.0 → 1.1.0 (rolling release).
+[options]
+default_registry = "localhost:5000"
+editor = "claude"
+
+[skills]
+hello-world   = "localhost:5000/grimoire/skills/hello-world:1"
+code-reviewer = "localhost:5000/grimoire/skills/code-reviewer:1"
+commit-helper = "localhost:5000/grimoire/skills/commit-helper:1"
+
+[rules]
+rust-style        = "localhost:5000/grimoire/rules/rust-style:1"
+security-baseline = "localhost:5000/grimoire/rules/security-baseline:1"

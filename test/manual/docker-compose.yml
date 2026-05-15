@@ -1,0 +1,14 @@
+# Local OCI registry for the manual rig. The pytest acceptance suite reuses
+# a registry on this same port if one is already up, so running this is
+# also enough for `task test`.
+services:
+  registry:
+    image: registry:2
+    container_name: grim-manual-registry
+    ports:
+      - "5000:5000"
+    volumes:
+      - grim-manual-registry-data:/var/lib/registry
+
+volumes:
+  grim-manual-registry-data:
