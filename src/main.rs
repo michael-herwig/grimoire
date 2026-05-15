@@ -3,18 +3,33 @@
 
 //! `grim` — an OCI-backed package manager for AI skills and rules.
 //!
-//! This is the initial scaffold: a minimal clap CLI shell. Real commands
-//! (add / install / publish / pull) are added by subsequent feature work.
+//! `main` owns clap parsing and the usage-error mapping; everything after
+//! a successful parse is delegated to [`app::run`].
 
-use std::process::ExitCode;
+// Phase 1 lands the domain core, error taxonomy, exit codes, and output
+// layer ahead of the commands that consume them (Phases 2–6). These APIs
+// are exercised by their own unit tests but have no production call site
+// yet; the allow is removed as later phases wire them in.
+#![allow(dead_code)]
+// `unwrap_used`/`expect_used` are library-style discipline for production
+// code; tests are explicitly permitted to unwrap (quality-rust.md). The
+// restriction lints do not auto-skip the test target under
+// `--all-targets`, so scope the allowance to `cfg(test)` here.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
+mod app;
+mod cli;
+mod context;
+mod env;
+mod error;
+mod oci;
 
 use clap::error::ErrorKind;
 use clap::{Parser, Subcommand};
 
-/// `EX_USAGE` from sysexits.h — the conventional exit code for a command-line
-/// usage error, so backend callers can distinguish "you invoked me wrong"
-/// from a runtime failure.
-const EX_USAGE: u8 = 64;
+use crate::cli::exit_code::ExitCode;
+use crate::cli::options::GlobalOptions;
+use crate::error::classify_error;
 
 #[derive(Parser)]
 #[command(
@@ -23,18 +38,21 @@ const EX_USAGE: u8 = 64;
     about = "An OCI-backed package manager for AI skills and rules",
     long_about = None
 )]
-struct Cli {
+pub struct Cli {
+    #[command(flatten)]
+    pub global: GlobalOptions,
+
     #[command(subcommand)]
-    command: Option<Command>,
+    pub command: Option<Command>,
 }
 
 #[derive(Subcommand)]
-enum Command {
+pub enum Command {
     /// Print version information.
     Version,
 }
 
-fn main() -> ExitCode {
+fn main() -> std::process::ExitCode {
     init_tracing();
 
     let cli = match Cli::try_parse() {
@@ -45,24 +63,28 @@ fn main() -> ExitCode {
             // clap's default 2.
             let _ = err.print();
             return match err.kind() {
-                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => ExitCode::SUCCESS,
-                _ => ExitCode::from(EX_USAGE),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => ExitCode::Success.into(),
+                _ => ExitCode::UsageError.into(),
             };
         }
     };
 
-    match cli.command {
-        Some(Command::Version) => {
-            println!("grim {}", env!("CARGO_PKG_VERSION"));
-            ExitCode::SUCCESS
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(err) => {
+            tracing::error!("failed to start async runtime: {err}");
+            return ExitCode::Failure.into();
         }
-        None => {
-            // Bare `grim` prints help and exits successfully so backend
-            // callers get a stable, zero-exit discovery path.
-            use clap::CommandFactory;
-            let _ = Cli::command().print_help();
-            println!();
-            ExitCode::SUCCESS
+    };
+
+    match runtime.block_on(app::run(cli)) {
+        Ok(code) => code.into(),
+        Err(err) => {
+            // Full chain via the alternate format; `tracing` already
+            // categorizes the line, so no "Error:" prefix.
+            tracing::error!("{err:#}");
+            eprintln!("{err:#}");
+            classify_error(&err).into()
         }
     }
 }

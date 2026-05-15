@@ -25,15 +25,27 @@ tracing-subscriber = { version = "0.3.22", features = [
     "registry",
 ] }
 serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1"
 thiserror = "2"
+sha2 = "0.10"
+hex = "0.4"
 
 [dev-dependencies]
-serde_json = "1"
+tempfile = "3"
 
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"
 lto = "thin"
 
+[lints.rust]
+# Single binary crate, but the domain modules are written library-style:
+# panics must never cross a module boundary without caller consent.
+# Tests are exempt (clippy's unwrap_used/expect_used skip #[cfg(test)]).
+unsafe_code = "forbid"
+
 [lints.clippy]
-# Crate-wide clippy overrides go here. Kept explicit so scope is clear.
+# Library-style discipline for the domain modules. Scoped so tests still
+# use .unwrap()/.expect() freely (the restriction lints ignore test cfg).
+unwrap_used = "warn"
+expect_used = "warn"
