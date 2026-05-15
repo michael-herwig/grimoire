@@ -1,0 +1,31 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+tasks:
+  verify:
+    desc: Shell script quality gate (shellcheck + shfmt, skipped if not installed)
+    cmds:
+      - |
+        files=$(git ls-files '*.sh' '*.bash' 2>/dev/null || find . -name '*.sh' -not -path './target/*')
+        [ -z "$files" ] && { echo "no shell scripts"; exit 0; }
+        if command -v shellcheck >/dev/null 2>&1; then
+          echo "$files" | xargs shellcheck
+        else
+          echo "shellcheck not installed — skipping (install: https://www.shellcheck.net)"
+        fi
+        if command -v shfmt >/dev/null 2>&1; then
+          echo "$files" | xargs shfmt -d -i 4 -ci
+        else
+          echo "shfmt not installed — skipping (install: https://github.com/mvdan/sh)"
+        fi
+
+  format:
+    desc: Format shell scripts with shfmt
+    cmds:
+      - |
+        if command -v shfmt >/dev/null 2>&1; then
+          git ls-files '*.sh' '*.bash' | xargs shfmt -w -i 4 -ci
+        else
+          echo "shfmt not installed — skipping"
+        fi

@@ -1,0 +1,132 @@
+---
+paths:
+  - test/**
+---
+
+# Test Subsystem
+
+Pytest acceptance tests with Docker Compose registry at `test/`.
+
+## Design Rationale
+
+Pytest (not Rust integration tests) because acceptance tests exercise real compiled binary against real OCI registry — catch issues mocked unit tests miss. Session-scoped registry (started once in `pytest_sessionstart`) enables fast parallel runs with pytest-xdist. UUID-prefixed repo names provide isolation on shared registry, no per-test cleanup. See `arch-principles.md` for full pattern catalog.
+
+## Structure
+
+| Path | Purpose |
+|------|---------|
+| `test/tests/conftest.py` | Function-scoped fixtures (grimoire, published_package, etc.) |
+| `test/conftest.py` | Session-scoped fixtures (registry, grim_binary) + `pytest_sessionstart` |
+| `test/src/runner.py` | `GrimRunner`: subprocess wrapper with test isolation |
+| `test/src/assertions.py` | Cross-platform assertion helpers |
+| `test/src/helpers.py` | `make_package()`: build + push test packages |
+| `test/src/registry.py` | OCI registry helpers (fetch manifest, extract platforms) |
+| `test/taskfile.yml` | Task runner (default, quick, parallel) |
+
+## Key Fixtures
+
+| Fixture | Scope | Purpose |
+|---------|-------|---------|
+| `registry` | session | localhost:5000 registry:2 (auto-started via docker-compose) |
+| `grim_binary` | session | Path to compiled `grimoire` binary |
+| `grim_home` | function | Isolated temp dir for `GRIM_HOME` |
+| `grimoire` | function | `GrimRunner` instance with test isolation |
+| `unique_repo` | function | UUID-prefixed repo name (e.g., `t_a1b2c3d4_test`) |
+| `published_package` | function | Pre-built + pre-pushed test package (v1.0.0) → `PackageInfo` |
+| `published_two_versions` | function | Two versions (v1.0.0, v2.0.0) → `tuple[PackageInfo, PackageInfo]` |
+
+## GrimRunner API
+
+```python
+runner = GrimRunner(binary, grim_home, registry)
+runner.run(*args, format="json", check=True)  # Run command, assert success
+runner.json(*args)                             # Run + parse JSON stdout
+runner.plain(*args)                            # Run without --format flag
+```
+
+Env: `GRIM_HOME`, `GRIM_DEFAULT_REGISTRY`, `GRIM_INSECURE_REGISTRIES` set per instance.
+
+## PackageInfo
+
+Returned by `published_package` / `published_two_versions`:
+
+| Field | Example |
+|-------|---------|
+| `repo` | `"cmake"` |
+| `tag` | `"1.0.0"` |
+| `short` | `"cmake:1.0.0"` |
+| `fq` | `"localhost:5000/cmake:1.0.0"` |
+| `marker` | UUID-based unique string |
+
+## make_package()
+
+Creates, bundles, pushes, indexes test package:
+
+```python
+pkg = make_package(grimoire, repo, tag, tmp_path,
+    bins=["hello"],          # Binary names (default)
+    env=[...],               # Custom metadata env entries
+    cascade=True,            # Auto-tag latest/major/minor/patch
+    size_mb=0,               # Random padding for progress bar tests
+)
+```
+
+**Default env visibility in tests**: `make_package()` defaults env entries to `"visibility": "public"` (see `test/src/helpers.py` lines 160–165). This matches the convention used by in-tree mirrors and acceptance tests that verify env resolution. Tests asserting on env output in `consumer` mode rely on this default. When writing tests for `private` or `interface` entries, pass explicit `visibility` in the `env` list.
+
+## Assertion Helpers
+
+- `assert_path_exists(path)` — exists (file, dir, or symlink)
+- `assert_dir_exists(path)` — is directory
+- `assert_symlink_exists(path)` — is symlink or Windows junction
+- `assert_not_exists(path)` — not exist and not symlink
+
+**Always use `assert_symlink_exists()` instead of `path.is_symlink()`** for Windows junction compat.
+
+## Test Isolation
+
+- **Per-test GRIM_HOME**: each test gets isolated `tmp_path` as `GRIM_HOME`
+- **UUID repo names**: `unique_repo` fixture prevents collisions in shared registry
+- **Shared registry**: session-scoped; all tests push/pull same instance
+- **Minimal env**: GrimRunner strips ambient env; only PATH, HOME, Grimoire vars
+
+## Running Tests
+
+```bash
+task test              # Build + registry + all tests
+task test:quick        # Skip rebuild
+task test:parallel     # pytest-xdist (-n auto)
+
+# Single test:
+cd test && uv run pytest tests/test_install.py::test_name -v --no-build
+```
+
+## Adding a New Test
+
+1. Create function in appropriate `test/tests/test_*.py` (or new file)
+2. Use `grimoire: GrimRunner` and `published_package: PackageInfo` fixtures
+3. Call `grimoire.json("command", pkg.short)` and assert results
+4. Custom packages: use `make_package()` with `unique_repo` and `tmp_path`
+5. Run: `cd test && uv run pytest tests/test_file.py::test_name -v --no-build`
+
+For shell-friendly assertions (exec output, file existence, exit-code branches), prefer `test/scenarios/` — see Platform Split below.
+
+## Test Files
+
+19 test files cover: install, find, select, uninstall, purge, clean, offline, env, exec, package lifecycle, cascade, package pull, describe, package info, index, color, mirror, CI export, shell profile.
+
+## Platform Split
+
+Two complementary harnesses with different platform reach:
+
+| Harness | Platforms | Use for |
+|---------|-----------|---------|
+| Pytest (`test/tests/test_*.py`) | Linux + macOS + Windows (per `.github/workflows/verify-deep.yml`) | JSON-output assertions, structured fixtures, Windows junction / `.exe` resolution, anything where Python expressivity beats shell |
+| Shell scenarios (`test/scenarios/*.sh`) | Linux + macOS only (Windows skipped via `pytestmark` in `test_scenarios_smoke.py`) | Exec output, marker grep, file/dir existence, exit-code branches — bash is the natural language |
+
+When extending shell scenarios, reuse the harness in `test/src/scenarios/__init__.py` (`Scenario` base class, `# scenario: <Name>` header, registered subclasses for pre-publish state). Do not duplicate setup logic — extend the existing `Scenario` API.
+
+A behaviour assertion belongs in **one** harness, not both. If a pytest case can be expressed verbatim as a shell scenario, prefer the scenario; if it needs structured output parsing or Windows-specific paths, keep it in pytest.
+
+## Quality Gate
+
+During review-fix loops, run `task test:parallel` — not full `task verify`. Acceptance tests only; no Rust rebuild needed with `--no-build`.

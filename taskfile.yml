@@ -1,0 +1,91 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+vars:
+  REPORTS_ROOT: '{{.ROOT_DIR}}/target/reports'
+
+includes:
+  rust: ./taskfiles/rust.taskfile.yml
+  shell: ./taskfiles/shell.taskfile.yml
+  coverage: ./taskfiles/coverage.taskfile.yml
+  release: ./taskfiles/release.taskfile.yml
+  claude:
+    taskfile: ./.claude/taskfile.yml
+    dir: ./.claude
+  test:
+    taskfile: ./test/taskfile.yml
+    dir: ./test
+
+tasks:
+  check:
+    cmd: cargo check
+
+  run:
+    desc: Build and run grim (pass args after --)
+    cmd: cargo run --release -- {{.CLI_ARGS}}
+
+  push:
+    vars:
+      DATE:
+        sh: date -u +"%Y-%m-%dT%H:%M:%SZ"
+    cmds:
+      - git add .
+      - git commit -m "{{ .DATE }}"
+      - git push {{ .CLI_ARGS }}
+
+  checkpoint:
+    cmds:
+      - if: '! [[ $(git show -s --format=%s HEAD) == "Checkpoint" ]]'
+        cmd: git commit --allow-empty -m "Checkpoint"
+      - cmd: git add .
+      - cmd: git commit --amend --no-edit --allow-empty
+
+  default:
+    deps:
+      - task: rust:format:check
+      - task: rust:clippy:check
+      - task: check
+
+  # Shared internal helper (called by subsystem taskfiles via :prefix).
+  # Convention: dot-prefix (.name) for internal tasks, like GitLab CI hidden jobs.
+  .ensure-cargo-tool:
+    internal: true
+    status:
+      - '{{.TOOL}} --version'
+    cmds:
+      - cargo install --locked {{.CRATE | default .TOOL}}
+
+  # Two-phase verify: parallel lint, then sequential build+test.
+  verify:
+    desc: Full quality gate
+    summary: |
+      Phase 1 (parallel): format, clippy, shell lint, claude verify
+      Phase 2 (sequential): license audit, build, unit tests, acceptance tests
+      Use `task --force verify` to bypass caching.
+    cmds:
+      - task: .verify:lint
+      - task: .verify:build-test
+      - task: .verify:mark
+
+  .verify:mark:
+    internal: true
+    desc: Mark commit-verified state for the pre-commit hook.
+    cmds:
+      - mkdir -p {{.ROOT_DIR}}/.claude/hooks/.state
+      - date +%s > {{.ROOT_DIR}}/.claude/hooks/.state/commit-verified
+
+  .verify:lint:
+    internal: true
+    deps:
+      - task: rust:format:check
+      - task: rust:clippy:check
+      - task: shell:verify
+      - task: claude:verify
+
+  .verify:build-test:
+    internal: true
+    cmds:
+      - task: rust:build
+      - task: rust:test:unit
+      - task: test:parallel

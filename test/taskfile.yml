@@ -1,0 +1,50 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+vars:
+  BIN_DIR: "{{.ROOT_DIR}}/test/bin"
+  GRIM_BINARY: "{{.BIN_DIR}}/grim{{exeExt}}"
+  SKIP_BUILD: '{{.SKIP_BUILD | default .CI | default "false"}}'
+
+tasks:
+  build:
+    internal: true
+    cmds:
+      - cargo build --release --locked
+      - mkdir -p {{.BIN_DIR}}
+      - cp {{.ROOT_DIR}}/target/release/grim{{exeExt}} {{.GRIM_BINARY}}
+    status:
+      - '{{eq .SKIP_BUILD "true"}}'
+
+  default:
+    desc: Run acceptance tests (builds the grim binary automatically)
+    cmds:
+      - task: build
+        vars:
+          SKIP_BUILD: "{{.SKIP_BUILD}}"
+      - uv run pytest {{.CLI_ARGS | default "-v"}}
+    env:
+      GRIM_COMMAND: "{{.GRIM_BINARY}}"
+
+  quick:
+    desc: Run acceptance tests in parallel without rebuilding the binary
+    cmds:
+      - task: default
+        vars:
+          SKIP_BUILD: "true"
+          CLI_ARGS: '-n auto {{.CLI_ARGS | default "-v"}}'
+
+  parallel:
+    desc: Run acceptance tests in parallel
+    sources:
+      - tests/**/*.py
+      - src/**/*.py
+      - conftest.py
+      - tests/conftest.py
+      - pyproject.toml
+      - '{{.ROOT_DIR}}/target/release/grim'
+    cmds:
+      - task: default
+        vars:
+          CLI_ARGS: '-n auto {{.CLI_ARGS | default "-v"}}'
