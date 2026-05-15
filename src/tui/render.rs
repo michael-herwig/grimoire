@@ -150,10 +150,10 @@ pub fn frame(state: &TuiState) -> RenderModel {
     } else if state.loading {
         "loading catalog…".to_string()
     } else if state.marked.is_empty() {
-        "↑/↓ move  space mark  / search  i install  u update  r refresh  q quit".to_string()
+        "↑/↓ move  space mark  / search  i install  u update  d delete  r refresh  q quit".to_string()
     } else {
         format!(
-            "{} marked  i install  u update  a all  c clear  q quit",
+            "{} marked  i install  u update  d delete  a all  c clear  q quit",
             state.marked.len()
         )
     };

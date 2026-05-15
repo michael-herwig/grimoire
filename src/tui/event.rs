@@ -33,6 +33,8 @@ pub enum TuiInput {
     Install,
     /// Update the selected / marked artifact(s).
     Update,
+    /// Uninstall (delete) the selected / marked artifact(s).
+    Delete,
     /// Toggle the mark on the selected row.
     Mark,
     /// Toggle marks on all visible rows.
@@ -45,15 +47,28 @@ pub enum TuiInput {
     Quit,
 }
 
+/// Which batch operation to run over the target rows.
+///
+/// Closed internal enum — matches stay total, no `#[non_exhaustive]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchOp {
+    /// Install (honours the integrity gate).
+    Install,
+    /// Update (force re-materialize — rolling-release contract).
+    Update,
+    /// Uninstall: delete files + drop the install record/lock pin.
+    Uninstall,
+}
+
 /// What the app must do after a transition. `None` = state-only change.
 ///
 /// Closed internal enum — matches stay total, no `#[non_exhaustive]`.
 /// Not `Copy` (the batch variant carries a `Vec`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TuiAction {
-    /// Install (`update=false`) or update (`update=true`) the given
-    /// `rows` indices (the marked set, else the single selection).
-    Batch { update: bool, rows: Vec<usize> },
+    /// Run `op` over the given `rows` indices (the marked set, else the
+    /// single selection).
+    Batch { op: BatchOp, rows: Vec<usize> },
     /// Rebuild the catalog from the registry.
     Refresh,
     /// Exit the TUI cleanly.
@@ -108,6 +123,7 @@ fn handle_search(state: &mut TuiState, input: TuiInput) -> TuiAction {
         // characters would have been captured above. Ignore defensively.
         TuiInput::Install
         | TuiInput::Update
+        | TuiInput::Delete
         | TuiInput::Mark
         | TuiInput::MarkAll
         | TuiInput::ClearMarks
@@ -117,12 +133,12 @@ fn handle_search(state: &mut TuiState, input: TuiInput) -> TuiAction {
 
 /// A batch action over the current targets (marked set, else selection).
 /// `None` when there is nothing to act on.
-fn batch(state: &TuiState, update: bool) -> TuiAction {
+fn batch(state: &TuiState, op: BatchOp) -> TuiAction {
     let rows = state.action_targets();
     if rows.is_empty() {
         TuiAction::None
     } else {
-        TuiAction::Batch { update, rows }
+        TuiAction::Batch { op, rows }
     }
 }
 
@@ -154,8 +170,9 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
             TuiAction::None
         }
         TuiInput::Char('q') | TuiInput::Quit => TuiAction::Quit,
-        TuiInput::Char('i') | TuiInput::Install => batch(state, false),
-        TuiInput::Char('u') | TuiInput::Update => batch(state, true),
+        TuiInput::Char('i') | TuiInput::Install => batch(state, BatchOp::Install),
+        TuiInput::Char('u') | TuiInput::Update => batch(state, BatchOp::Update),
+        TuiInput::Char('d') | TuiInput::Delete => batch(state, BatchOp::Uninstall),
         TuiInput::Char(' ') | TuiInput::Mark => {
             state.toggle_mark_selected();
             TuiAction::None
@@ -236,21 +253,21 @@ mod tests {
         assert_eq!(
             handle(&mut s, TuiInput::Char('i')),
             TuiAction::Batch {
-                update: false,
+                op: BatchOp::Install,
                 rows: vec![1]
             }
         );
         assert_eq!(
             handle(&mut s, TuiInput::Install),
             TuiAction::Batch {
-                update: false,
+                op: BatchOp::Install,
                 rows: vec![1]
             }
         );
         assert_eq!(
             handle(&mut s, TuiInput::Update),
             TuiAction::Batch {
-                update: true,
+                op: BatchOp::Update,
                 rows: vec![1]
             }
         );
@@ -267,7 +284,7 @@ mod tests {
         assert_eq!(
             handle(&mut s, TuiInput::Install),
             TuiAction::Batch {
-                update: false,
+                op: BatchOp::Install,
                 rows: vec![0, 2]
             }
         );
@@ -276,7 +293,7 @@ mod tests {
         assert_eq!(
             handle(&mut s, TuiInput::Update),
             TuiAction::Batch {
-                update: true,
+                op: BatchOp::Update,
                 rows: vec![2]
             }
         );
@@ -289,7 +306,7 @@ mod tests {
         assert_eq!(
             handle(&mut s, TuiInput::Install),
             TuiAction::Batch {
-                update: false,
+                op: BatchOp::Install,
                 rows: vec![0, 1, 2]
             }
         );
@@ -298,11 +315,36 @@ mod tests {
     }
 
     #[test]
+    fn delete_emits_uninstall_batch_and_is_literal_in_search() {
+        let mut s = seeded();
+        s.move_selection(2);
+        assert_eq!(
+            handle(&mut s, TuiInput::Char('d')),
+            TuiAction::Batch {
+                op: BatchOp::Uninstall,
+                rows: vec![2]
+            }
+        );
+        assert_eq!(
+            handle(&mut s, TuiInput::Delete),
+            TuiAction::Batch {
+                op: BatchOp::Uninstall,
+                rows: vec![2]
+            }
+        );
+        // 'd' must be a literal query char while typing, never uninstall.
+        handle(&mut s, TuiInput::Char('/'));
+        assert_eq!(handle(&mut s, TuiInput::Char('d')), TuiAction::None);
+        assert_eq!(s.query, "d");
+    }
+
+    #[test]
     fn install_without_selection_is_inert() {
         let mut s = TuiState::new();
         s.set_rows(vec![]);
         assert_eq!(handle(&mut s, TuiInput::Install), TuiAction::None);
         assert_eq!(handle(&mut s, TuiInput::Update), TuiAction::None);
+        assert_eq!(handle(&mut s, TuiInput::Delete), TuiAction::None);
     }
 
     #[test]

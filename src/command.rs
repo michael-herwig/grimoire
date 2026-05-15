@@ -20,6 +20,7 @@ pub mod scope_resolution;
 pub mod search;
 pub mod status;
 pub mod tui;
+pub mod uninstall;
 pub mod update;
 
 #[allow(unused_imports)]

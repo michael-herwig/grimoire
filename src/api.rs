@@ -19,6 +19,7 @@ pub mod release_report;
 pub mod remove_report;
 pub mod search_report;
 pub mod status_report;
+pub mod uninstall_report;
 pub mod update_report;
 
 #[allow(unused_imports)]

@@ -181,6 +181,12 @@ impl InstallState {
         self.records.insert((record.kind, record.name.clone()), record);
     }
 
+    /// Drop the record for `(kind, name)`, returning it if present.
+    /// Idempotent — removing an absent record is a no-op (`None`).
+    pub fn remove(&mut self, kind: ArtifactKind, name: &str) -> Option<InstallRecord> {
+        self.records.remove(&(kind, name.to_string()))
+    }
+
     /// Atomically persist the state to its backing file.
     ///
     /// # Errors
@@ -236,6 +242,20 @@ mod tests {
         assert_eq!(got.name, "code-review");
         assert_eq!(got.kind, ArtifactKind::Skill);
         assert!(reloaded.get(ArtifactKind::Rule, "rust-style").is_some());
+    }
+
+    #[test]
+    fn remove_returns_record_then_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut st = InstallState::load(&dir.path().join("g.json")).unwrap();
+        st.record(record("code-review", ArtifactKind::Skill));
+        let dropped = st.remove(ArtifactKind::Skill, "code-review");
+        assert_eq!(dropped.expect("present").name, "code-review");
+        assert!(st.get(ArtifactKind::Skill, "code-review").is_none());
+        assert!(
+            st.remove(ArtifactKind::Skill, "code-review").is_none(),
+            "removing again is a no-op"
+        );
     }
 
     #[test]

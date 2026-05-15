@@ -38,7 +38,7 @@ use crate::oci::{ArtifactKind, Identifier};
 use crate::resolve::resolve_options::ResolveOptions;
 use crate::resolve::resolver::resolve_lock;
 
-use super::event::{TuiAction, TuiInput, handle};
+use super::event::{BatchOp, TuiAction, TuiInput, handle};
 use super::render::{draw, frame};
 use super::state::{ArtifactState, TuiRow, TuiState};
 
@@ -132,8 +132,8 @@ pub async fn run(ctx: TuiContext) -> anyhow::Result<()> {
                 terminal.draw(|f| draw(f, &frame(&state)))?;
                 reload_into(&ctx, &mut state, true).await;
             }
-            TuiAction::Batch { update, rows } => {
-                run_batch(&ctx, &mut state, &rows, update).await;
+            TuiAction::Batch { op, rows } => {
+                run_batch(&ctx, &mut state, &rows, op).await;
             }
         }
         terminal.draw(|f| draw(f, &frame(&state)))?;
@@ -258,17 +258,22 @@ fn load_scope_for_badges(ctx: &TuiContext) -> (Option<GrimoireLock>, InstallStat
     (lock, state)
 }
 
-/// Run install/update over a batch of `rows` indices (the marked set, or
-/// the single selection), reusing the **same** resolve → lock →
-/// materialize path the `install`/`update` commands use (no forked
-/// logic). Each row's state is refreshed from the updated record; the
-/// status line aggregates the outcome (`n ok, m failed`).
-async fn run_batch(ctx: &TuiContext, state: &mut TuiState, rows: &[usize], is_update: bool) {
-    if ctx.offline {
+/// Run a batch [`BatchOp`] over `rows` indices (the marked set, or the
+/// single selection). Install/update reuse the **same** resolve → lock →
+/// materialize path the commands use; uninstall reuses the shared
+/// [`crate::install::uninstall`] seam — no forked logic either way. Each
+/// row's state is refreshed; the status line aggregates `n ok, m failed`.
+async fn run_batch(ctx: &TuiContext, state: &mut TuiState, rows: &[usize], op: BatchOp) {
+    // Install/update need the network; uninstall is purely local.
+    if ctx.offline && op != BatchOp::Uninstall {
         state.set_status("offline — cannot install/update");
         return;
     }
-    let verb = if is_update { "update" } else { "install" };
+    let (verb, verbed) = match op {
+        BatchOp::Install => ("install", "installed"),
+        BatchOp::Update => ("update", "updated"),
+        BatchOp::Uninstall => ("uninstall", "uninstalled"),
+    };
     let total = rows.len();
     let (mut ok, mut failed) = (0usize, 0usize);
     let mut last_err: Option<String> = None;
@@ -278,8 +283,13 @@ async fn run_batch(ctx: &TuiContext, state: &mut TuiState, rows: &[usize], is_up
             continue;
         };
         state.set_status(format!("{verb} {}/{total}: {}…", n + 1, row.repo));
-        match perform(ctx, &row, is_update).await {
-            Ok(_) => {
+        let outcome = match op {
+            BatchOp::Install => perform(ctx, &row, false).await.map(|_| ()),
+            BatchOp::Update => perform(ctx, &row, true).await.map(|_| ()),
+            BatchOp::Uninstall => perform_uninstall(ctx, &row),
+        };
+        match outcome {
+            Ok(()) => {
                 ok += 1;
                 let (lock, install_state) = load_scope_for_badges(ctx);
                 if let Some((registry, repository)) = split_repo(&row.repo)
@@ -297,13 +307,49 @@ async fn run_batch(ctx: &TuiContext, state: &mut TuiState, rows: &[usize], is_up
 
     // A completed batch consumes the marks (they describe past intent).
     state.clear_marks();
-    let verbed = if is_update { "updated" } else { "installed" };
     state.set_status(match (total, failed, last_err) {
         (1, 0, _) => format!("{verbed} ({ok} ok)"),
         (_, 0, _) => format!("{verbed} {ok}/{total}"),
         (_, _, Some(err)) => format!("{verbed} {ok}/{total}, {failed} failed — {err}"),
         (_, _, None) => format!("{verbed} {ok}/{total}, {failed} failed"),
     });
+}
+
+/// Uninstall one catalog row through the shared
+/// [`crate::install::uninstall`] seam: delete the materialized files,
+/// drop the install-state record, and drop the lock pin (the TUI does
+/// not edit `grimoire.toml` — it never wrote a config binding). Mirrors
+/// the file/state half of `command::uninstall` without forking it.
+fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
+    let (_registry, repository) =
+        split_repo(&row.repo).ok_or_else(|| anyhow::anyhow!("malformed catalog repo: {}", row.repo))?;
+    let kind = match row.kind.as_str() {
+        "rule" => ArtifactKind::Rule,
+        _ => ArtifactKind::Skill,
+    };
+    let name = repository.rsplit('/').next().unwrap_or(&repository).to_string();
+
+    let mut install_state =
+        InstallState::load(&ctx.state_path).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
+    let result = crate::install::uninstall::uninstall(&mut install_state, kind, &name)
+        .map_err(|e| anyhow::anyhow!("uninstall failed: {e}"))?;
+    if result.outcome == crate::install::uninstall::UninstallOutcome::Removed {
+        install_state
+            .save()
+            .map_err(|e| anyhow::anyhow!("install-state save failed: {e}"))?;
+    }
+
+    // Drop the lock pin so the badge no longer derives "installed".
+    if let Ok(previous) = lock_io::load(&ctx.lock_path) {
+        let mut lock = previous.clone();
+        match kind {
+            ArtifactKind::Skill => lock.skills.retain(|a| a.name != name),
+            ArtifactKind::Rule => lock.rules.retain(|a| a.name != name),
+        }
+        lock_io::save(&ctx.lock_path, &lock, Some(&previous))
+            .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
+    }
+    Ok(())
 }
 
 /// Human label for an install outcome (status-line only).

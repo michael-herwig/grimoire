@@ -85,6 +85,11 @@ pub async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             render(&r, format)?;
             c
         }
+        Command::Uninstall(args) => {
+            let (r, c) = crate::command::uninstall::run(&ctx, &args).await?;
+            render(&r, format)?;
+            c
+        }
         Command::Search(args) => {
             let (r, c) = crate::command::search::run(&ctx, &args).await?;
             render(&r, format)?;

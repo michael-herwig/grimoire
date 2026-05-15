@@ -49,6 +49,7 @@ use crate::command::remove::RemoveArgs;
 use crate::command::search::SearchArgs;
 use crate::command::status::StatusArgs;
 use crate::command::tui::TuiArgs;
+use crate::command::uninstall::UninstallArgs;
 use crate::command::update::UpdateArgs;
 use crate::error::classify_error;
 
@@ -87,6 +88,9 @@ pub enum Command {
     Add(AddArgs),
     /// Undeclare a skill/rule from the config and lock.
     Remove(RemoveArgs),
+    /// Fully remove an installed skill/rule: delete files, drop the
+    /// install record, and undeclare it from the config and lock.
+    Uninstall(UninstallArgs),
     /// Search the registry catalog for skills and rules.
     Search(SearchArgs),
     /// Browse the registry catalog in an interactive TUI.

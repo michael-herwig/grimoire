@@ -3,9 +3,9 @@
 ## Status
 
 - **Plan:** plan_tui_overhaul
-- **Active phase:** 3 — Uninstall seam + delete
-- **Step:** /builder → phases 1–2 landed
-- **Last update:** 2026-05-16 (after b7a3086 + Phase 2)
+- **Active phase:** 4 — Runtime scope switch
+- **Step:** /builder → phases 1–3 landed
+- **Last update:** 2026-05-16 (after Phase 3)
 
 ---
 
@@ -188,3 +188,4 @@ visible legend/affordance, no new mechanism.
 | 2026-05-16 | Plan created; seams mapped; delete=full-uninstall, icons=plain-unicode decided |
 | 2026-05-16 | Phase 1 landed (b7a3086): ArtifactState + color/icon polish |
 | 2026-05-16 | Phase 2 done: multi-select marks + batch install/update; `.claude/rules` deletion incident (restored from git, cause unconfirmed — see dev/vi stale-path note) |
+| 2026-05-16 | Phase 3 done: uninstall seam + `grim uninstall` command + acceptance tests + TUI delete (BatchOp) |

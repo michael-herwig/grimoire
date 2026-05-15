@@ -18,6 +18,7 @@ pub mod installer;
 pub mod materializer;
 pub mod status_badge;
 pub mod target;
+pub mod uninstall;
 
 #[allow(unused_imports)]
 pub use content_hash::content_hash;
@@ -35,3 +36,5 @@ pub use materializer::{ArtifactMaterializer, DefaultMaterializer};
 pub use status_badge::{StatusBadge, derive_badge};
 #[allow(unused_imports)]
 pub use target::InstallTarget;
+#[allow(unused_imports)]
+pub use uninstall::{UninstallOutcome, UninstallResult, uninstall};

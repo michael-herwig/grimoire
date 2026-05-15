@@ -21,7 +21,8 @@ column formats.
 | `grim install <ref>` | Fetch and install an AI-config artifact (skill/rule set) |
 | `grim list` | List installed artifacts |
 | `grim update [<ref>]` | Pull newer versions |
-| `grim remove <ref>` | Uninstall an artifact |
+| `grim remove <kind> <name>` | Undeclare an artifact (config + lock only; files left on disk) |
+| `grim uninstall <kind> <name>` | Full inverse of install: delete files, drop the install record, undeclare (config + lock). Shared seam reused by the TUI delete action |
 | `grim publish <path> <ref>` | Push an artifact to a registry |
 | `grim version` | Print the compiled version |
 
