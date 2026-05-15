@@ -25,6 +25,7 @@ mod env;
 mod error;
 mod lock;
 mod oci;
+mod resolve;
 mod store;
 
 use clap::error::ErrorKind;

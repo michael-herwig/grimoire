@@ -11,9 +11,11 @@
 use crate::cli::exit_code::ExitCode;
 use crate::config::config_error::{ConfigError, ConfigErrorKind};
 use crate::lock::lock_error::{LockError, LockErrorKind};
+use crate::oci::access::error::{AccessError, AccessErrorKind};
 use crate::oci::digest::error::DigestError;
 use crate::oci::identifier::error::IdentifierError;
 use crate::oci::pinned_identifier::PinnedIdentifierError;
+use crate::resolve::resolve_error::{ResolveError, ResolveErrorKind};
 
 /// Top-level Grimoire error. Subsystem errors compose in via `#[from]`.
 ///
@@ -36,6 +38,12 @@ pub enum Error {
 
     #[error(transparent)]
     Lock(#[from] LockError),
+
+    #[error(transparent)]
+    Access(#[from] AccessError),
+
+    #[error(transparent)]
+    Resolve(#[from] ResolveError),
 }
 
 /// Maps an error chain to a process exit code.
@@ -55,6 +63,8 @@ pub fn classify_error(err: &anyhow::Error) -> ExitCode {
                 Error::PinnedIdentifier(_) => ExitCode::DataError,
                 Error::Config(ce) => classify_config(ce),
                 Error::Lock(le) => classify_lock(le),
+                Error::Access(ae) => classify_access(ae),
+                Error::Resolve(re) => classify_resolve(re),
             };
         }
     }
@@ -86,6 +96,28 @@ fn classify_lock(err: &LockError) -> ExitCode {
         | LockErrorKind::UnsupportedVersion { .. } => ExitCode::ConfigError,
         LockErrorKind::StaleLockOnPartial { .. } => ExitCode::DataError,
         LockErrorKind::Io(io) => classify_io(io),
+    }
+}
+
+/// Map an OCI-access-tier error to an exit code.
+fn classify_access(err: &AccessError) -> ExitCode {
+    match &err.kind {
+        AccessErrorKind::Authentication(_) => ExitCode::AuthError,
+        AccessErrorKind::Registry(_) => ExitCode::Unavailable,
+        AccessErrorKind::OfflineMiss => ExitCode::OfflineBlocked,
+        AccessErrorKind::ManifestNotFound | AccessErrorKind::BlobNotFound => ExitCode::NotFound,
+        AccessErrorKind::DigestMismatch { .. } | AccessErrorKind::InvalidManifest(_) => ExitCode::DataError,
+        AccessErrorKind::Io { source, .. } => classify_io(source),
+    }
+}
+
+/// Map a resolution-tier error to an exit code.
+fn classify_resolve(err: &ResolveError) -> ExitCode {
+    match &err.kind {
+        ResolveErrorKind::TagNotFound => ExitCode::NotFound,
+        ResolveErrorKind::AuthFailure(_) => ExitCode::AuthError,
+        ResolveErrorKind::RegistryUnreachable(_) | ResolveErrorKind::ResolveTimeout => ExitCode::Unavailable,
+        ResolveErrorKind::StaleLock { .. } => ExitCode::DataError,
     }
 }
 
