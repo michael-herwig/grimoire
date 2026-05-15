@@ -4,8 +4,8 @@
 
 - **Plan:** plan_tui_overhaul
 - **Active phase:** 5 — Review & documentation
-- **Step:** /builder → phases 1–4 landed
-- **Last update:** 2026-05-16 (after Phase 4)
+- **Step:** awaiting /swarm-review
+- **Last update:** 2026-05-16 (after Phase 5 docs)
 
 ---
 
@@ -190,3 +190,4 @@ visible legend/affordance, no new mechanism.
 | 2026-05-16 | Phase 2 done: multi-select marks + batch install/update; `.claude/rules` deletion incident (restored from git, cause unconfirmed — see dev/vi stale-path note) |
 | 2026-05-16 | Phase 3 done: uninstall seam + `grim uninstall` command + acceptance tests + TUI delete (BatchOp) |
 | 2026-05-16 | Phase 4 done: runtime Global⇄Project scope toggle (`g`), in-place scope swap + state recompute, scope in title |
+| 2026-05-16 | Phase 5: manual-rig README TUI scenario documented. Impl complete (all 5 phases); formal /swarm-review left to the user (billed/user-triggered). `task verify` green throughout. |

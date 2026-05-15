@@ -58,6 +58,29 @@ grim search --format json
 grim tui                          # interactive (requires a TTY)
 ```
 
+### 1a. TUI: multi-select, batch, scope, delete
+
+`grim tui` (needs a TTY). Each row shows a colored state glyph:
+`✓ installed` (green), `↑ outdated` (yellow), `✱ modified` (red),
+`⚠ integrity-missing` (magenta — recorded but files gone/edited away),
+`· not-installed` (grey).
+
+| Key | Action |
+|-----|--------|
+| `↑`/`↓` | move selection |
+| `space` | mark/unmark the selected row |
+| `a` / `c` | mark all visible / clear marks |
+| `i` / `u` / `d` | install / update / **uninstall** the marked set (or the selection if nothing marked) |
+| `g` | toggle scope (project ⇄ global) — title shows the active scope |
+| `/` | search; `enter` browse detail; `r` refresh catalog; `q` quit |
+
+Try: mark a couple with `space`, press `i` (batch install), watch the
+state glyphs flip to green; `d` to batch-uninstall; `g` to see the same
+catalog against the global scope's state. Tamper a file
+(`echo x >> test/manual/project/.claude/skills/hello-world/SKILL.md`)
+then refresh — it shows `✱ modified`; delete the dir and it shows
+`⚠ integrity-missing`.
+
 ### 2. Lock & install into an editor
 
 ```sh
