@@ -1,9 +1,13 @@
 # Grimoire Manual Test Rig
 
 A hands-on harness for exercising `grim` against a real local OCI registry
-with a committed sample catalog of skills and rules. This is **separate**
-from the pytest acceptance suite (`test/tests/`) — it exists so you can
-drive the tool by hand and see how it behaves.
+with a committed sample catalog of skills and rules. This is **fully
+separate** from the pytest acceptance suite (`test/tests/`): it runs its
+own `registry:2` on **`localhost:5050`** (own container + volume), while
+the suite uses `localhost:5000`. They are isolated on purpose — sharing
+one registry let the suite's hundreds of throwaway `grim-test/<uuid>`
+repos bleed into `grim search` / `grim tui` here as junk. It exists so
+you can drive the tool by hand and see how it behaves.
 
 Pattern mirrors the OCX manual rig: committed source-of-truth catalog,
 idempotent `bootstrap.sh`, an isolated `GRIM_HOME`, a ready-made consumer
@@ -20,7 +24,7 @@ project, and a `teardown.sh`.
 | `scripts/bootstrap.sh` | Build `grim`, start registry, publish the catalog at 1.0.0 |
 | `scripts/release-update.sh` | Publish `code-reviewer` 1.1.0 (rolling-release demo) |
 | `scripts/teardown.sh` | Wipe rig state (`--registry` also stops the registry) |
-| `docker-compose.yml` | `registry:2` on `localhost:5000` |
+| `docker-compose.yml` | `registry:2` on `localhost:5050` |
 | `.grim-home/` | Isolated `GRIM_HOME` (gitignored, ephemeral) |
 
 ## Quick start
@@ -34,11 +38,11 @@ Published catalog:
 
 | Kind | Repo | Versions |
 |------|------|----------|
-| skill | `localhost:5000/grimoire/skills/hello-world` | 1.0.0 |
-| skill | `localhost:5000/grimoire/skills/code-reviewer` | 1.0.0 (1.1.0 via `release-update.sh`) |
-| skill | `localhost:5000/grimoire/skills/commit-helper` | 1.0.0 |
-| rule | `localhost:5000/grimoire/rules/rust-style` | 1.0.0 |
-| rule | `localhost:5000/grimoire/rules/security-baseline` | 1.0.0 |
+| skill | `localhost:5050/grimoire/skills/hello-world` | 1.0.0 |
+| skill | `localhost:5050/grimoire/skills/code-reviewer` | 1.0.0 (1.1.0 via `release-update.sh`) |
+| skill | `localhost:5050/grimoire/skills/commit-helper` | 1.0.0 |
+| rule | `localhost:5050/grimoire/rules/rust-style` | 1.0.0 |
+| rule | `localhost:5050/grimoire/rules/security-baseline` | 1.0.0 |
 
 Each release cascades floating tags, e.g. `1.0.0` also sets `1.0`, `1`,
 `latest`; `code-reviewer` `1.1.0` then moves `1.1`, `1`, `latest`.
@@ -96,7 +100,7 @@ grim status
 ### 6. add / remove
 
 ```sh
-grim add skill hello-world localhost:5000/grimoire/skills/hello-world:1
+grim add skill hello-world localhost:5050/grimoire/skills/hello-world:1
 grim remove skill commit-helper
 cat grimoire.toml grimoire.lock
 ```
@@ -105,7 +109,7 @@ cat grimoire.toml grimoire.lock
 
 ```sh
 grim --global init
-grim --global add rule security-baseline localhost:5000/grimoire/rules/security-baseline:1
+grim --global add rule security-baseline localhost:5050/grimoire/rules/security-baseline:1
 grim --global install
 ```
 

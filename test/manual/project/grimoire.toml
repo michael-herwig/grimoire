@@ -7,14 +7,14 @@
 # bootstrap script publishes a 1.1.0 of `code-reviewer`, `grim update`
 # rolls the pin forward from 1.0.0 → 1.1.0 (rolling release).
 [options]
-default_registry = "localhost:5000"
+default_registry = "localhost:5050"
 editor = "claude"
 
 [skills]
-hello-world   = "localhost:5000/grimoire/skills/hello-world:1"
-code-reviewer = "localhost:5000/grimoire/skills/code-reviewer:1"
-commit-helper = "localhost:5000/grimoire/skills/commit-helper:1"
+hello-world   = "localhost:5050/grimoire/skills/hello-world:1"
+code-reviewer = "localhost:5050/grimoire/skills/code-reviewer:1"
+commit-helper = "localhost:5050/grimoire/skills/commit-helper:1"
 
 [rules]
-rust-style        = "localhost:5000/grimoire/rules/rust-style:1"
-security-baseline = "localhost:5000/grimoire/rules/security-baseline:1"
+rust-style        = "localhost:5050/grimoire/rules/rust-style:1"
+security-baseline = "localhost:5050/grimoire/rules/security-baseline:1"

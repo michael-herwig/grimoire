@@ -9,7 +9,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MANUAL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$MANUAL_DIR/../.." && pwd)"
-REGISTRY="localhost:5000"
+REGISTRY="localhost:5050" # manual-rig registry (see docker-compose.yml)
 GRIM="$REPO_ROOT/test/bin/grim"
 
 export GRIM_HOME="$MANUAL_DIR/.grim-home"

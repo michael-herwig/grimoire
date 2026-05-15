@@ -1,12 +1,14 @@
-# Local OCI registry for the manual rig. The pytest acceptance suite reuses
-# a registry on this same port if one is already up, so running this is
-# also enough for `task test`.
+# Local OCI registry for the manual rig, on its OWN port (5050) and its
+# own container/volume — deliberately isolated from the pytest acceptance
+# suite's registry (localhost:5000). The acceptance suite pushes hundreds
+# of throwaway `grim-test/<uuid>` repos; sharing one registry made them
+# bleed into `grim search` / `grim tui` here as junk. Keep them separate.
 services:
   registry:
     image: registry:2
     container_name: grim-manual-registry
     ports:
-      - "5000:5000"
+      - "5050:5000"
     volumes:
       - grim-manual-registry-data:/var/lib/registry
 
