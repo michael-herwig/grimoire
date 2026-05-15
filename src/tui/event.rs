@@ -150,8 +150,7 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::install::status_badge::StatusBadge;
-    use crate::tui::state::TuiRow;
+    use crate::tui::state::{ArtifactState, TuiRow};
 
     fn row(repo: &str) -> TuiRow {
         TuiRow {
@@ -160,7 +159,7 @@ mod tests {
             description: "d".to_string(),
             keywords: vec!["kw".to_string()],
             latest_tag: "latest".to_string(),
-            badge: StatusBadge::NotInstalled,
+            state: ArtifactState::NotInstalled,
         }
     }
 

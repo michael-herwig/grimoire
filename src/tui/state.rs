@@ -9,7 +9,43 @@
 //! ([`super::app`]) drives these transitions; [`super::render`] projects
 //! the state for display.
 
-use crate::install::status_badge::StatusBadge;
+/// The install state of a catalog repository relative to the active
+/// scope, as shown in the TUI.
+///
+/// Richer than [`crate::install::status_badge::StatusBadge`] (which
+/// `search`/`status` share): it splits "an install record exists but its
+/// editor outputs are gone or unreadable" out of `NotInstalled` into its
+/// own [`ArtifactState::IntegrityMissing`] so the user can tell a
+/// never-installed entry apart from a broken/tampered one. Precedence
+/// otherwise mirrors `status.rs::derive_state`.
+///
+/// Closed internal enum — matches stay total, no `#[non_exhaustive]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactState {
+    /// Not declared/locked/recorded in this scope.
+    NotInstalled,
+    /// Locked, recorded, every output present and content intact.
+    Installed,
+    /// Locked + recorded, but the locked pin is ahead of the record.
+    Outdated,
+    /// Recorded, outputs present, but on-disk content drifted.
+    Modified,
+    /// An install record exists but one or more editor outputs are
+    /// missing or unreadable — the integrity record cannot be honored.
+    IntegrityMissing,
+}
+
+impl std::fmt::Display for ArtifactState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NotInstalled => "not-installed",
+            Self::Installed => "installed",
+            Self::Outdated => "outdated",
+            Self::Modified => "modified",
+            Self::IntegrityMissing => "integrity-missing",
+        })
+    }
+}
 
 /// Which interaction mode the screen is in.
 ///
@@ -39,7 +75,7 @@ pub struct TuiRow {
     /// The representative tag (empty string when absent).
     pub latest_tag: String,
     /// The install status of this repository in the active scope.
-    pub badge: StatusBadge,
+    pub state: ArtifactState,
 }
 
 /// The whole screen model.
@@ -183,25 +219,34 @@ impl TuiState {
 mod tests {
     use super::*;
 
-    fn row(repo: &str, desc: &str, kw: &[&str], badge: StatusBadge) -> TuiRow {
+    fn row(repo: &str, desc: &str, kw: &[&str], state: ArtifactState) -> TuiRow {
         TuiRow {
             kind: "skill".to_string(),
             repo: repo.to_string(),
             description: desc.to_string(),
             keywords: kw.iter().map(|s| s.to_string()).collect(),
             latest_tag: "latest".to_string(),
-            badge,
+            state,
         }
     }
 
     fn seeded() -> TuiState {
         let mut s = TuiState::new();
         s.set_rows(vec![
-            row("r/alpha", "first thing", &["rust"], StatusBadge::Installed),
-            row("r/beta", "second thing", &["python"], StatusBadge::NotInstalled),
-            row("r/gamma", "third thing", &["rust", "lint"], StatusBadge::Outdated),
+            row("r/alpha", "first thing", &["rust"], ArtifactState::Installed),
+            row("r/beta", "second thing", &["python"], ArtifactState::NotInstalled),
+            row("r/gamma", "third thing", &["rust", "lint"], ArtifactState::Outdated),
         ]);
         s
+    }
+
+    #[test]
+    fn artifact_state_display_is_kebab() {
+        assert_eq!(ArtifactState::NotInstalled.to_string(), "not-installed");
+        assert_eq!(ArtifactState::Installed.to_string(), "installed");
+        assert_eq!(ArtifactState::Outdated.to_string(), "outdated");
+        assert_eq!(ArtifactState::Modified.to_string(), "modified");
+        assert_eq!(ArtifactState::IntegrityMissing.to_string(), "integrity-missing");
     }
 
     #[test]

@@ -12,19 +12,61 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
-use super::state::{Mode, TuiState};
+use super::state::{ArtifactState, Mode, TuiState};
+
+/// A pure, ratatui-free color tag for a status cell. [`draw`] maps it to a
+/// concrete ratatui [`Color`]; keeping it abstract preserves the headless
+/// testability of [`frame`].
+///
+/// Closed internal enum — matches stay total, no `#[non_exhaustive]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorKey {
+    /// Installed and intact.
+    Installed,
+    /// Not present in this scope.
+    NotInstalled,
+    /// A newer pin is locked than what is on disk.
+    Outdated,
+    /// On-disk content drifted from the recorded hash.
+    Modified,
+    /// Recorded but outputs missing/unreadable.
+    IntegrityMissing,
+}
+
+/// Glyph + label + color for an [`ArtifactState`], as projected for
+/// display. Plain Unicode (no font dependency).
+fn status_view(state: ArtifactState) -> (&'static str, &'static str, ColorKey) {
+    match state {
+        ArtifactState::Installed => ("✓", "installed", ColorKey::Installed),
+        ArtifactState::NotInstalled => ("·", "not-installed", ColorKey::NotInstalled),
+        ArtifactState::Outdated => ("↑", "outdated", ColorKey::Outdated),
+        ArtifactState::Modified => ("✱", "modified", ColorKey::Modified),
+        ArtifactState::IntegrityMissing => ("⚠", "integrity-missing", ColorKey::IntegrityMissing),
+    }
+}
+
+/// Glyph for an artifact kind (`skill` / `rule`, else a neutral dot).
+fn kind_glyph(kind: &str) -> &'static str {
+    match kind {
+        "skill" => "◆",
+        "rule" => "▸",
+        _ => "•",
+    }
+}
 
 /// One table row in the render model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderRow {
-    /// The visible columns, already formatted.
+    /// The visible columns, already formatted (kind, repo, tag, status).
     pub columns: [String; 4],
     /// Whether this row is the current selection.
     pub selected: bool,
+    /// The color the status cell should render in.
+    pub status_color: ColorKey,
 }
 
 /// A plain, ratatui-free description of the whole screen.
@@ -42,6 +84,8 @@ pub struct RenderModel {
     pub detail: String,
     /// The bottom status / hint line.
     pub status: String,
+    /// The one-line glyph legend (what each status symbol means).
+    pub legend: String,
     /// Whether the detail pane is the focused element.
     pub detail_focused: bool,
 }
@@ -64,14 +108,18 @@ pub fn frame(state: &TuiState) -> RenderModel {
         .iter()
         .enumerate()
         .filter_map(|(pos, &i)| state.rows.get(i).map(|r| (pos, r)))
-        .map(|(pos, r)| RenderRow {
-            columns: [
-                r.kind.clone(),
-                r.repo.clone(),
-                r.latest_tag.clone(),
-                r.badge.to_string(),
-            ],
-            selected: pos == state.selected,
+        .map(|(pos, r)| {
+            let (glyph, label, color) = status_view(r.state);
+            RenderRow {
+                columns: [
+                    format!("{} {}", kind_glyph(&r.kind), r.kind),
+                    r.repo.clone(),
+                    r.latest_tag.clone(),
+                    format!("{glyph} {label}"),
+                ],
+                selected: pos == state.selected,
+                status_color: color,
+            }
         })
         .collect();
 
@@ -88,7 +136,7 @@ pub fn frame(state: &TuiState) -> RenderModel {
                 if r.description.is_empty() { "-" } else { &r.description },
                 kw,
                 if r.latest_tag.is_empty() { "-" } else { &r.latest_tag },
-                r.badge
+                r.state
             )
         }
         None => "no selection".to_string(),
@@ -109,6 +157,7 @@ pub fn frame(state: &TuiState) -> RenderModel {
         rows,
         detail,
         status,
+        legend: "✓ installed   ↑ outdated   ✱ modified   ⚠ integrity-missing   · not-installed".to_string(),
         detail_focused: state.mode == Mode::Detail,
     }
 }
@@ -123,6 +172,7 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
             Constraint::Length(3), // search box
             Constraint::Min(3),    // list
             Constraint::Length(8), // detail pane
+            Constraint::Length(1), // legend
             Constraint::Length(1), // status
         ])
         .split(f.area());
@@ -142,7 +192,7 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
 
     let header = ListItem::new(Line::from(Span::styled(
         format!(
-            "{:<6}  {:<40}  {:<10}  {}",
+            "{:<8}  {:<40}  {:<10}  {}",
             model.headers[0], model.headers[1], model.headers[2], model.headers[3]
         ),
         Style::default().add_modifier(Modifier::BOLD),
@@ -153,10 +203,16 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
         if r.selected {
             selected_index = Some(idx + 1); // +1 for the header row
         }
-        items.push(ListItem::new(Line::from(format!(
-            "{:<6}  {:<40}  {:<10}  {}",
-            r.columns[0], r.columns[1], r.columns[2], r.columns[3]
-        ))));
+        // Plain prefix; the status cell carries its own state color so a
+        // glance reads the catalog without entering detail.
+        let line = Line::from(vec![
+            Span::raw(format!(
+                "{:<8}  {:<40}  {:<10}  ",
+                r.columns[0], r.columns[1], r.columns[2]
+            )),
+            Span::styled(r.columns[3].clone(), Style::default().fg(color_for(r.status_color))),
+        ]);
+        items.push(ListItem::new(line));
     }
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title("Catalog"))
@@ -173,23 +229,43 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
     };
     f.render_widget(Paragraph::new(model.detail.clone()).block(detail_block), chunks[3]);
 
-    f.render_widget(Paragraph::new(model.status.clone()), chunks[4]);
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            model.legend.clone(),
+            Style::default().add_modifier(Modifier::DIM),
+        )),
+        chunks[4],
+    );
+
+    f.render_widget(Paragraph::new(model.status.clone()), chunks[5]);
+}
+
+/// Map a pure [`ColorKey`] to a concrete ratatui [`Color`]. Named ANSI
+/// colors only (not 256/RGB) so they remain legible on any terminal
+/// theme; the glyph stays the primary signal regardless of palette.
+fn color_for(key: ColorKey) -> Color {
+    match key {
+        ColorKey::Installed => Color::Green,
+        ColorKey::NotInstalled => Color::DarkGray,
+        ColorKey::Outdated => Color::Yellow,
+        ColorKey::Modified => Color::Red,
+        ColorKey::IntegrityMissing => Color::Magenta,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::install::status_badge::StatusBadge;
-    use crate::tui::state::TuiRow;
+    use crate::tui::state::{ArtifactState, TuiRow};
 
-    fn row(repo: &str, badge: StatusBadge) -> TuiRow {
+    fn row(repo: &str, state: ArtifactState) -> TuiRow {
         TuiRow {
             kind: "skill".to_string(),
             repo: repo.to_string(),
             description: "review code".to_string(),
             keywords: vec!["rust".to_string(), "lint".to_string()],
             latest_tag: "latest".to_string(),
-            badge,
+            state,
         }
     }
 
@@ -197,8 +273,8 @@ mod tests {
     fn frame_projects_known_state_snapshot() {
         let mut s = TuiState::new();
         s.set_rows(vec![
-            row("r/alpha", StatusBadge::Installed),
-            row("r/beta", StatusBadge::NotInstalled),
+            row("r/alpha", ArtifactState::Installed),
+            row("r/beta", ArtifactState::NotInstalled),
         ]);
         let m = frame(&s);
         assert_eq!(m.title, "grim — catalog");
@@ -208,18 +284,48 @@ mod tests {
         assert_eq!(
             m.rows[0].columns,
             [
-                "skill".to_string(),
+                "◆ skill".to_string(),
                 "r/alpha".to_string(),
                 "latest".to_string(),
-                "installed".to_string()
+                "✓ installed".to_string()
             ]
         );
+        assert_eq!(m.rows[0].status_color, ColorKey::Installed);
+        assert_eq!(m.rows[1].status_color, ColorKey::NotInstalled);
         assert!(m.rows[0].selected, "first row selected by default");
         assert!(!m.rows[1].selected);
         assert!(m.detail.contains("r/alpha"));
         assert!(m.detail.contains("keywords: rust, lint"));
+        assert!(m.detail.contains("status: installed"));
         assert!(!m.detail_focused);
         assert!(m.status.contains("quit"));
+        assert!(m.legend.contains("integrity-missing"));
+    }
+
+    #[test]
+    fn status_view_maps_every_state() {
+        for (st, glyph, label, color) in [
+            (ArtifactState::Installed, "✓", "installed", ColorKey::Installed),
+            (
+                ArtifactState::NotInstalled,
+                "·",
+                "not-installed",
+                ColorKey::NotInstalled,
+            ),
+            (ArtifactState::Outdated, "↑", "outdated", ColorKey::Outdated),
+            (ArtifactState::Modified, "✱", "modified", ColorKey::Modified),
+            (
+                ArtifactState::IntegrityMissing,
+                "⚠",
+                "integrity-missing",
+                ColorKey::IntegrityMissing,
+            ),
+        ] {
+            assert_eq!(status_view(st), (glyph, label, color));
+        }
+        assert_eq!(kind_glyph("skill"), "◆");
+        assert_eq!(kind_glyph("rule"), "▸");
+        assert_eq!(kind_glyph("-"), "•");
     }
 
     #[test]
@@ -237,7 +343,7 @@ mod tests {
     #[test]
     fn frame_search_mode_shows_cursor_and_focus() {
         let mut s = TuiState::new();
-        s.set_rows(vec![row("r/alpha", StatusBadge::Installed)]);
+        s.set_rows(vec![row("r/alpha", ArtifactState::Installed)]);
         s.enter_search();
         s.apply_query("al");
         let m = frame(&s);
@@ -251,7 +357,7 @@ mod tests {
     #[test]
     fn frame_status_line_overrides_hint() {
         let mut s = TuiState::new();
-        s.set_rows(vec![row("r/a", StatusBadge::Installed)]);
+        s.set_rows(vec![row("r/a", ArtifactState::Installed)]);
         s.set_status("installed r/a");
         assert_eq!(frame(&s).status, "installed r/a");
     }

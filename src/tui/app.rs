@@ -26,10 +26,10 @@ use ratatui::backend::CrosstermBackend;
 use crate::catalog::registry_catalog::Catalog;
 use crate::config::declaration::DesiredSet;
 use crate::config::scope::ConfigScope;
+use crate::install::content_hash::content_hash;
 use crate::install::install_state::InstallState;
 use crate::install::installer::{InstallOutcome, install_all};
 use crate::install::materializer::DefaultMaterializer;
-use crate::install::status_badge::derive_badge;
 use crate::install::target::InstallTarget;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
@@ -40,7 +40,7 @@ use crate::resolve::resolver::resolve_lock;
 
 use super::event::{TuiAction, TuiInput, handle};
 use super::render::{draw, frame};
-use super::state::{TuiRow, TuiState};
+use super::state::{ArtifactState, TuiRow, TuiState};
 
 use std::collections::BTreeMap;
 
@@ -190,8 +190,8 @@ async fn reload_into(ctx: &TuiContext, state: &mut TuiState, force: bool) {
     }
 }
 
-/// Project a catalog into TUI rows, deriving each badge from the scope's
-/// lock + install-state (the shared helper — not duplicated).
+/// Project a catalog into TUI rows, deriving each state from the scope's
+/// lock + install-state.
 fn rows_from_catalog(catalog: &Catalog, lock: Option<&GrimoireLock>, state: &InstallState) -> Vec<TuiRow> {
     catalog
         .entries()
@@ -201,9 +201,57 @@ fn rows_from_catalog(catalog: &Catalog, lock: Option<&GrimoireLock>, state: &Ins
             description: e.description.clone().unwrap_or_default(),
             keywords: e.keywords.clone(),
             latest_tag: e.latest_tag.clone().unwrap_or_default(),
-            badge: derive_badge(&e.registry, &e.repository, lock, state),
+            state: derive_artifact_state(&e.registry, &e.repository, lock, state),
         })
         .collect()
+}
+
+/// Derive the richer TUI [`ArtifactState`] for `registry/repository`.
+///
+/// Precedence mirrors `status.rs::derive_state` and
+/// `status_badge::derive_badge` — the *only* divergence is that a present
+/// install record whose editor outputs are missing or unreadable is
+/// surfaced as [`ArtifactState::IntegrityMissing`] rather than collapsed
+/// into `NotInstalled`, so a broken/tampered install is distinguishable
+/// from a never-installed entry. No lock entry or no record at all is
+/// still `NotInstalled`.
+fn derive_artifact_state(
+    registry: &str,
+    repository: &str,
+    lock: Option<&GrimoireLock>,
+    state: &InstallState,
+) -> ArtifactState {
+    let Some(locked) = lock.and_then(|l| {
+        l.skills
+            .iter()
+            .chain(l.rules.iter())
+            .find(|a| a.pinned.registry() == registry && a.pinned.repository() == repository)
+    }) else {
+        return ArtifactState::NotInstalled;
+    };
+    let Some(record) = state
+        .iter_records()
+        .find(|r| r.pinned.registry() == registry && r.pinned.repository() == repository)
+    else {
+        return ArtifactState::NotInstalled;
+    };
+
+    let outputs = record.editor_outputs();
+    if outputs.iter().any(|o| !o.target.exists()) {
+        return ArtifactState::IntegrityMissing;
+    }
+    for out in &outputs {
+        match content_hash(&out.target) {
+            Ok(actual) if actual != out.content_hash => return ArtifactState::Modified,
+            Ok(_) => {}
+            Err(_) => return ArtifactState::IntegrityMissing,
+        }
+    }
+    if record.pinned.eq_content(&locked.pinned) {
+        ArtifactState::Installed
+    } else {
+        ArtifactState::Outdated
+    }
 }
 
 /// Best-effort scope load for badges (advisory — never fails the TUI).
@@ -235,14 +283,14 @@ async fn run_artifact_action(ctx: &TuiContext, state: &mut TuiState, idx: usize,
 
     match perform(ctx, &row, is_update).await {
         Ok(outcome) => {
-            // Refresh just this row's badge from the now-updated state.
+            // Refresh just this row's state from the now-updated record.
             let (lock, install_state) = load_scope_for_badges(ctx);
             if let Some((registry, repository)) = split_repo(&row.repo) {
-                let badge = derive_badge(&registry, &repository, lock.as_ref(), &install_state);
+                let st = derive_artifact_state(&registry, &repository, lock.as_ref(), &install_state);
                 if let Some(&i) = state.filtered.get(idx)
                     && let Some(r) = state.rows.get_mut(i)
                 {
-                    r.badge = badge;
+                    r.state = st;
                 }
             }
             state.set_status(format!(
