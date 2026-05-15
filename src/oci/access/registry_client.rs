@@ -47,18 +47,36 @@ pub struct RegistryClient {
 impl RegistryClient {
     /// Construct a client for production use.
     ///
-    /// `localhost` / `127.0.0.1` registries are contacted over plain HTTP
-    /// (matching the local test-registry workflow); everything else uses
-    /// HTTPS. This mirrors OCX's `ClientProtocol::HttpsExcept` policy with
-    /// the loopback host hard-wired so a local registry "just works".
+    /// Loopback registries (`localhost` / `127.0.0.1`, *any* port) are
+    /// contacted over plain HTTP so a local test registry "just works" on
+    /// whatever port it binds; any host listed in `GRIM_INSECURE_REGISTRIES`
+    /// (comma-separated) is likewise plain HTTP; everything else uses HTTPS.
+    ///
+    /// `oci-client`'s `HttpsExcept` matches the registry by *exact*
+    /// `host:port` string, so it cannot express "loopback on any port".
+    /// The exception list is therefore materialised from the same
+    /// [`Self::plain_http`] rule for the concrete registries known up front
+    /// (the loopback defaults plus the `GRIM_INSECURE_REGISTRIES` entries);
+    /// the raw catalog client uses the predicate directly.
     pub fn new() -> Self {
+        // `HttpsExcept` is exact-match per `host:port`, so enumerate the
+        // zero-config loopback forms (bare host + the conventional :5000)
+        // and add every `GRIM_INSECURE_REGISTRIES` entry — that env is how
+        // a loopback registry on a non-default port (e.g. the manual rig
+        // on :5050) opts into plain HTTP.
+        let mut exceptions = vec![
+            "localhost".to_string(),
+            "localhost:5000".to_string(),
+            "127.0.0.1".to_string(),
+            "127.0.0.1:5000".to_string(),
+        ];
+        for r in insecure_registries() {
+            if !exceptions.contains(&r) {
+                exceptions.push(r);
+            }
+        }
         let config = ClientConfig {
-            protocol: ClientProtocol::HttpsExcept(vec![
-                "localhost".to_string(),
-                "localhost:5000".to_string(),
-                "127.0.0.1".to_string(),
-                "127.0.0.1:5000".to_string(),
-            ]),
+            protocol: ClientProtocol::HttpsExcept(exceptions),
             ..Default::default()
         };
         Self {
@@ -88,17 +106,42 @@ impl RegistryClient {
         }
     }
 
-    /// HTTP scheme used for the loopback registry; HTTPS otherwise. Kept
-    /// in lockstep with the [`ClientProtocol::HttpsExcept`] list in
-    /// [`Self::new`].
-    fn scheme_for(registry: &str) -> &'static str {
+    /// Whether `registry` is contacted over plain HTTP: any loopback host
+    /// (`localhost` / `127.0.0.1`, *any* port) or a host explicitly listed
+    /// in `GRIM_INSECURE_REGISTRIES`. Single source of truth for the
+    /// HTTP/HTTPS decision — the `oci-client` `HttpsExcept` list in
+    /// [`Self::new`] is materialised from this same rule.
+    fn plain_http(registry: &str) -> bool {
         let host = registry.split(':').next().unwrap_or(registry);
         if host == "localhost" || host == "127.0.0.1" {
-            "http"
-        } else {
-            "https"
+            return true;
         }
+        insecure_registries().iter().any(|r| r == registry)
     }
+
+    /// HTTP scheme for plain-HTTP registries (see [`Self::plain_http`]);
+    /// HTTPS otherwise.
+    fn scheme_for(registry: &str) -> &'static str {
+        if Self::plain_http(registry) { "http" } else { "https" }
+    }
+}
+
+/// Hosts the user has opted into plain HTTP for, from
+/// `GRIM_INSECURE_REGISTRIES` (comma-separated, entries trimmed, empties
+/// dropped). Empty/unset yields an empty list.
+fn insecure_registries() -> Vec<String> {
+    parse_insecure_registries(&std::env::var("GRIM_INSECURE_REGISTRIES").unwrap_or_default())
+}
+
+/// Parse a `GRIM_INSECURE_REGISTRIES` value: comma-separated, entries
+/// trimmed, empties dropped. Pure so it is testable without mutating the
+/// process environment (the crate forbids `unsafe`, so `set_var` is out).
+fn parse_insecure_registries(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 impl Default for RegistryClient {
@@ -582,6 +625,31 @@ mod tests {
         assert_eq!(RegistryClient::scheme_for("localhost:5000"), "http");
         assert_eq!(RegistryClient::scheme_for("127.0.0.1:5000"), "http");
         assert_eq!(RegistryClient::scheme_for("ghcr.io"), "https");
+    }
+
+    /// Regression: a loopback registry on a non-default port (the manual
+    /// rig moved off the shared :5000 to :5050) must still be plain HTTP.
+    /// Before the fix the hardcoded `HttpsExcept` list only knew :5000, so
+    /// :5050 went to HTTPS and failed the TLS handshake against `registry:2`.
+    #[test]
+    fn loopback_any_port_is_http() {
+        assert_eq!(RegistryClient::scheme_for("localhost:5050"), "http");
+        assert_eq!(RegistryClient::scheme_for("127.0.0.1:5050"), "http");
+        assert!(RegistryClient::plain_http("localhost:5050"));
+    }
+
+    /// `GRIM_INSECURE_REGISTRIES` parsing: comma-separated, trimmed,
+    /// empties dropped. Drives the plain-HTTP opt-in for non-loopback
+    /// hosts (e.g. an internal registry) and the `oci-client` exception
+    /// list built in [`RegistryClient::new`].
+    #[test]
+    fn parse_insecure_registries_trims_and_drops_empties() {
+        assert_eq!(
+            parse_insecure_registries("registry.internal:5000, , localhost:5050 "),
+            vec!["registry.internal:5000".to_string(), "localhost:5050".to_string()]
+        );
+        assert!(parse_insecure_registries("").is_empty());
+        assert!(parse_insecure_registries("  ,  ").is_empty());
     }
 
     #[test]
