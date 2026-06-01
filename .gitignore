@@ -86,3 +86,16 @@ venv/
 # =============================================================================
 *.pid
 *.sock
+
+# =============================================================================
+# Grimoire in-repo test artifacts — running `grim` from the repo root during
+# manual testing writes project-scope config/lock here and can install demo
+# catalog content. Ignore at root so manual testing never pollutes the tree.
+# =============================================================================
+/grimoire.toml
+/grimoire.lock
+
+# =============================================================================
+# Serena MCP cache
+# =============================================================================
+.serena/

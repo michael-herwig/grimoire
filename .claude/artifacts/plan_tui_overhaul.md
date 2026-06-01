@@ -3,9 +3,9 @@
 ## Status
 
 - **Plan:** plan_tui_overhaul
-- **Active phase:** 5 — Review & documentation
+- **Active phase:** 7 — tree view + default-registry elision + group batch ops (impl complete)
 - **Step:** awaiting /swarm-review
-- **Last update:** 2026-05-16 (after Phase 5 docs)
+- **Last update:** 2026-05-16 (after Phase 7: tree view + group ops)
 
 ---
 
@@ -174,6 +174,48 @@ the **shared seam** through the new `grim uninstall` command.
 | Color unreadable on some themes | Use named ANSI (not 256/rgb); keep glyph as primary signal |
 | Uninstall data loss surprise | Single-artifact + explicit `Delete` key; batch only over explicit marks |
 
+## Phase 7 — Tree view + default-registry elision + group batch ops
+
+User feedback: flat-list names are long (full `registry/repository` every
+row). Add a grouped tree.
+
+- New pure module `src/tui/tree.rs`: trie `build` + `flatten` (no I/O).
+  Registry root → group; `/` path components → groups; the final
+  `/`-segment additionally splits on `.` so dotted names nest
+  (`acme/code.review` → `acme` ▸ `code` ▸ leaf `review`); hyphens never
+  split. The browsed registry (effective default) is elided from the root
+  so leaf names stay short. `Rollup` aggregates descendant
+  `ArtifactState` (worst-state precedence) for collapsed groups.
+- `state.rs`: `ViewMode {Flat,Tree}`, `collapsed: BTreeSet<String>`,
+  `default_registry`. Tree built lazily (no cache → rollups always
+  reflect freshest per-row state). Tree-aware `selected_row_index` /
+  `action_targets` / `toggle_mark_selected` (group = all descendants,
+  smart toggle) / `move_selection`; `toggle_view_mode`,
+  `expand/collapse/toggle_collapse_selected`. Entering search forces flat.
+- `render.rs`: `frame` branches on `view_mode`; `render_leaf` shared by
+  flat + tree; groups show `▾/▸ label` + `n/total installed` rollup;
+  leaves show the bare name indented. Help overlay + hint tiers gain
+  `t tree` and `→/← expand/collapse`.
+- `event.rs`: `TuiInput::{ViewToggle,Expand,Collapse}`; `t` toggles view,
+  `→/←` (mapped from `KeyCode::Right/Left` in `app.rs`) expand/collapse,
+  `Enter` on a group folds it (leaf/flat → detail as before). `i/u/d`
+  unchanged — `action_targets` resolves a selected group to its subtree.
+- `app.rs`: browsed `ctx.registry` threaded as the effective default
+  registry into `TuiState`.
+
+**Manual scenario** (mirrors the existing manual rig): with
+`GRIM_DEFAULT_REGISTRY` set to the browsed registry, run `grim tui`
+against a registry with mixed repos including a dotted name. Press `t`:
+the default-registry host has no root node; `acme/code.review` nests to
+leaf `review`; `code-review` stays one leaf. `→/←/Enter` collapse/expand;
+`space` on a group marks every descendant (`▣`); `i/u/d` on a group with
+no marks acts on the whole subtree (status reports `n/total`). `/` forces
+flat; `t` returns to tree; marks survive the toggle.
+
+Verification: `task verify` green — 429 Rust unit tests (incl. new
+`tui::tree`, tree-aware `tui::state` / `tui::event` / `tui::render`
+tests) + 66 pytest acceptance tests.
+
 ## Notes
 
 Refresh already exists (`r` → `TuiAction::Refresh`); Phase 1 only adds a
@@ -192,3 +234,5 @@ visible legend/affordance, no new mechanism.
 | 2026-05-16 | Phase 4 done: runtime Global⇄Project scope toggle (`g`), in-place scope swap + state recompute, scope in title |
 | 2026-05-16 | Phase 5: manual-rig README TUI scenario documented. Impl complete (all 5 phases); formal /swarm-review left to the user (billed/user-triggered). `task verify` green throughout. |
 | 2026-05-16 | Polish (user feedback): fixed-width `fit()` columns (no skew on long ids), full per-cell colorization + colored borders/legend/selection, `?` help overlay, scope shown in title; +6 unit tests (40 TUI total) |
+| 2026-05-16 | Phase 7 (user feedback): tree view (`t`) — registry/`/`/dotted-leaf grouping, default-registry root elided, collapsible groups (`→/←`, `Enter`), whole-group mark/install/update/delete (`action_targets` resolves a group to its subtree). New pure `src/tui/tree.rs`. `task verify` green, 429 Rust + 66 pytest. |
+| 2026-05-16 | Phase 6 (user feedback): UX polish + version picker. (a) header underline padded to full Status column; (b) grayed `type / to search` placeholder; (c) scope moved to a colored `PROJECT/GLOBAL MODE` box right of search; (d) persistent key hint right-aligned on legend line so `? help` survives transient status; (e) explicit highest-semver version in Tag column (`pick_highest_version` + `CatalogEntry.version`, serde-default backward-compatible); (f) modal version picker (`v`), lazy `list_tags` on open, pin sets install target. `task rust:verify` green, 412 tests. |
