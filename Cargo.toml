@@ -43,12 +43,24 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "j
 tar = "0.4"
 ratatui = "0.29"
 crossterm = "0.28"
+base64 = "0.22"
+secrecy = "0.10"
+rpassword = "7"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+
+# `grim login` writes credentials through a docker-compatible store. The
+# upstream `docker_credential` crate only *reads*; the maintained fork adds
+# `store_credential` / `erase_credential` / `detect_default_helper` (the
+# write/erase path login/logout need). Pulled in via the
+# `external/docker_credential` submodule. Only Grimoire depends on this
+# crate (oci-client 0.16 does not), so the patch is self-contained.
+[patch.crates-io]
+docker_credential = { path = "external/docker_credential" }
 
 # The profile that 'dist' will build with
 [profile.dist]

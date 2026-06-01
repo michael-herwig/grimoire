@@ -16,6 +16,9 @@ const GRIM_DEFAULT_REGISTRY: &str = "GRIM_DEFAULT_REGISTRY";
 const GRIM_OFFLINE: &str = "GRIM_OFFLINE";
 /// Environment variable that, when truthy, routes lookups to the remote.
 const GRIM_REMOTE: &str = "GRIM_REMOTE";
+/// Docker-compatible config directory override, honoured by `grim login`
+/// / `grim logout` and the credential read path for parity with `docker`.
+const DOCKER_CONFIG: &str = "DOCKER_CONFIG";
 
 /// Resolves the Grimoire data root.
 ///
@@ -46,6 +49,19 @@ pub fn offline() -> bool {
 /// Whether remote routing is requested via `$GRIM_REMOTE`.
 pub fn remote() -> bool {
     truthy(GRIM_REMOTE)
+}
+
+/// Resolves the docker-compatible credential config path.
+///
+/// `$DOCKER_CONFIG/config.json` when `$DOCKER_CONFIG` is set and
+/// non-empty, otherwise `~/.docker/config.json`. Returns `None` when
+/// neither `$DOCKER_CONFIG` nor a home directory can be determined — the
+/// caller surfaces that as a configuration error.
+pub fn docker_config_path() -> Option<PathBuf> {
+    if let Some(dir) = non_empty_var(DOCKER_CONFIG) {
+        return Some(PathBuf::from(dir).join("config.json"));
+    }
+    home_dir().map(|home| home.join(".docker").join("config.json"))
 }
 
 fn non_empty_var(key: &str) -> Option<String> {

@@ -30,6 +30,16 @@ pub enum CommandError {
     /// `GRIM_DEFAULT_REGISTRY`.
     #[error("no registry to search; pass --registry or set GRIM_DEFAULT_REGISTRY")]
     NoRegistry,
+
+    /// `login` / `logout` need a registry but none was given and no
+    /// default is configured.
+    #[error("no registry given; pass a registry argument or set GRIM_DEFAULT_REGISTRY")]
+    NoLoginRegistry,
+
+    /// `login` could not obtain a required credential input — typically a
+    /// non-interactive shell missing `--username` / `--password-stdin`.
+    #[error("{0}")]
+    LoginInput(&'static str),
 }
 
 #[cfg(test)]

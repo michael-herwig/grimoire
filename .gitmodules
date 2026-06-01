@@ -1,0 +1,4 @@
+[submodule "external/docker_credential"]
+	path = external/docker_credential
+	url = https://github.com/ocx-sh/docker_credential.git
+	branch = feat/store-erase-list

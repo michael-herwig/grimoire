@@ -14,6 +14,8 @@ pub mod command_error;
 pub mod init;
 pub mod install;
 pub mod lock;
+pub mod login;
+pub mod logout;
 pub mod release;
 pub mod remove;
 pub mod scope_resolution;
@@ -25,6 +27,32 @@ pub mod update;
 
 #[allow(unused_imports)]
 pub use command_error::CommandError;
+
+/// Resolve the registry for `login` / `logout`: an explicit (non-empty)
+/// argument wins, else the context's `default_registry`. A miss is a
+/// classifiable config error, not a panic.
+///
+/// # Errors
+///
+/// [`CommandError::NoLoginRegistry`] when neither an argument nor a
+/// default registry is available.
+pub fn resolve_login_registry(ctx: &crate::context::Context, explicit: Option<&str>) -> anyhow::Result<String> {
+    if let Some(reg) = explicit.filter(|r| !r.is_empty()) {
+        return Ok(reg.to_string());
+    }
+    ctx.default_registry()
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::Error::from(crate::error::Error::from(command_error::CommandError::NoLoginRegistry)))
+}
+
+/// Build a classifiable usage error (exit 64) for a missing `login`
+/// credential input, routed through the top-level error so
+/// [`crate::error::classify_error`] sees it.
+pub fn login_usage(message: &'static str) -> anyhow::Error {
+    anyhow::Error::from(crate::error::Error::from(command_error::CommandError::LoginInput(
+        message,
+    )))
+}
 
 /// Map a subsystem `Result` into an `anyhow::Result` whose error is wrapped
 /// in the top-level [`crate::error::Error`].
