@@ -23,6 +23,8 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
+          # `external/docker_credential` is the [patch.crates-io] source.
+          submodules: recursive
       - name: Build
         uses: ./.github/actions/build-rust
         with:
@@ -56,6 +58,8 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
+          # `external/docker_credential` is the [patch.crates-io] source.
+          submodules: recursive
       - name: Install Rust target
         run: rustup target add ${{ matrix.job.target }}
       - name: Build
