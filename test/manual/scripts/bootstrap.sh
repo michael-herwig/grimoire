@@ -23,24 +23,27 @@ log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 
 # 1. Build the binary the pytest harness path expects, if missing/stale.
 if [ ! -x "$REPO_ROOT/test/bin/grim" ] ||
-	[ "$REPO_ROOT/Cargo.toml" -nt "$REPO_ROOT/test/bin/grim" ]; then
-	log "building release grim"
-	(cd "$REPO_ROOT" && cargo build --release --locked)
-	cp "$REPO_ROOT/target/release/grim" "$REPO_ROOT/test/bin/grim"
+    [ "$REPO_ROOT/Cargo.toml" -nt "$REPO_ROOT/test/bin/grim" ]; then
+    log "building release grim"
+    (cd "$REPO_ROOT" && cargo build --release --locked)
+    cp "$REPO_ROOT/target/release/grim" "$REPO_ROOT/test/bin/grim"
 fi
 GRIM="$REPO_ROOT/test/bin/grim"
 
 # 2. Ensure the registry is reachable (reuse a running one, else compose).
 if ! curl -fsS "http://$REGISTRY/v2/" >/dev/null 2>&1; then
-	log "starting registry via docker compose"
-	docker compose -f "$MANUAL_DIR/docker-compose.yml" up -d
-	for _ in $(seq 1 60); do
-		curl -fsS "http://$REGISTRY/v2/" >/dev/null 2>&1 && break
-		sleep 0.5
-	done
+    log "starting registry via docker compose"
+    docker compose -f "$MANUAL_DIR/docker-compose.yml" up -d
+    for _ in $(seq 1 60); do
+        curl -fsS "http://$REGISTRY/v2/" >/dev/null 2>&1 && break
+        sleep 0.5
+    done
 fi
 curl -fsS "http://$REGISTRY/v2/" >/dev/null 2>&1 ||
-	{ echo "registry not reachable at $REGISTRY" >&2; exit 69; }
+    {
+        echo "registry not reachable at $REGISTRY" >&2
+        exit 69
+    }
 
 # 3. Isolated GRIM_HOME for the rig.
 export GRIM_HOME="$MANUAL_DIR/.grim-home"
@@ -49,20 +52,20 @@ export GRIM_INSECURE_REGISTRIES="$REGISTRY"
 mkdir -p "$GRIM_HOME"
 
 release() { # <path> <repo-subpath> <name> <version>
-	log "release $3:$4"
-	"$GRIM" release "$1" "$REGISTRY/$NS/$2/$3:$4"
+    log "release $3:$4"
+    "$GRIM" release "$1" "$REGISTRY/$NS/$2/$3:$4"
 }
 
 # 4. Publish every skill at 1.0.0.
 for dir in "$CATALOG"/skills/*/; do
-	name="$(basename "$dir")"
-	release "$dir" skills "$name" 1.0.0
+    name="$(basename "$dir")"
+    release "$dir" skills "$name" 1.0.0
 done
 
 # 5. Publish every rule at 1.0.0.
 for file in "$CATALOG"/rules/*.md; do
-	name="$(basename "$file" .md)"
-	release "$file" rules "$name" 1.0.0
+    name="$(basename "$file" .md)"
+    release "$file" rules "$name" 1.0.0
 done
 
 # Note: every skill/rule is published ONCE at 1.0.0. The rolling-release

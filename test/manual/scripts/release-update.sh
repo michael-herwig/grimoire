@@ -20,7 +20,7 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 cp -r "$MANUAL_DIR/catalog/skills/code-reviewer" "$tmp/code-reviewer"
 printf '\n## Changelog\n\n- 1.1.0: clarified the severity grouping.\n' \
-	>>"$tmp/code-reviewer/SKILL.md"
+    >>"$tmp/code-reviewer/SKILL.md"
 
 printf '\033[1;34m==>\033[0m releasing code-reviewer:1.1.0 (moves :1, :latest)\n'
 "$GRIM" release "$tmp/code-reviewer" "$REGISTRY/grimoire/skills/code-reviewer:1.1.0"

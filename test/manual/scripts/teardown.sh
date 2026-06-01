@@ -17,14 +17,14 @@ rm -rf "$MANUAL_DIR/.grim-home"
 
 log "removing materialized editor output + lock from project/"
 rm -rf \
-	"$MANUAL_DIR/project/.claude" \
-	"$MANUAL_DIR/project/.opencode" \
-	"$MANUAL_DIR/project/.github" \
-	"$MANUAL_DIR/project/grimoire.lock"
+    "$MANUAL_DIR/project/.claude" \
+    "$MANUAL_DIR/project/.opencode" \
+    "$MANUAL_DIR/project/.github" \
+    "$MANUAL_DIR/project/grimoire.lock"
 
 if [ "${1:-}" = "--registry" ]; then
-	log "stopping compose registry"
-	docker compose -f "$MANUAL_DIR/docker-compose.yml" down -v
+    log "stopping compose registry"
+    docker compose -f "$MANUAL_DIR/docker-compose.yml" down -v
 fi
 
 log "done. Re-run scripts/bootstrap.sh to recreate."
