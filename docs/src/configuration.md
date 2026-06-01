@@ -61,15 +61,19 @@ applies.
 | `GRIM_HOME` | Root data directory (cache, global config, state). | `~/.grimoire` |
 | `GRIM_DEFAULT_REGISTRY` | Default registry for short references. | unset |
 | `GRIM_OFFLINE` | Disable all network access (same as `--offline`). | `false` |
-| `GRIM_REMOTE` | Route mutable lookups to the live registry (same as `--remote`). | `false` |
 | `GRIM_INSECURE_REGISTRIES` | Comma-separated registries reachable over plain HTTP — for local or in-cluster registries without TLS. | unset |
 | `DOCKER_CONFIG` | Directory holding the Docker-compatible `config.json` that [`grim login`](./authentication.md) reads and writes. | `~/.docker` |
+
+By default Grimoire resolves floating tags fresh from the registry, then caches
+the result, so a floating tag never serves a stale pin. Pass `--offline` (or set
+`GRIM_OFFLINE`) to work from the cache alone and fail rather than reach the
+network.
 
 A command-line flag always wins. Where a setting also has a config option, the
 config option wins over the environment variable: the registry resolves as
 `--registry`, then the `default_registry` option, then `GRIM_DEFAULT_REGISTRY`.
-The `--offline` and `--remote` toggles have no config-file counterpart — the
-flag or its `GRIM_OFFLINE` / `GRIM_REMOTE` variable applies.
+The `--offline` toggle has no config-file counterpart — the flag or its
+`GRIM_OFFLINE` variable applies.
 
 ## Data layout
 

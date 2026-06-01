@@ -4,9 +4,10 @@
 //! Global CLI options, flattened into the top-level clap command.
 //!
 //! These flags are shared by every subcommand. Resolution-affecting flags
-//! (`--offline`, `--remote`, `--config`, `--registry`) influence which
-//! artifacts are looked up; presentation flags (`--format`, `--log-level`)
-//! only affect rendering.
+//! (`--offline`, `--config`, `--registry`) influence which artifacts are
+//! looked up; presentation flags (`--format`, `--log-level`) only affect
+//! rendering. By default Grimoire resolves floating tags fresh from the
+//! registry (online); `--offline` restricts it to the cache.
 
 use std::path::PathBuf;
 
@@ -42,13 +43,10 @@ pub struct GlobalOptions {
     #[arg(long, value_enum, default_value_t = OutputFormat::Plain, global = true)]
     pub format: OutputFormat,
 
-    /// Disable all network access; fail rather than reach a registry.
+    /// Disable all network access; work from the cache only and fail
+    /// rather than reach a registry.
     #[arg(long, global = true)]
     pub offline: bool,
-
-    /// Route mutable lookups to the remote registry instead of the cache.
-    #[arg(long, global = true)]
-    pub remote: bool,
 
     /// Override the tracing log level (e.g. `warn`, `info`, `debug`).
     #[arg(long, global = true)]

@@ -135,7 +135,6 @@ mod tests {
         GlobalOptions {
             format: OutputFormat::Plain,
             offline: false,
-            remote: false,
             log_level: None,
             config: None,
             global: false,

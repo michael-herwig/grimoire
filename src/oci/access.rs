@@ -29,34 +29,30 @@ use crate::env;
 use error::AccessError;
 
 /// Cache/source routing policy, derived once per invocation from the
-/// environment (and, in later phases, the equivalent CLI flags).
+/// environment (and the equivalent CLI flags).
 ///
 /// Collapsed from OCX `ChainMode`: there is no chained source list, only
-/// an inner source and one persistent cache layer.
+/// an inner source and one persistent cache layer. Two modes only —
+/// `Online` always resolves mutable tag pointers fresh from the registry
+/// (the cached pin is a write-through, never a read shortcut), so a
+/// floating tag never serves stale; `Offline` works from the cache alone.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AccessMode {
-    /// Read the cache first; on a tag miss consult the source and persist
-    /// the result (tag pointers only when the call is a `Resolve`).
-    Default,
-    /// Skip the cache read for mutable lookups and go straight to the
-    /// source; still write successful results back to the cache.
-    Remote,
+    /// Default. Resolve tag pointers straight from the source, then
+    /// persist the result (tag pointers only when the call is a
+    /// `Resolve`). The cache is a write-through fallback for offline use,
+    /// never a read shortcut — a floating tag always reflects the registry.
+    Online,
     /// Cache only. A miss that would require the network is refused
     /// (`Resolve` → `OfflineMiss`; pure `Query` → `Ok(None)`).
     Offline,
 }
 
 impl AccessMode {
-    /// Derive the mode from the environment. Offline wins over remote: a
-    /// user asking for both is asking for the stricter guarantee.
+    /// Derive the mode from the environment: `Offline` when `$GRIM_OFFLINE`
+    /// is truthy, otherwise the always-fresh `Online` default.
     pub fn from_env() -> Self {
-        if env::offline() {
-            Self::Offline
-        } else if env::remote() {
-            Self::Remote
-        } else {
-            Self::Default
-        }
+        if env::offline() { Self::Offline } else { Self::Online }
     }
 }
 
@@ -126,32 +122,25 @@ mod tests {
 
     /// Pure-logic mirror of [`AccessMode::from_env`]'s precedence. Env
     /// mutation is `unsafe` in edition 2024 and forbidden crate-wide, so
-    /// the offline-wins-over-remote contract is asserted through a
-    /// parameterized reimplementation rather than by toggling the process
-    /// environment.
-    fn mode_from(offline: bool, remote: bool) -> AccessMode {
+    /// the offline-vs-online contract is asserted through a parameterized
+    /// reimplementation rather than by toggling the process environment.
+    fn mode_from(offline: bool) -> AccessMode {
         if offline {
             AccessMode::Offline
-        } else if remote {
-            AccessMode::Remote
         } else {
-            AccessMode::Default
+            AccessMode::Online
         }
     }
 
     #[test]
-    fn offline_wins_over_remote() {
-        assert_eq!(mode_from(true, true), AccessMode::Offline);
-        assert_eq!(mode_from(true, false), AccessMode::Offline);
-        assert_eq!(mode_from(false, true), AccessMode::Remote);
-        assert_eq!(mode_from(false, false), AccessMode::Default);
+    fn offline_flag_selects_offline_else_online() {
+        assert_eq!(mode_from(true), AccessMode::Offline);
+        assert_eq!(mode_from(false), AccessMode::Online);
     }
 
     #[test]
     fn modes_are_distinct() {
-        assert_ne!(AccessMode::Default, AccessMode::Remote);
-        assert_ne!(AccessMode::Default, AccessMode::Offline);
-        assert_ne!(AccessMode::Remote, AccessMode::Offline);
+        assert_ne!(AccessMode::Online, AccessMode::Offline);
     }
 
     #[test]

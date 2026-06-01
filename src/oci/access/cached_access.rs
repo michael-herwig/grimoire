@@ -9,14 +9,16 @@
 //! platform-candidate handling — the routing matrix below is the whole
 //! policy.
 //!
-//! | mode    | tag resolve (Query)        | tag resolve (Resolve)            | blob fetch                 |
-//! |---------|----------------------------|----------------------------------|----------------------------|
-//! | Offline | cache; miss ⇒ `Ok(None)`   | cache; miss ⇒ `OfflineMiss`      | store; miss ⇒ `OfflineMiss`|
-//! | Remote  | inner; then write cache    | inner; then write cache          | store; miss ⇒ inner ⇒ store|
-//! | Default | cache; miss ⇒ inner; write | cache; miss ⇒ inner; write       | store; miss ⇒ inner ⇒ store|
+//! | mode    | tag resolve (Query) | tag resolve (Resolve)         | blob fetch                 |
+//! |---------|---------------------|-------------------------------|----------------------------|
+//! | Offline | cache; miss ⇒ `Ok(None)` | cache; miss ⇒ `OfflineMiss` | store; miss ⇒ `OfflineMiss`|
+//! | Online  | inner (fresh)       | inner (fresh); then write cache | store; miss ⇒ inner ⇒ store|
 //!
-//! "write cache" for tag pointers only happens on `Resolve` in `Default`
-//! mode (a pure `Query` must not persist a pin), matching OCX semantics.
+//! `Online` never reads the cached tag pointer — a floating tag always
+//! reflects the registry. The cache is a write-through fallback for later
+//! offline use, persisted for tag pointers only on `Resolve` (a pure
+//! `Query` must not persist a pin). Blobs are content-addressed, so a
+//! present blob is authoritative in either mode.
 
 use async_trait::async_trait;
 
@@ -70,27 +72,13 @@ impl<A: OciAccess> OciAccess for CachedAccess<A> {
                     Operation::Query => Ok(None),
                 }
             }
-            AccessMode::Remote => {
-                // Skip the cache read; go straight to the source, then
-                // persist a successful pin.
+            AccessMode::Online => {
+                // Never read the cached pin; resolve fresh from the source
+                // so a floating tag always reflects the registry. Persist a
+                // successful pin only on a resolve (a pure query must not
+                // write a tag pointer) for later offline use.
                 match self.inner.resolve_digest(id, op).await? {
                     Some(digest) => {
-                        if op == Operation::Resolve {
-                            self.tags.put(id, &digest).map_err(|e| Self::io_err(id, e))?;
-                        }
-                        Ok(Some(digest))
-                    }
-                    None => Ok(None),
-                }
-            }
-            AccessMode::Default => {
-                if let Some(digest) = self.tags.get(id).map_err(|e| Self::io_err(id, e))? {
-                    return Ok(Some(digest));
-                }
-                match self.inner.resolve_digest(id, op).await? {
-                    Some(digest) => {
-                        // Persist the pin only for a resolve; a pure query
-                        // must not write a tag pointer.
                         if op == Operation::Resolve {
                             self.tags.put(id, &digest).map_err(|e| Self::io_err(id, e))?;
                         }
@@ -286,7 +274,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn warm_tag_cache_hit_skips_inner() {
+    async fn offline_warm_tag_cache_hit_skips_inner() {
         let (_d, tags, blobs) = paths();
         let digest = Algorithm::Sha256.hash(b"d");
         tags.put(&id(), &digest).unwrap();
@@ -296,12 +284,36 @@ mod tests {
             calls: calls.clone(),
             blob: vec![],
         };
-        let access = CachedAccess::new(inner, tags, blobs, AccessMode::Default);
+        let access = CachedAccess::new(inner, tags, blobs, AccessMode::Offline);
         assert_eq!(
             access.resolve_digest(&id(), Operation::Resolve).await.unwrap(),
             Some(digest)
         );
-        assert_eq!(*calls.lock().unwrap(), 0, "warm cache must not call inner");
+        assert_eq!(*calls.lock().unwrap(), 0, "offline warm cache must not call inner");
+    }
+
+    #[tokio::test]
+    async fn online_ignores_stale_cache_and_resolves_fresh() {
+        let (_d, tags, blobs) = paths();
+        // Cache holds a STALE pin; the source has moved the tag forward.
+        let stale = Algorithm::Sha256.hash(b"stale");
+        let fresh = Algorithm::Sha256.hash(b"fresh");
+        tags.put(&id(), &stale).unwrap();
+        let calls = Arc::new(Mutex::new(0));
+        let inner = CountingInner {
+            digest: fresh.clone(),
+            calls: calls.clone(),
+            blob: vec![],
+        };
+        let access = CachedAccess::new(inner, tags.clone(), blobs, AccessMode::Online);
+        // Online must return the fresh source digest, not the cached pin.
+        assert_eq!(
+            access.resolve_digest(&id(), Operation::Resolve).await.unwrap(),
+            Some(fresh.clone())
+        );
+        assert_eq!(*calls.lock().unwrap(), 1, "online must always contact inner");
+        // The fresh pin is written through for later offline use.
+        assert_eq!(tags.get(&id()).unwrap(), Some(fresh));
     }
 
     #[tokio::test]
@@ -325,7 +337,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_resolve_writes_cache_query_does_not() {
+    async fn online_resolve_writes_cache_query_does_not() {
         let (_d, tags, blobs) = paths();
         let digest = Algorithm::Sha256.hash(b"d");
         let calls = Arc::new(Mutex::new(0));
@@ -334,7 +346,7 @@ mod tests {
             calls: calls.clone(),
             blob: vec![],
         };
-        let access = CachedAccess::new(inner, tags.clone(), blobs, AccessMode::Default);
+        let access = CachedAccess::new(inner, tags.clone(), blobs, AccessMode::Online);
 
         // Query: must not persist a pin.
         assert_eq!(
@@ -363,7 +375,7 @@ mod tests {
             calls: calls.clone(),
             blob: payload.clone(),
         };
-        let access = CachedAccess::new(inner, tags, blobs, AccessMode::Default);
+        let access = CachedAccess::new(inner, tags, blobs, AccessMode::Online);
         assert_eq!(access.fetch_blob(&id(), &digest).await.unwrap(), Some(payload));
         assert_eq!(*calls.lock().unwrap(), 0, "warm blob cache must not call inner");
     }
@@ -379,7 +391,7 @@ mod tests {
             calls: calls.clone(),
             blob: b"corrupt".to_vec(),
         };
-        let access = CachedAccess::new(inner, tags, blobs, AccessMode::Default);
+        let access = CachedAccess::new(inner, tags, blobs, AccessMode::Online);
         let err = access
             .fetch_blob(&id(), &requested)
             .await

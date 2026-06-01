@@ -33,7 +33,6 @@ pub struct Context {
     grim_home: PathBuf,
     default_registry: Option<String>,
     offline: bool,
-    remote: bool,
 }
 
 impl Context {
@@ -47,7 +46,6 @@ impl Context {
             grim_home: env::grim_home(),
             default_registry,
             offline: options.offline || env::offline(),
-            remote: options.remote || env::remote(),
         }
     }
 
@@ -66,20 +64,14 @@ impl Context {
         self.offline
     }
 
-    /// Whether mutable lookups route to the remote registry.
-    pub fn remote(&self) -> bool {
-        self.remote
-    }
-
-    /// The resolved cache-routing mode for this invocation. Offline wins
-    /// over remote (the stricter guarantee), matching [`AccessMode`].
+    /// The resolved cache-routing mode for this invocation: `Offline` when
+    /// the invocation is offline, otherwise the always-fresh `Online`
+    /// default. See [`AccessMode`].
     pub fn access_mode(&self) -> AccessMode {
         if self.offline {
             AccessMode::Offline
-        } else if self.remote {
-            AccessMode::Remote
         } else {
-            AccessMode::Default
+            AccessMode::Online
         }
     }
 
@@ -101,16 +93,6 @@ impl Context {
     /// so it classifies as an I/O exit code, not the generic fall-through.
     pub fn access(&self) -> std::io::Result<Arc<dyn OciAccess>> {
         self.access_with_mode(self.access_mode())
-    }
-
-    /// The access mode `update` uses: it re-resolves floating tags, so it
-    /// must skip the cached tag pointer (`Remote`) — unless the invocation
-    /// is offline, where the stricter offline guarantee still wins.
-    pub fn update_access_mode(&self) -> AccessMode {
-        match self.access_mode() {
-            AccessMode::Offline => AccessMode::Offline,
-            _ => AccessMode::Remote,
-        }
     }
 
     /// Build the OCI-access seam with an explicit routing `mode`.
@@ -141,7 +123,6 @@ mod tests {
         GlobalOptions {
             format: OutputFormat::Plain,
             offline: false,
-            remote: false,
             log_level: None,
             config: None,
             global: false,
@@ -155,6 +136,14 @@ mod tests {
         o.offline = true;
         let ctx = Context::new(&o);
         assert!(ctx.offline());
+        assert_eq!(ctx.access_mode(), AccessMode::Offline);
+    }
+
+    #[test]
+    fn default_invocation_is_online() {
+        let ctx = Context::new(&opts());
+        assert!(!ctx.offline());
+        assert_eq!(ctx.access_mode(), AccessMode::Online);
     }
 
     #[test]
@@ -164,12 +153,5 @@ mod tests {
         let ctx = Context::new(&o);
         assert_eq!(ctx.default_registry(), Some("ghcr.io/acme"));
         assert!(ctx.grim_home().is_absolute() || ctx.grim_home().ends_with(".grimoire"));
-    }
-
-    #[test]
-    fn remote_flag_propagates() {
-        let mut o = opts();
-        o.remote = true;
-        assert!(Context::new(&o).remote());
     }
 }

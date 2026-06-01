@@ -17,8 +17,7 @@ These apply to every subcommand:
 | `--global` | Operate on the global scope instead of the discovered project. |
 | `--config <path>` | Use an explicit project config file. |
 | `--registry <ref>` | Default registry for short identifiers. |
-| `--offline` | Disable all network access; fail rather than reach a registry. |
-| `--remote` | Route a mutable lookup past the cache to the live registry. |
+| `--offline` | Disable all network access; work from the cache only and fail rather than reach a registry. |
 | `--log-level <level>` | Override the tracing log level (`warn`, `info`, `debug`). |
 
 ## The lifecycle commands

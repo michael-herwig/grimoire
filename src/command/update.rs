@@ -72,9 +72,10 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
         None => None,
     };
 
-    // `update` re-resolves floating tags, so it must bypass the cached tag
-    // pointer (Remote mode) — offline still wins where applicable.
-    let access: Arc<dyn OciAccess> = super::access_seam_with_mode(ctx, ctx.update_access_mode())?;
+    // `update` re-resolves floating tags. The default online seam already
+    // resolves fresh from the registry (never the cached pin), so the plain
+    // access seam is correct here; offline still restricts to the cache.
+    let access: Arc<dyn OciAccess> = super::access_seam(ctx)?;
     let previous = lock_io::load(&scope.lock_path).ok();
 
     let new_lock = if args.names.is_empty() {

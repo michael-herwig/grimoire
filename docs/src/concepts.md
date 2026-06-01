@@ -73,15 +73,21 @@ and accepts a comma-separated list to install into several editors at once.
 [`grim search`](./commands.md#search) and the [TUI](./commands.md#tui) read a
 **catalog** — an index of the artifacts a registry offers, cached locally under
 `$GRIM_HOME` so repeat browsing is fast and works offline. Pass `--refresh` to
-rebuild it, or `--remote` to bypass the cache for a single mutable lookup.
+rebuild it from the registry.
 
-## Offline and remote
+## Online by default, offline on demand
 
-Two global flags govern network behaviour. `--offline` forbids all network
-access and fails rather than touch a registry — useful in sealed CI. `--remote`
-does the opposite for one command, routing a mutable lookup past the cache to
-the live registry. Both have environment-variable equivalents described in
-[Configuration](./configuration.md).
+By default Grimoire is **online**: every floating-tag lookup resolves fresh
+against the registry, and the resolved digest is cached as a write-through so
+later offline runs still work. A floating tag therefore never serves a stale
+pin — there is no "use the cache first" mode to surprise you, and no `--remote`
+flag to remember.
+
+Pass `--offline` to flip to **cache-only**: Grimoire forbids all network access
+and fails rather than touch a registry — useful in sealed CI or an air-gapped
+network. Warm the cache with a normal online `grim lock` (or `grim update`)
+before going offline. `--offline` has an environment-variable equivalent
+described in [Configuration](./configuration.md).
 
 <!-- external -->
 [oci]: https://github.com/opencontainers/distribution-spec

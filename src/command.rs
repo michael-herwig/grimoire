@@ -72,18 +72,12 @@ where
 /// Build the OCI-access seam from the context, mapping a `$GRIM_HOME`
 /// layout I/O failure to a classifiable install-tier `TargetIo` error
 /// (exit 74) rather than the generic fall-through.
+///
+/// The seam is always-fresh online unless the invocation is offline, so a
+/// rolling release re-resolves the floating tag instead of serving a
+/// cached pin — no separate "remote" routing mode is needed.
 pub fn access_seam(ctx: &crate::context::Context) -> anyhow::Result<std::sync::Arc<dyn crate::oci::access::OciAccess>> {
     map_access_io(ctx, ctx.access())
-}
-
-/// Like [`access_seam`] but with an explicit routing mode. `update` uses
-/// this with [`crate::context::Context::update_access_mode`] so a rolling
-/// release re-resolves the floating tag instead of serving the cached pin.
-pub fn access_seam_with_mode(
-    ctx: &crate::context::Context,
-    mode: crate::oci::access::AccessMode,
-) -> anyhow::Result<std::sync::Arc<dyn crate::oci::access::OciAccess>> {
-    map_access_io(ctx, ctx.access_with_mode(mode))
 }
 
 fn map_access_io(

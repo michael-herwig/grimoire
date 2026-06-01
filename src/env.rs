@@ -14,8 +14,6 @@ const GRIM_HOME: &str = "GRIM_HOME";
 const GRIM_DEFAULT_REGISTRY: &str = "GRIM_DEFAULT_REGISTRY";
 /// Environment variable that, when truthy, disables all network access.
 const GRIM_OFFLINE: &str = "GRIM_OFFLINE";
-/// Environment variable that, when truthy, routes lookups to the remote.
-const GRIM_REMOTE: &str = "GRIM_REMOTE";
 /// Docker-compatible config directory override, honoured by `grim login`
 /// / `grim logout` and the credential read path for parity with `docker`.
 const DOCKER_CONFIG: &str = "DOCKER_CONFIG";
@@ -44,11 +42,6 @@ pub fn default_registry() -> Option<String> {
 /// Whether offline mode is requested via `$GRIM_OFFLINE`.
 pub fn offline() -> bool {
     truthy(GRIM_OFFLINE)
-}
-
-/// Whether remote routing is requested via `$GRIM_REMOTE`.
-pub fn remote() -> bool {
-    truthy(GRIM_REMOTE)
 }
 
 /// Resolves the docker-compatible credential config path.
