@@ -7,4 +7,5 @@
 - [Concepts](./concepts.md)
 - [Command Reference](./commands.md)
 - [Configuration](./configuration.md)
+- [Authentication](./authentication.md)
 - [Publishing Skills and Rules](./publishing.md)

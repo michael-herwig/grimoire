@@ -37,6 +37,8 @@ These apply to every subcommand:
 | [`grim tui`](#tui) | Browse the catalog interactively. |
 | [`grim build`](#build) | Validate and pack a local artifact. |
 | [`grim release`](#release) | Validate, pack, and push an artifact. |
+| [`grim login`](#login) | Authenticate to a registry and store the credential. |
+| [`grim logout`](#logout) | Remove a stored registry credential. |
 
 ## grim init {#init}
 
@@ -147,4 +149,30 @@ moves an existing exact-version tag that points at a different digest. See
 
 ```sh
 grim release ./code-review ghcr.io/acme/code-review:1.2.3 --dry-run
+```
+
+## grim login {#login}
+
+`grim login [registry]` authenticates to a registry and stores the credential
+in the Docker-compatible credential store, so later pulls and pushes reuse it.
+Pass the username with `-u`/`--username` (prompted on a terminal when omitted)
+and the password via `--password-stdin` or a hidden terminal prompt — there is
+no `--password <value>` flag, by design. `--allow-insecure-store` permits a
+base64 plaintext entry when no credential helper is configured. With no
+positional `registry`, it resolves `--registry`, then `default_registry`, then
+`GRIM_DEFAULT_REGISTRY`. See [Authentication](./authentication.md) for storage
+details.
+
+```sh
+echo "$TOKEN" | grim login ghcr.io -u alice --password-stdin
+```
+
+## grim logout {#logout}
+
+`grim logout [registry]` removes a stored credential. It is idempotent —
+logging out when nothing is stored exits `0` — and resolves the registry the
+same way [`grim login`](#login) does.
+
+```sh
+grim logout ghcr.io
 ```

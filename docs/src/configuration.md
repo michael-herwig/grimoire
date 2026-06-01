@@ -63,6 +63,7 @@ applies.
 | `GRIM_OFFLINE` | Disable all network access (same as `--offline`). | `false` |
 | `GRIM_REMOTE` | Route mutable lookups to the live registry (same as `--remote`). | `false` |
 | `GRIM_INSECURE_REGISTRIES` | Comma-separated registries reachable over plain HTTP — for local or in-cluster registries without TLS. | unset |
+| `DOCKER_CONFIG` | Directory holding the Docker-compatible `config.json` that [`grim login`](./authentication.md) reads and writes. | `~/.docker` |
 
 A command-line flag always wins. Where a setting also has a config option, the
 config option wins over the environment variable: the registry resolves as
