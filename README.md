@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="./assets/logo.svg" width="192" />
+<img src="./assets/logo.png" width="192" />
 
 # grimoire
 
