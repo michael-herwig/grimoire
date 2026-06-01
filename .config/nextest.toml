@@ -1,0 +1,14 @@
+# cargo-nextest configuration — https://nexte.st/docs/configuration/
+
+# The `ci` profile is selected by the Basic Verification workflow via
+# `task rust:test:unit -- --profile ci`. It emits a JUnit report that the
+# publish-unit-test-result action reads from `target/nextest/ci/junit.xml`.
+[profile.ci]
+# Run the whole suite so CI surfaces every failure in one pass, not just the
+# first.
+fail-fast = false
+# Retry genuinely flaky tests a couple of times before reporting failure.
+retries = 2
+
+[profile.ci.junit]
+path = "junit.xml"
