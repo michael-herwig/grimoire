@@ -1,14 +1,20 @@
 name: Publish to OCX
 
-# cargo-dist post-announce job. After the GitHub Release is published, repackage
-# the freshly built musl / darwin / windows archives as OCX packages, test each
-# on a NATIVE runner with `ocx package test`, then publish the multi-platform
-# package to the production registry `ocx.sh/grim` and push its catalog
-# description + logo.
+# cargo-dist post-announce job (also manually dispatchable). After the GitHub
+# Release is published, repackage the freshly built musl / darwin / windows
+# archives as OCX packages and publish the multi-platform package to the
+# production registry `ocx.sh/grim` under a single frozen build-timestamp, then
+# push its catalog description + logo.
 #
-# This is NOT a mirror — it is grimoire's own release pushed to OCX. Reference:
-# ocx/.github/workflows/oci-publish.yml (single-job push). We add a per-OS
-# native `ocx package test` gate before the publish step.
+# NOT a mirror — grimoire's own release pushed to OCX. Reference:
+# ocx/.github/workflows/oci-publish.yml (single-job repackage + push).
+#
+# One Linux runner does everything. macOS/Windows packages are built by
+# cargo-dist and repacked + published here, but are NOT natively smoke-tested:
+# cargo-dist cannot run a post-build step on its per-target build machines, and
+# dedicated macOS/Windows test runners cost ~10x / ~2x Linux. The native
+# `ocx package test` smoke therefore covers linux/amd64 (the one platform this
+# runner can execute) — enough to validate the platform-independent packaging.
 
 on:
   workflow_call:
@@ -39,21 +45,10 @@ env:
   OCX_DEFAULT_REGISTRY: ocx.sh
 
 jobs:
-  # Native per-OS smoke gate: materialize each platform's package and run the
-  # binary on a matching runner before anything is published.
-  test:
+  publish:
     if: ${{ !contains(github.ref_name, '-') || github.event_name == 'workflow_dispatch' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { target: x86_64-unknown-linux-musl,  platform: linux/amd64,   runner: ubuntu-latest,   ext: "",     archive_ext: tar.xz }
-          - { target: aarch64-unknown-linux-musl, platform: linux/arm64,   runner: ubuntu-24.04-arm, ext: "",     archive_ext: tar.xz }
-          - { target: x86_64-apple-darwin,        platform: darwin/amd64,  runner: macos-13,         ext: "",     archive_ext: tar.xz }
-          - { target: aarch64-apple-darwin,       platform: darwin/arm64,  runner: macos-14,         ext: "",     archive_ext: tar.xz }
-          - { target: x86_64-pc-windows-msvc,     platform: windows/amd64, runner: windows-latest,   ext: ".exe", archive_ext: zip }
-          - { target: aarch64-pc-windows-msvc,    platform: windows/arm64, runner: windows-11-arm,   ext: ".exe", archive_ext: zip }
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-latest
+    environment: ocx.sh
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -75,8 +70,6 @@ jobs:
           RAW_TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          # Pin to a strict release-version shape before it can reach the
-          # registry: rejects injection payloads, pre-releases, and garbage tags.
           if ! [[ "$RAW_TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::tag '$RAW_TAG' is not a clean release version (vX.Y.Z)"
             exit 1
@@ -84,110 +77,20 @@ jobs:
           echo "tag=${RAW_TAG}" >> "$GITHUB_OUTPUT"
           echo "version=${RAW_TAG#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Download release archive
+      - name: Download release archives (musl + darwin + windows)
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.ver.outputs.tag }}
-          ASSET: grimoire-${{ matrix.target }}.${{ matrix.archive_ext }}
         run: |
           set -euo pipefail
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" -p "$ASSET" -D dl --clobber
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            -p 'grimoire-*-linux-musl.tar.xz' \
+            -p 'grimoire-*-apple-darwin.tar.xz' \
+            -p 'grimoire-*-pc-windows-msvc.zip' \
+            -D dl --clobber
 
-      - name: Repackage as OCX bundle
-        id: pkg
-        shell: bash
-        env:
-          TARGET: ${{ matrix.target }}
-          PLATFORM: ${{ matrix.platform }}
-          EXT: ${{ matrix.ext }}
-          ARCHIVE_EXT: ${{ matrix.archive_ext }}
-        run: |
-          set -euo pipefail
-          archive="dl/grimoire-${TARGET}.${ARCHIVE_EXT}"
-          stage="$(mktemp -d)"
-          # bsdtar (windows/macos) extracts zip; GNU tar (linux) only ever sees tar.xz.
-          tar -xf "$archive" -C "$stage"
-          found="$(find "$stage" -name "grim${EXT}" -type f | head -1)"
-          if [ -z "$found" ]; then
-            echo "::error::no grim${EXT} found in $archive"
-            exit 1
-          fi
-          mkdir -p repackage/bin out
-          install -m 0755 "$found" "repackage/bin/grim${EXT}"
-          archive_out="out/grim-${TARGET}.tar.xz"
-          ocx package create repackage \
-            --metadata packaging/grim/metadata.json \
-            --output "$archive_out" \
-            --platform "$PLATFORM"
-          echo "archive=${archive_out}" >> "$GITHUB_OUTPUT"
-
-      - name: Test (native smoke)
-        shell: bash
-        env:
-          PLATFORM: ${{ matrix.platform }}
-          VERSION: ${{ steps.ver.outputs.version }}
-          ARCHIVE: ${{ steps.pkg.outputs.archive }}
-          EXT: ${{ matrix.ext }}
-        run: |
-          set -euo pipefail
-          # Materialize the package on this NATIVE runner and run the binary
-          # through the composed PATH env. `grim${EXT}` => grim.exe on windows.
-          ocx package test \
-            --platform "$PLATFORM" \
-            --identifier "grim:${VERSION}" \
-            --metadata packaging/grim/metadata.json \
-            "$ARCHIVE" \
-            -- "grim${EXT}" --version
-
-      - name: Upload tested package
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: ocxpkg-${{ matrix.target }}
-          path: out/grim-${{ matrix.target }}.tar.xz
-          retention-days: 1
-          if-no-files-found: error
-
-  # Single consolidated publish: push every platform sequentially to one tag so
-  # the registry collapses them into a coherent multi-platform image index.
-  publish:
-    needs: [test]
-    if: ${{ !contains(github.ref_name, '-') || github.event_name == 'workflow_dispatch' }}
-    runs-on: ubuntu-latest
-    environment: ocx.sh
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Install OCX
-        uses: ocx-sh/setup-ocx@0a39e58f272e7b4e2e46cfa89cdbad2a3578d2cc # v1.1.0
-        with:
-          version: ${{ env.OCX_VERSION }}
-          project: ""
-
-      - name: Download tested packages
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
-        with:
-          pattern: ocxpkg-*
-          path: pkgs/
-          merge-multiple: true
-
-      - name: Resolve version
-        id: ver
-        shell: bash
-        env:
-          RAW_TAG: ${{ github.event.inputs.tag || github.ref_name }}
-        run: |
-          set -euo pipefail
-          if ! [[ "$RAW_TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::tag '$RAW_TAG' is not a clean release version (vX.Y.Z)"
-            exit 1
-          fi
-          echo "version=${RAW_TAG#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Publish multi-platform package to ocx.sh
+      - name: Repackage, smoke-test, and publish all platforms
         shell: bash
         env:
           OCX_AUTH_ocx_sh_USER: ${{ secrets.REGISTRY_USER }}
@@ -205,14 +108,54 @@ jobs:
             [aarch64-pc-windows-msvc]=windows/arm64
           )
 
-          identifier="ocx.sh/grim:${VERSION}"
+          # Freeze ONE UTC build-timestamp so every platform shares the published
+          # tag and collapses into a single multi-platform OCI image index.
+          ts="$(date -u +%Y%m%d%H%M%S)"
+          identifier="ocx.sh/grim:${VERSION}_${ts}"
+          echo "publishing ${identifier}"
+
+          # Phase 1 — repackage every platform into a bin/-layout OCX bundle;
+          # natively smoke-test the one platform this Linux runner can execute.
           for target in "${!PLATFORM_MAP[@]}"; do
             platform="${PLATFORM_MAP[$target]}"
-            archive="pkgs/grim-${target}.tar.xz"
-            if [ ! -f "$archive" ]; then
-              echo "::error::missing tested package $archive"
-              exit 1
+            ext=""; aext="tar.xz"
+            case "$target" in *windows*) ext=".exe"; aext="zip" ;; esac
+            archive="dl/grimoire-${target}.${aext}"
+            if [ ! -f "$archive" ]; then echo "::error::missing $archive"; exit 1; fi
+
+            stage="$(mktemp -d)"
+            # GNU tar on linux cannot read zip; use unzip for the windows archives.
+            if [ "$aext" = "zip" ]; then
+              unzip -q "$archive" -d "$stage"
+            else
+              tar -xf "$archive" -C "$stage"
             fi
+            found="$(find "$stage" -name "grim${ext}" -type f | head -1)"
+            if [ -z "$found" ]; then echo "::error::no grim${ext} in $archive"; exit 1; fi
+
+            rm -rf "repackage-${target}"
+            mkdir -p "repackage-${target}/bin"
+            install -m 0755 "$found" "repackage-${target}/bin/grim${ext}"
+            ocx package create "repackage-${target}" \
+              --metadata packaging/grim/metadata.json \
+              --output "pkg-${target}.tar.xz" \
+              --platform "$platform"
+
+            if [ "$platform" = "linux/amd64" ]; then
+              echo "==> native smoke test (${platform})"
+              ocx package test \
+                --platform "$platform" \
+                --identifier "grim:${VERSION}" \
+                --metadata packaging/grim/metadata.json \
+                "pkg-${target}.tar.xz" \
+                -- grim --version
+            fi
+          done
+
+          # Phase 2 — push every platform to the one frozen tag. --cascade then
+          # derives the rolling :X.Y.Z, :X.Y, :X and :latest tags users install.
+          for target in "${!PLATFORM_MAP[@]}"; do
+            platform="${PLATFORM_MAP[$target]}"
             echo "==> push ${identifier} (${platform})"
             ocx package push \
               --identifier "$identifier" \
@@ -220,7 +163,7 @@ jobs:
               --cascade \
               --new \
               --metadata packaging/grim/metadata.json \
-              "$archive"
+              "pkg-${target}.tar.xz"
           done
 
       - name: Push catalog description + logo
