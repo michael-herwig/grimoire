@@ -7,6 +7,8 @@
 **An OCI-backed package manager for AI skills and rules**
 
 [![CI][ci-badge]][ci]
+[![Release][release-badge]][releases]
+[![Docs][docs-badge]][docs]
 [![License][license-badge]][license]
 
 </div>
@@ -16,19 +18,31 @@ registries (GHCR, Docker Hub, private registries) as storage — the same way
 container images are distributed. It is a backend tool: a building block for
 keeping agent configuration versioned, shareable, and reproducible.
 
-> **Status:** early scaffold. The CLI surface (`add` / `install` / `publish` /
-> `pull`) is not implemented yet — this repository currently provides the
-> project skeleton, automation, and AI-assisted development setup.
+> **Status:** provisional, pre-1.0. The core CLI — `init`, `add`, `lock`,
+> `install`, `update`, `status`, `search`, `tui`, `build`, `release`,
+> `remove`, `uninstall` — is implemented and shipping in
+> [released binaries][releases]. The surface is still moving toward 1.0, so
+> pin a version when you depend on it.
+
+## Install
+
+Grab a pre-built binary for macOS, Linux, or Windows (aarch64 or x86_64) from
+the [latest release][releases], or build from source:
+
+```sh
+cargo install --git https://github.com/michael-herwig/grimoire grimoire
+```
 
 ## Quick Start
 
 ```sh
-git clone https://github.com/michael-herwig/grimoire.git
-cd grimoire
-task              # check: fmt + clippy + cargo check
-task verify       # full verification suite
-cargo run -- --help
+grim init --registry ghcr.io/acme                      # create grimoire.toml
+grim add skill code-review ghcr.io/acme/code-review:1  # declare + lock
+grim install                                           # materialize into your editor
+grim tui                                               # browse the catalog
 ```
+
+Full documentation: **[grimoire docs][docs]**.
 
 ## Development
 
@@ -49,5 +63,9 @@ Grimoire is licensed under the [Apache License, Version 2.0][license].
 <!-- badges -->
 [ci]: https://github.com/michael-herwig/grimoire/actions/workflows/verify-basic.yml
 [ci-badge]: https://github.com/michael-herwig/grimoire/actions/workflows/verify-basic.yml/badge.svg
+[releases]: https://github.com/michael-herwig/grimoire/releases
+[release-badge]: https://img.shields.io/github/v/release/michael-herwig/grimoire
+[docs]: https://michael-herwig.github.io/grimoire/
+[docs-badge]: https://img.shields.io/badge/docs-grimoire-blue
 [license]: LICENSE
 [license-badge]: https://img.shields.io/badge/license-Apache--2.0-blue.svg
