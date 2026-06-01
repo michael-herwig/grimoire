@@ -24,9 +24,17 @@ column formats.
 | `grim remove <kind> <name>` | Undeclare an artifact (config + lock only; files left on disk) |
 | `grim uninstall <kind> <name>` | Full inverse of install: delete files, drop the install record, undeclare (config + lock). Shared seam reused by the TUI delete action |
 | `grim publish <path> <ref>` | Push an artifact to a registry |
+| `grim login [<registry>]` | Authenticate to a registry; store the credential via the docker-compatible credential store (helper or, with `--allow-insecure-store`, plaintext) |
+| `grim logout [<registry>]` | Remove a stored registry credential (idempotent — exits 0 when nothing is stored) |
 | `grim version` | Print the compiled version |
 
 Global flags (illustrative): `--offline`, `--remote`, `--format json`.
+
+`login`/`logout` resolve the registry from the positional argument, else
+`--registry` / the `default_registry` option / `GRIM_DEFAULT_REGISTRY`.
+They read and write the docker config at `$DOCKER_CONFIG/config.json`
+(default `~/.docker/config.json`) — the same file the credential read path
+consults — so credentials round-trip with `docker login`.
 
 ## Conventions (apply as commands land)
 

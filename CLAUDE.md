@@ -90,6 +90,7 @@ files:
 | `GRIM_DEFAULT_REGISTRY` | Default registry for short identifiers | (unset) |
 | `GRIM_OFFLINE` | Disable all network access | false |
 | `GRIM_REMOTE` | Route mutable lookups to the remote registry | false |
+| `DOCKER_CONFIG` | Directory holding the docker-compatible `config.json` read/written by `grim login`/`logout` (and the credential read path) | `~/.docker` |
 
 (Provisional — env surface grows as the implementation lands.)
 
