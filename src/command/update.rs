@@ -22,6 +22,7 @@ use crate::context::Context;
 use crate::install::install_state::InstallState;
 use crate::install::installer::install_all;
 use crate::install::materializer::DefaultMaterializer;
+use crate::install::prune::{PruneOutcome, PrunedArtifact, prune_orphans};
 use crate::install::target::InstallTarget;
 use crate::lock::file_lock::ConfigFileLock;
 use crate::lock::grimoire_lock::GrimoireLock;
@@ -114,13 +115,25 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     let mut state = InstallState::load(&scope.state_path).map_err(|e| state_io(&scope.state_path, e))?;
     let materializer = DefaultMaterializer;
     let outcomes = install_all(&new_lock, &access, &materializer, &target, &mut state, true).await;
+
+    // Reconcile the materialized tree back to the new lock: an artifact the
+    // resolve dropped (most visibly a bundle that stopped including a
+    // member) is pruned from disk. A locally modified orphan is preserved
+    // unless `--force`, mirroring the installer's integrity gate — `update`
+    // force-overwrites *tracked* members unconditionally, but silently
+    // deleting a hand-edited file that is no longer tracked is destructive,
+    // so that stays gated behind `--force`.
+    // A prune I/O failure carries the failing artifact path, so the error
+    // is attributed to the real file rather than the workspace root.
+    let pruned = prune_orphans(&mut state, &new_lock, args.force).map_err(|e| state_io(&e.path, e.source))?;
+
     state.save().map_err(|e| state_io(&scope.state_path, e))?;
 
     // Build the report before surfacing any error so it reflects the new
     // lock; then propagate the first hard install error if there was one.
     // (`update` forces re-materialization, so there are no `Refused`
     // outcomes — a hard error is a fetch/IO/integrity failure.)
-    let report = build_report(&new_lock, previous.as_ref());
+    let report = build_report(&new_lock, previous.as_ref(), &pruned);
     for o in outcomes {
         if let Err(e) = o.result {
             return Err(e.into());
@@ -139,8 +152,9 @@ fn state_io(path: &std::path::Path, source: std::io::Error) -> crate::error::Err
     ))
 }
 
-/// Build the report by diffing the new lock against the previous one.
-fn build_report(new_lock: &GrimoireLock, previous: Option<&GrimoireLock>) -> UpdateReport {
+/// Build the report by diffing the new lock against the previous one, then
+/// appending one row per pruned/kept orphan.
+fn build_report(new_lock: &GrimoireLock, previous: Option<&GrimoireLock>, pruned: &[PrunedArtifact]) -> UpdateReport {
     let prev_index: BTreeMap<(ArtifactKind, &str), &LockedArtifact> = previous
         .map(|p| {
             p.skills
@@ -151,7 +165,7 @@ fn build_report(new_lock: &GrimoireLock, previous: Option<&GrimoireLock>) -> Upd
         })
         .unwrap_or_default();
 
-    let entries = new_lock
+    let mut entries: Vec<UpdateEntry> = new_lock
         .skills
         .iter()
         .chain(new_lock.rules.iter())
@@ -166,11 +180,25 @@ fn build_report(new_lock: &GrimoireLock, previous: Option<&GrimoireLock>) -> Upd
                 kind: a.kind,
                 name: a.name.clone(),
                 old,
-                new,
+                new: Some(new),
                 action,
             }
         })
         .collect();
+
+    // Orphans the prune pass acted on: a pruned artifact has no new pin, so
+    // its `new` column is empty; `old` is its last-installed digest.
+    entries.extend(pruned.iter().map(|p| UpdateEntry {
+        kind: p.kind,
+        name: p.name.clone(),
+        old: Some(p.old.clone()),
+        new: None,
+        action: match p.outcome {
+            PruneOutcome::Pruned => UpdateAction::Removed,
+            PruneOutcome::KeptModified => UpdateAction::KeptModified,
+        },
+    }));
+
     UpdateReport::new(entries)
 }
 
@@ -210,7 +238,7 @@ mod tests {
     fn report_marks_changed_and_unchanged() {
         let prev = lock_of(vec![locked("a", 'a'), locked("b", 'b')]);
         let new = lock_of(vec![locked("a", 'a'), locked("b", 'c')]);
-        let r = build_report(&new, Some(&prev));
+        let r = build_report(&new, Some(&prev), &[]);
         let v = serde_json::to_value(&r).unwrap();
         let a = v.as_array().unwrap().iter().find(|e| e["name"] == "a").unwrap();
         let b = v.as_array().unwrap().iter().find(|e| e["name"] == "b").unwrap();
@@ -222,9 +250,41 @@ mod tests {
     #[test]
     fn report_old_is_null_for_new_artifact() {
         let new = lock_of(vec![locked("fresh", 'f')]);
-        let r = build_report(&new, None);
+        let r = build_report(&new, None, &[]);
         let v = serde_json::to_value(&r).unwrap();
         assert!(v[0]["old"].is_null());
         assert_eq!(v[0]["action"], "updated");
+    }
+
+    #[test]
+    fn report_appends_pruned_rows_with_null_new() {
+        let new = lock_of(vec![locked("keep", 'a')]);
+        let pruned = vec![
+            PrunedArtifact {
+                kind: ArtifactKind::Skill,
+                name: "gone".to_string(),
+                old: Digest::Sha256("e".repeat(64)),
+                outcome: PruneOutcome::Pruned,
+                removed: vec![],
+            },
+            PrunedArtifact {
+                kind: ArtifactKind::Rule,
+                name: "edited".to_string(),
+                old: Digest::Sha256("f".repeat(64)),
+                outcome: PruneOutcome::KeptModified,
+                removed: vec![],
+            },
+        ];
+        let r = build_report(&new, None, &pruned);
+        let v = serde_json::to_value(&r).unwrap();
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 3, "1 locked + 2 pruned rows");
+        let gone = arr.iter().find(|e| e["name"] == "gone").unwrap();
+        assert_eq!(gone["action"], "removed");
+        assert!(gone["new"].is_null(), "a pruned row has no new pin");
+        assert!(gone["old"].as_str().unwrap().starts_with("sha256:"));
+        let edited = arr.iter().find(|e| e["name"] == "edited").unwrap();
+        assert_eq!(edited["action"], "kept-modified");
+        assert!(edited["new"].is_null());
     }
 }

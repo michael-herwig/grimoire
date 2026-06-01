@@ -95,6 +95,19 @@ grim update
 grim update code-review rust-style
 ```
 
+Because update reconciles the workspace to the freshly-resolved lock, it also
+**prunes** artifacts that have dropped out of the lock — most often a
+[bundle](./concepts.md#bundles) member that the bundle stopped including. A
+clean, unmodified orphan is deleted (files and install record) and reported with
+the `removed` action. An orphan you have edited locally is **kept** and reported
+as `kept-modified`, so an accidental bundle change never silently discards your
+work; re-run with `--force` to prune it anyway. This mirrors the install
+integrity gate, where a locally modified artifact is refused rather than
+overwritten without `--force`.
+
+Pruning happens only on `update`. `grim install` materializes the current lock
+but never deletes — like [`grim remove`](#remove), it leaves files on disk.
+
 ## grim status {#status}
 
 Reports each declared artifact's state — installed, outdated, locally modified,

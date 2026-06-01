@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.assertions import assert_dir_exists, assert_path_exists
+from src.assertions import assert_dir_exists, assert_not_exists, assert_path_exists
 from src.helpers import make_artifact, make_bundle, write_config
 from src.registry import REGISTRY_HOST, retag, tag_digest
 
@@ -282,6 +282,82 @@ def test_release_bundle_pin_freezes_members(
     crunner.run("lock")
     lock = (consumer / "grimoire.lock").read_text()
     assert member_v1_digest in lock, "pinned member stays frozen despite the tag move"
+
+
+def test_update_prunes_dropped_bundle_member(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    # A bundle at a floating tag with two members; the consumer installs
+    # both, then the bundle rolls forward and drops one member.
+    sk_a = _member_skill(unique_repo, "skill-a")
+    sk_b = _member_skill(unique_repo, "skill-b")
+    bundle_repo = f"{unique_repo}/stack"
+    make_bundle(
+        bundle_repo,
+        [("skill", "skill-a", sk_a.fq), ("skill", "skill-b", sk_b.fq)],
+        tag="rolling",
+    )
+    write_config(project_dir, bundles={"stack": f"{REGISTRY_HOST}/{bundle_repo}:rolling"})
+    runner = grim_at(project_dir)
+
+    runner.run("lock")
+    runner.run("install")
+    assert_dir_exists(project_dir / ".claude/skills/skill-a")
+    assert_dir_exists(project_dir / ".claude/skills/skill-b")
+
+    # The bundle tag rolls forward to a version that no longer includes
+    # skill-b.
+    make_bundle(bundle_repo, [("skill", "skill-a", sk_a.fq)], tag="rolling")
+
+    rows = runner.json("update")
+    dropped = next(r for r in rows if r["name"] == "skill-b")
+    assert dropped["action"] == "removed"
+    assert dropped["new"] is None, "a pruned row has no new pin"
+
+    # skill-b is gone from disk and the lock; skill-a stays.
+    assert_dir_exists(project_dir / ".claude/skills/skill-a")
+    assert_not_exists(project_dir / ".claude/skills/skill-b")
+    lock = (project_dir / "grimoire.lock").read_text()
+    assert "skill-a" in lock
+    assert "skill-b" not in lock, "the dropped member leaves the lock"
+
+
+def test_update_keeps_modified_dropped_member_without_force(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    # A locally modified member that the bundle later drops must be
+    # preserved on a plain update and only pruned with --force, mirroring
+    # the install integrity gate.
+    sk_a = _member_skill(unique_repo, "skill-a")
+    sk_b = _member_skill(unique_repo, "skill-b")
+    bundle_repo = f"{unique_repo}/stack"
+    make_bundle(
+        bundle_repo,
+        [("skill", "skill-a", sk_a.fq), ("skill", "skill-b", sk_b.fq)],
+        tag="rolling",
+    )
+    write_config(project_dir, bundles={"stack": f"{REGISTRY_HOST}/{bundle_repo}:rolling"})
+    runner = grim_at(project_dir)
+    runner.run("lock")
+    runner.run("install")
+
+    # Hand-edit the member, then drop it from the bundle.
+    edited = project_dir / ".claude/skills/skill-b/SKILL.md"
+    edited.write_text(edited.read_text() + "\n# local edit\n")
+    make_bundle(bundle_repo, [("skill", "skill-a", sk_a.fq)], tag="rolling")
+
+    # A plain update preserves the modified orphan and flags it.
+    rows = runner.json("update")
+    kept = next(r for r in rows if r["name"] == "skill-b")
+    assert kept["action"] == "kept-modified"
+    assert_path_exists(edited)
+    assert "# local edit" in edited.read_text(), "the user's edit survives"
+
+    # --force prunes it despite the modification.
+    rows = runner.json("update", "--force")
+    pruned = next(r for r in rows if r["name"] == "skill-b")
+    assert pruned["action"] == "removed"
+    assert_not_exists(project_dir / ".claude/skills/skill-b")
 
 
 def test_remote_flag_is_removed(grim_at, project_dir: Path) -> None:

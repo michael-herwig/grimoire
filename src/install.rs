@@ -16,6 +16,7 @@ pub mod install_error;
 pub mod install_state;
 pub mod installer;
 pub mod materializer;
+pub mod prune;
 pub mod status_badge;
 pub mod target;
 pub mod uninstall;
@@ -32,6 +33,8 @@ pub use install_state::{InstallRecord, InstallState};
 pub use installer::{ArtifactInstall, InstallOutcome, install_all};
 #[allow(unused_imports)]
 pub use materializer::{ArtifactMaterializer, DefaultMaterializer};
+#[allow(unused_imports)]
+pub use prune::{PruneError, PruneOutcome, PrunedArtifact, prune_orphans};
 #[allow(unused_imports)]
 pub use status_badge::{StatusBadge, derive_badge};
 #[allow(unused_imports)]

@@ -62,6 +62,17 @@ Each locked member records its **provenance** — `direct` for something you
 declared yourself, or the bundle it came from — which [`grim status`](./commands.md#status)
 surfaces so you always know why an artifact is installed.
 
+### Adding and dropping members {#bundle-membership}
+
+The bundle's member list is authoritative on every resolve, so membership tracks
+the published bundle. When a new bundle version **adds** a member, the next
+[`grim lock`](./commands.md#lock) expands it into the lock and the next install
+materializes it. When a version **drops** a member, that member leaves the lock —
+and [`grim update`](./commands.md#update) prunes its materialized files, unless
+you have edited them locally, in which case it is kept until you re-run with
+`--force`. This is the same reconciliation any artifact leaving the lock
+receives; bundles just make it routine.
+
 ### Conflict policy {#bundle-conflicts}
 
 Because a member is keyed by `(kind, name)`, two sources can name the same slot.

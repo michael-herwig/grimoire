@@ -66,6 +66,9 @@ def test_update_named_only_touches_that_artifact(
     by_name = {r["name"]: r for r in rows}
     assert by_name["a"]["action"] == "updated"
     assert by_name["b"]["action"] == "unchanged"
+    # A partial update carries non-named entries forward in the lock, so the
+    # prune pass must not treat "b" as an orphan and delete it.
+    assert all(r["action"] != "removed" for r in rows), "partial update must not prune the unnamed entry"
     assert (project_dir / ".claude/rules/a.md").read_text() == "a2\n"
     assert (project_dir / ".claude/rules/b.md").read_text() == "b1\n"
 

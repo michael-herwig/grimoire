@@ -28,18 +28,14 @@ pub struct UpdateEntry {
     /// Previous digest, if the artifact was previously locked.
     #[serde(serialize_with = "serialize_opt_digest")]
     pub old: Option<Digest>,
-    /// New digest.
-    #[serde(serialize_with = "serialize_digest")]
-    pub new: Digest,
+    /// New digest, or `null` for a pruned/kept artifact that left the lock.
+    #[serde(serialize_with = "serialize_opt_digest")]
+    pub new: Option<Digest>,
     pub action: UpdateAction,
 }
 
 fn serialize_kind<S: Serializer>(kind: &ArtifactKind, s: S) -> Result<S::Ok, S::Error> {
     s.serialize_str(&kind.to_string())
-}
-
-fn serialize_digest<S: Serializer>(digest: &Digest, s: S) -> Result<S::Ok, S::Error> {
-    s.serialize_str(&digest.to_string())
 }
 
 fn serialize_opt_digest<S: Serializer>(digest: &Option<Digest>, s: S) -> Result<S::Ok, S::Error> {
@@ -81,7 +77,10 @@ impl Printable for UpdateReport {
                         .as_ref()
                         .map(Digest::to_short_string)
                         .unwrap_or_else(|| "-".to_string()),
-                    e.new.to_short_string(),
+                    e.new
+                        .as_ref()
+                        .map(Digest::to_short_string)
+                        .unwrap_or_else(|| "-".to_string()),
                     e.action.to_string(),
                 ]
             })
@@ -106,7 +105,7 @@ mod tests {
             kind: ArtifactKind::Skill,
             name: "code-review".to_string(),
             old: None,
-            new: Algorithm::Sha256.hash(b"new"),
+            new: Some(Algorithm::Sha256.hash(b"new")),
             action: UpdateAction::Updated,
         }]);
         let mut buf = Vec::new();
@@ -126,14 +125,14 @@ mod tests {
                 kind: ArtifactKind::Rule,
                 name: "a".to_string(),
                 old: None,
-                new: Algorithm::Sha256.hash(b"x"),
+                new: Some(Algorithm::Sha256.hash(b"x")),
                 action: UpdateAction::Updated,
             },
             UpdateEntry {
                 kind: ArtifactKind::Rule,
                 name: "b".to_string(),
                 old: Some(old.clone()),
-                new: old,
+                new: Some(old),
                 action: UpdateAction::Unchanged,
             },
         ]);

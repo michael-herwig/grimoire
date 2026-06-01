@@ -89,12 +89,18 @@ impl std::fmt::Display for InstallStatus {
 
 /// What `grim update` did to one entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub enum UpdateAction {
     /// The pin changed (and the artifact was re-materialized).
     Updated,
     /// The pin was unchanged.
     Unchanged,
+    /// The artifact left the lock (e.g. a bundle dropped it) and its
+    /// materialized files were pruned.
+    Removed,
+    /// The artifact left the lock but was locally modified, so it was
+    /// preserved (re-run with `--force` to prune it).
+    KeptModified,
 }
 
 impl std::fmt::Display for UpdateAction {
@@ -102,6 +108,8 @@ impl std::fmt::Display for UpdateAction {
         f.write_str(match self {
             Self::Updated => "updated",
             Self::Unchanged => "unchanged",
+            Self::Removed => "removed",
+            Self::KeptModified => "kept-modified",
         })
     }
 }
@@ -136,6 +144,12 @@ mod tests {
         assert_eq!(LockAction::Unchanged.to_string(), "unchanged");
         assert_eq!(serde_json::to_string(&InstallStatus::Refused).unwrap(), "\"refused\"");
         assert_eq!(UpdateAction::Updated.to_string(), "updated");
+        assert_eq!(UpdateAction::KeptModified.to_string(), "kept-modified");
+        assert_eq!(
+            serde_json::to_string(&UpdateAction::KeptModified).unwrap(),
+            "\"kept-modified\""
+        );
+        assert_eq!(serde_json::to_string(&UpdateAction::Removed).unwrap(), "\"removed\"");
         assert_eq!(serde_json::to_string(&InitStatus::Created).unwrap(), "\"created\"");
     }
 }
