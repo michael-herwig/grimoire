@@ -8,6 +8,7 @@
 //! taxonomy. It walks the `anyhow` chain, downcasts to [`Error`], and maps
 //! each known kind to a typed [`ExitCode`].
 
+use crate::auth::auth_error::AuthError;
 use crate::catalog::catalog_error::{CatalogError, CatalogErrorKind};
 use crate::cli::exit_code::ExitCode;
 use crate::command::command_error::CommandError;
@@ -63,6 +64,9 @@ pub enum Error {
     Catalog(#[from] CatalogError),
 
     #[error(transparent)]
+    Auth(#[from] AuthError),
+
+    #[error(transparent)]
     Command(#[from] CommandError),
 }
 
@@ -89,10 +93,12 @@ pub fn classify_error(err: &anyhow::Error) -> ExitCode {
                 Error::Skill(se) => classify_skill(se),
                 Error::Release(re) => classify_release(re),
                 Error::Catalog(ce) => classify_catalog(ce),
+                Error::Auth(ae) => classify_auth(ae),
                 Error::Command(ce) => match ce {
                     CommandError::LockMissing { .. } => ExitCode::NotFound,
                     CommandError::LockStale { .. } => ExitCode::DataError,
-                    CommandError::NoRegistry => ExitCode::ConfigError,
+                    CommandError::NoRegistry | CommandError::NoLoginRegistry => ExitCode::ConfigError,
+                    CommandError::LoginInput(_) => ExitCode::UsageError,
                 },
             };
         }
@@ -195,6 +201,33 @@ fn classify_catalog(err: &CatalogError) -> ExitCode {
     }
 }
 
+/// Map an auth-tier error to an exit code. Store I/O delegates to the I/O
+/// classifier; malformed on-disk config is bad data (65); a missing store
+/// or config location is a configuration problem (78); helper failures map
+/// per the underlying `docker_credential` error kind.
+fn classify_auth(err: &AuthError) -> ExitCode {
+    use docker_credential::CredentialRetrievalError as Helper;
+    match err {
+        AuthError::StoreIo { source, .. } => classify_io(source),
+        AuthError::MalformedConfig { .. } => ExitCode::DataError,
+        AuthError::NoCredentialStore | AuthError::NoConfigLocation => ExitCode::ConfigError,
+        AuthError::HelperFailed { .. } => ExitCode::AuthError,
+        AuthError::Helper(inner) => match inner {
+            Helper::NotOnPath { .. } | Helper::UnsafePath { .. } => ExitCode::ConfigError,
+            Helper::Timeout { .. } => ExitCode::TempFail,
+            Helper::InvalidJson(_) | Helper::MalformedHelperResponse | Helper::CredentialDecodingError => {
+                ExitCode::DataError
+            }
+            Helper::HelperCommunicationError => ExitCode::IoError,
+            // OutputTooLarge / HelperFailure / the config-miss sentinels are
+            // all treated as auth failures (the miss variants are never
+            // wrapped in `Helper` — `map_helper_err`/`get_blocking` divert
+            // them — but the arm keeps the match total).
+            _ => ExitCode::AuthError,
+        },
+    }
+}
+
 /// `PermissionDenied` → `NoPermission` (77); any other I/O → `IoError` (74).
 fn classify_io(io: &std::io::Error) -> ExitCode {
     if io.kind() == std::io::ErrorKind::PermissionDenied {
@@ -217,6 +250,70 @@ mod tests {
         let inner = IdentifierError::new("bad", IdentifierErrorKind::MissingRegistry);
         let err: anyhow::Error = Error::from(inner).into();
         assert_eq!(classify_error(&err), ExitCode::DataError);
+    }
+
+    #[test]
+    fn auth_errors_classify_per_kind() {
+        let cases = [
+            (
+                AuthError::StoreIo {
+                    path: std::path::PathBuf::from("/x/config.json"),
+                    source: std::io::Error::other("disk full"),
+                },
+                ExitCode::IoError,
+            ),
+            (
+                AuthError::StoreIo {
+                    path: std::path::PathBuf::from("/x/config.json"),
+                    source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+                },
+                ExitCode::NoPermission,
+            ),
+            (
+                AuthError::MalformedConfig {
+                    path: std::path::PathBuf::from("/x/config.json"),
+                    source: serde_json::from_str::<serde_json::Value>("{").expect_err("must err"),
+                },
+                ExitCode::DataError,
+            ),
+            (AuthError::NoCredentialStore, ExitCode::ConfigError),
+            (AuthError::NoConfigLocation, ExitCode::ConfigError),
+            (
+                AuthError::HelperFailed {
+                    helper: "test".to_string(),
+                },
+                ExitCode::AuthError,
+            ),
+        ];
+        for (inner, expected) in cases {
+            let err: anyhow::Error = Error::from(inner).into();
+            assert_eq!(classify_error(&err), expected);
+        }
+    }
+
+    #[test]
+    fn helper_error_kinds_classify_per_variant() {
+        use docker_credential::CredentialRetrievalError as Helper;
+        let cases = [
+            (Helper::NotOnPath { name: "x".into() }, ExitCode::ConfigError),
+            (Helper::Timeout { seconds: 30 }, ExitCode::TempFail),
+            (Helper::MalformedHelperResponse, ExitCode::DataError),
+            (Helper::CredentialDecodingError, ExitCode::DataError),
+            (Helper::HelperCommunicationError, ExitCode::IoError),
+        ];
+        for (helper, expected) in cases {
+            let err: anyhow::Error = Error::from(AuthError::Helper(helper)).into();
+            assert_eq!(classify_error(&err), expected);
+        }
+    }
+
+    #[test]
+    fn command_login_errors_classify_per_kind() {
+        let no_registry: anyhow::Error = Error::from(CommandError::NoLoginRegistry).into();
+        assert_eq!(classify_error(&no_registry), ExitCode::ConfigError);
+
+        let usage: anyhow::Error = Error::from(CommandError::LoginInput("bad input")).into();
+        assert_eq!(classify_error(&usage), ExitCode::UsageError);
     }
 
     #[test]

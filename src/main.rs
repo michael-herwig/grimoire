@@ -19,6 +19,7 @@
 
 mod api;
 mod app;
+mod auth;
 mod catalog;
 mod cli;
 mod command;
@@ -44,6 +45,8 @@ use crate::command::build::BuildArgs;
 use crate::command::init::InitArgs;
 use crate::command::install::InstallArgs;
 use crate::command::lock::LockArgs;
+use crate::command::login::LoginArgs;
+use crate::command::logout::LogoutArgs;
 use crate::command::release::ReleaseArgs;
 use crate::command::remove::RemoveArgs;
 use crate::command::search::SearchArgs;
@@ -95,6 +98,10 @@ pub enum Command {
     Search(SearchArgs),
     /// Browse the registry catalog in an interactive TUI.
     Tui(TuiArgs),
+    /// Authenticate to a registry and store the credential.
+    Login(LoginArgs),
+    /// Remove a stored registry credential.
+    Logout(LogoutArgs),
 }
 
 fn main() -> std::process::ExitCode {

@@ -15,6 +15,7 @@ pub mod build_report;
 pub mod init_report;
 pub mod install_report;
 pub mod lock_report;
+pub mod login_report;
 pub mod release_report;
 pub mod remove_report;
 pub mod search_report;
@@ -34,6 +35,8 @@ pub use init_report::InitReport;
 pub use install_report::{InstallEntry, InstallReport};
 #[allow(unused_imports)]
 pub use lock_report::{LockEntry, LockReport};
+#[allow(unused_imports)]
+pub use login_report::{LoginReport, LogoutReport};
 #[allow(unused_imports)]
 pub use release_report::ReleaseReport;
 #[allow(unused_imports)]

@@ -93,13 +93,22 @@ impl RegistryClient {
     fn auth_for(registry: &str) -> Result<RegistryAuth, AccessErrorKind> {
         use docker_credential::{CredentialRetrievalError, DockerCredential};
 
-        match docker_credential::get_credential(registry) {
+        // Canonicalize the lookup key so a credential written by
+        // `grim login` (scheme / `/vN` stripped, docker.io aliased) is
+        // found here. Single source of truth: `auth::canonicalize_registry`.
+        let registry = crate::auth::canonicalize_registry(registry);
+        match docker_credential::get_credential(&registry) {
             Ok(DockerCredential::IdentityToken(token)) => Ok(RegistryAuth::Bearer(token)),
             Ok(DockerCredential::UsernamePassword(user, pass)) => Ok(RegistryAuth::Basic(user, pass)),
+            // "No credential for this registry" is a benign anonymous-access
+            // case, not an error. The patched `docker_credential` fork
+            // surfaces a credential-helper miss as `NotFound` (upstream rolled
+            // it into `HelperFailure`), so it joins the anonymous group too.
             Err(
                 CredentialRetrievalError::NoCredentialConfigured
                 | CredentialRetrievalError::ConfigNotFound
                 | CredentialRetrievalError::ConfigReadError
+                | CredentialRetrievalError::NotFound
                 | CredentialRetrievalError::HelperFailure { .. },
             ) => Ok(RegistryAuth::Anonymous),
             Err(e) => Err(AccessErrorKind::Authentication(Box::new(e))),
