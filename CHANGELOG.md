@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-06-04
+
+### Added
+
+- Add login and logout commands *(auth)*
+- Add OCI bundles with conflict policy and provenance *(bundles)*
+- Prune lock-orphaned artifacts, preserving local edits *(update)*
+
+### Changed
+
+- Collapse access modes to online/offline *(access)* **BREAKING**
+
+### Documentation
+
+- Update project logo
+- Document registry authentication, login and logout
+
 ## [0.2.0] - 2026-06-01
 
 ### Added
@@ -43,6 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Make release-update.sh executable; add rolling-release regression tests
 - Contact loopback registries over plain HTTP on any port
+[0.3.0]: https://github.com/michael-herwig/grimoire/compare/v0.2.0..v0.3.0
 [0.2.0]: https://github.com/michael-herwig/grimoire/compare/v0.1.0..v0.2.0
 [0.1.0]: https://github.com/michael-herwig/grimoire/tree/v0.1.0
 
