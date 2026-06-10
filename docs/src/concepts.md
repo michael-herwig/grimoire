@@ -21,6 +21,11 @@ Under the hood every skill or rule is packed into an OCI artifact and addressed
 by content digest, exactly like a container image layer. Identical content is
 stored once and is immutable: a `sha256:…` digest always names the same bytes.
 
+Each artifact declares its kind through its OCI `artifactType` —
+`application/vnd.grimoire.skill.v1`, `…rule.v1`, or `…bundle.v1` — rather than a
+custom annotation. A registry, `grim`, or any OCI-aware tool can therefore tell
+a Grimoire artifact apart from an ordinary container image without unpacking it.
+
 This is why Grimoire needs no server of its own. Any registry that speaks the
 [distribution spec][oci] — [GHCR][ghcr], [Docker Hub][hub], a private
 [Distribution][dist] — is a complete backend.
