@@ -11,7 +11,6 @@
 //! (no config binding name), so this matches a lock/install record by its
 //! pinned repository rather than by the config key.
 
-use crate::install::content_hash::content_hash;
 use crate::install::install_state::InstallState;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::locked_artifact::LockedArtifact;
@@ -71,7 +70,7 @@ pub fn derive_badge(
         return StatusBadge::NotInstalled;
     }
     for out in &outputs {
-        match content_hash(&out.target) {
+        match out.current_hash() {
             Ok(actual) if actual != out.content_hash => return StatusBadge::Modified,
             Ok(_) => {}
             Err(_) => return StatusBadge::NotInstalled,
@@ -95,6 +94,7 @@ fn find_by_repo<'a>(lock: &'a GrimoireLock, registry: &str, repository: &str) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::install::content_hash::content_hash;
     use crate::install::install_state::InstallRecord;
     use crate::lock::grimoire_lock::LockMetadata;
     use crate::lock::lock_version::LockVersion;

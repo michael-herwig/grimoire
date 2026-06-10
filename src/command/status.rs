@@ -17,7 +17,6 @@ use crate::api::artifact_status::ArtifactStatus;
 use crate::api::status_report::{StatusEntry, StatusReport};
 use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
-use crate::install::content_hash::content_hash;
 use crate::install::install_state::InstallState;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
@@ -192,7 +191,7 @@ fn derive_state(
     // Any drifted client output (canonical OR generated — the recorded
     // hash for a generated target is over its expected bytes) ⇒ modified.
     for out in &outputs {
-        match content_hash(&out.target) {
+        match out.current_hash() {
             Ok(actual) if actual != out.content_hash => return ArtifactStatus::Modified,
             Ok(_) => {}
             // An unreadable target is effectively gone for reporting.
@@ -209,6 +208,7 @@ fn derive_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::install::content_hash::content_hash;
     use crate::install::install_state::InstallRecord;
     use crate::oci::pinned_identifier::PinnedIdentifier;
     use crate::oci::{Algorithm, Digest, Identifier};

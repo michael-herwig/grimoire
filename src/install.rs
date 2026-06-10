@@ -24,7 +24,7 @@ pub mod uninstall;
 #[allow(unused_imports)]
 pub use client_target::{ClientTarget, MaterializedFile};
 #[allow(unused_imports)]
-pub use content_hash::content_hash;
+pub use content_hash::{content_hash, footprint_hash};
 #[allow(unused_imports)]
 pub use install_error::{InstallError, InstallErrorKind};
 #[allow(unused_imports)]

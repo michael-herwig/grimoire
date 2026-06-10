@@ -128,18 +128,38 @@ pub fn pack_skill_dir(dir: &Path) -> Result<Vec<u8>, SkillError> {
         .map_err(|e| SkillError::new(dir, SkillErrorKind::Io(e)))
 }
 
-/// Pack the rule file at `file` into an uncompressed tar with a single
-/// `<name>.md` entry, matching the materializer's rule layout.
+/// Pack the rule file at `file` into an uncompressed tar.
+///
+/// Emits the index `<name>.md` entry, plus — when a sibling support
+/// directory `<parent>/<name>/` exists beside the index — every file under
+/// it rooted at `<name>/<rel>`. Entries are emitted in sorted path order so
+/// the layer digest is deterministic; a rule with no support directory
+/// packs byte-identically to a single `<name>.md` entry.
 ///
 /// # Errors
 ///
-/// [`SkillErrorKind::Io`] for a read failure.
+/// [`SkillErrorKind::Io`] for a read/walk failure.
 pub fn pack_rule_file(file: &Path) -> Result<Vec<u8>, SkillError> {
     let name = rule_name(file)?;
-    let bytes = std::fs::read(file).map_err(|e| SkillError::new(file, SkillErrorKind::Io(e)))?;
+
+    let mut files: Vec<(String, PathBuf)> = vec![(format!("{name}.md"), file.to_path_buf())];
+
+    // The optional sibling support dir shares the index's stem: for
+    // `rules/<name>.md` it is `rules/<name>/`. Include it only when it is a
+    // real directory; any other sibling (or none) leaves the degenerate
+    // single-file case untouched.
+    let support = file.with_extension("");
+    if support.is_dir() {
+        collect_files(&support, &support, &name, &mut files)
+            .map_err(|e| SkillError::new(&support, SkillErrorKind::Io(e)))?;
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+
     let mut builder = tar::Builder::new(Vec::new());
-    append_entry(&mut builder, &format!("{name}.md"), &bytes)
-        .map_err(|e| SkillError::new(file, SkillErrorKind::Io(e)))?;
+    for (entry_path, abs) in &files {
+        let bytes = std::fs::read(abs).map_err(|e| SkillError::new(abs, SkillErrorKind::Io(e)))?;
+        append_entry(&mut builder, entry_path, &bytes).map_err(|e| SkillError::new(abs, SkillErrorKind::Io(e)))?;
+    }
     builder
         .into_inner()
         .map_err(|e| SkillError::new(file, SkillErrorKind::Io(e)))
@@ -299,6 +319,70 @@ mod tests {
             std::fs::read_to_string(dest.join("rust-style.md")).unwrap(),
             "---\npaths: [\"**/*.rs\"]\n---\n# Rust Style\n"
         );
+    }
+
+    #[test]
+    fn pack_rule_with_support_dir_round_trips_index_and_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("rules/my-rule.md");
+        write(
+            &f,
+            "---\npaths: [\"**/*.rs\"]\n---\n# index\nsee ./my-rule/examples.md\n",
+        );
+        // Sibling support dir sharing the index stem.
+        write(&tmp.path().join("rules/my-rule/examples.md"), "# examples\n");
+        write(&tmp.path().join("rules/my-rule/schema.json"), "{}\n");
+
+        let tar = pack_rule_file(&f).expect("pack");
+        let dest = tmp.path().join("out");
+        let written = DefaultMaterializer
+            .materialize(ArtifactKind::Rule, "my-rule", &tar, &dest)
+            .expect("materialize");
+        // The materializer returns `written` sorted as `PathBuf`
+        // (component-wise), so support files precede the index file.
+        assert_eq!(
+            written,
+            vec![
+                PathBuf::from("my-rule/examples.md"),
+                PathBuf::from("my-rule/schema.json"),
+                PathBuf::from("my-rule.md"),
+            ]
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest.join("my-rule/examples.md")).unwrap(),
+            "# examples\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest.join("my-rule/schema.json")).unwrap(),
+            "{}\n"
+        );
+    }
+
+    #[test]
+    fn pack_rule_without_support_dir_is_single_entry() {
+        // The degenerate case must still pack to exactly one `<name>.md`
+        // entry — no behavior change for plain single-file rules.
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("rust-style.md");
+        write(&f, "---\npaths: [\"**/*.rs\"]\n---\n# Rust Style\n");
+        let tar = pack_rule_file(&f).expect("pack");
+        let dest = tmp.path().join("out");
+        let written = DefaultMaterializer
+            .materialize(ArtifactKind::Rule, "rust-style", &tar, &dest)
+            .expect("materialize");
+        assert_eq!(written, vec![PathBuf::from("rust-style.md")]);
+    }
+
+    #[test]
+    fn pack_rule_with_support_dir_is_deterministic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("my-rule.md");
+        write(&f, "# index\n");
+        write(&tmp.path().join("my-rule/a.md"), "a\n");
+        write(&tmp.path().join("my-rule/nested/b.json"), "{}\n");
+        let first = pack_rule_file(&f).unwrap();
+        let second = pack_rule_file(&f).unwrap();
+        assert_eq!(first, second, "multi-file rule pack must be byte-stable");
     }
 
     #[test]

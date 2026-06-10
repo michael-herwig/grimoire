@@ -21,7 +21,6 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use crate::install::content_hash::content_hash;
 use crate::install::install_state::InstallState;
 use crate::install::uninstall::uninstall;
 use crate::lock::grimoire_lock::GrimoireLock;
@@ -148,7 +147,7 @@ fn is_modified(state: &InstallState, kind: ArtifactKind, name: &str) -> Result<b
     };
     for out in record.client_outputs() {
         if out.target.exists() {
-            let actual = content_hash(&out.target).map_err(|source| PruneError {
+            let actual = out.current_hash().map_err(|source| PruneError {
                 path: out.target.clone(),
                 source,
             })?;
@@ -163,6 +162,7 @@ fn is_modified(state: &InstallState, kind: ArtifactKind, name: &str) -> Result<b
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::install::content_hash::content_hash;
     use crate::install::install_state::{ClientRecord, InstallRecord};
     use crate::lock::grimoire_lock::LockMetadata;
     use crate::lock::lock_version::LockVersion;
@@ -191,6 +191,7 @@ mod tests {
                 client: "claude".to_string(),
                 target: file.clone(),
                 content_hash: hash,
+                support_dir: None,
             }],
         });
         file
@@ -212,6 +213,7 @@ mod tests {
                 client: "claude".to_string(),
                 target: dir.clone(),
                 content_hash: hash,
+                support_dir: None,
             }],
         });
         dir

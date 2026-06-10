@@ -177,6 +177,36 @@ mod tests {
     }
 
     #[test]
+    fn multi_file_rule_materializes_index_and_support() {
+        // A rule tar carrying the index plus a sibling support tree
+        // extracts both, sorted, exactly like any multi-entry archive.
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("dest");
+        let blob = tar_of(&[
+            ("my-rule.md", b"# index\n"),
+            ("my-rule/examples.md", b"# ex\n"),
+            ("my-rule/schema.json", b"{}\n"),
+        ]);
+        let m = DefaultMaterializer;
+        let written = m
+            .materialize(ArtifactKind::Rule, "my-rule", &blob, &dest)
+            .expect("materialize");
+        // `written` is sorted as `PathBuf` (component-wise), so the support
+        // files (two components) sort before the one-component index file.
+        assert_eq!(
+            written,
+            vec![
+                PathBuf::from("my-rule/examples.md"),
+                PathBuf::from("my-rule/schema.json"),
+                PathBuf::from("my-rule.md"),
+            ]
+        );
+        assert!(dest.join("my-rule.md").is_file());
+        assert!(dest.join("my-rule/examples.md").is_file());
+        assert!(dest.join("my-rule/schema.json").is_file());
+    }
+
+    #[test]
     fn skill_tree_materializes_sorted() {
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("dest");

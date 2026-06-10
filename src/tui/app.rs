@@ -26,7 +26,6 @@ use ratatui::backend::CrosstermBackend;
 use crate::catalog::registry_catalog::Catalog;
 use crate::config::declaration::DesiredSet;
 use crate::config::scope::ConfigScope;
-use crate::install::content_hash::content_hash;
 use crate::install::install_state::InstallState;
 use crate::install::installer::{InstallOutcome, install_all};
 use crate::install::materializer::DefaultMaterializer;
@@ -325,7 +324,7 @@ fn derive_artifact_state(
         return ArtifactState::IntegrityMissing;
     }
     for out in &outputs {
-        match content_hash(&out.target) {
+        match out.current_hash() {
             Ok(actual) if actual != out.content_hash => return ArtifactState::Modified,
             Ok(_) => {}
             Err(_) => return ArtifactState::IntegrityMissing,

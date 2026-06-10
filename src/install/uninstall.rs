@@ -65,20 +65,11 @@ pub fn uninstall(state: &mut InstallState, kind: ArtifactKind, name: &str) -> st
 
     let mut removed = Vec::new();
     for out in record.client_outputs() {
-        match std::fs::symlink_metadata(&out.target) {
-            Ok(meta) => {
-                // `symlink_metadata` does not traverse links, so a
-                // symlinked target is unlinked as a file, never followed
-                // into an unrelated tree.
-                if meta.is_dir() {
-                    std::fs::remove_dir_all(&out.target)?;
-                } else {
-                    std::fs::remove_file(&out.target)?;
-                }
-                removed.push(out.target.clone());
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
+        // The index/target first, then a multi-file rule's sibling support
+        // directory (`<parent>/<name>/`) so the whole footprint is reaped.
+        remove_output(&out.target, &mut removed)?;
+        if let Some(support_dir) = &out.support_dir {
+            remove_output(support_dir, &mut removed)?;
         }
     }
 
@@ -87,6 +78,26 @@ pub fn uninstall(state: &mut InstallState, kind: ArtifactKind, name: &str) -> st
         outcome: UninstallOutcome::Removed,
         removed,
     })
+}
+
+/// Remove one recorded output `path` (a file or directory), pushing it onto
+/// `removed` when it was present. An absent path is tolerated (idempotent).
+/// `symlink_metadata` does not traverse links, so a symlinked target is
+/// unlinked as a file, never followed into an unrelated tree.
+fn remove_output(path: &std::path::Path, removed: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => {
+            if meta.is_dir() {
+                std::fs::remove_dir_all(path)?;
+            } else {
+                std::fs::remove_file(path)?;
+            }
+            removed.push(path.to_path_buf());
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(test)]
@@ -127,6 +138,7 @@ mod tests {
                 client: "claude".to_string(),
                 target: skill_dir.clone(),
                 content_hash: content_hash(&skill_dir).unwrap(),
+                support_dir: None,
             }],
         });
         st.record(InstallRecord {
@@ -148,6 +160,45 @@ mod tests {
         assert_eq!(r.outcome, UninstallOutcome::Removed);
         assert!(!rule_file.exists());
         assert!(st.get(ArtifactKind::Rule, "style").is_none());
+    }
+
+    #[test]
+    fn removes_multi_file_rule_index_and_support_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+
+        // A multi-file rule: index file + sibling support directory.
+        let index = dir.path().join(".claude/rules/my-rule.md");
+        let support = dir.path().join(".claude/rules/my-rule");
+        std::fs::create_dir_all(&support).unwrap();
+        std::fs::write(&index, b"# index\n").unwrap();
+        std::fs::write(support.join("examples.md"), b"# ex\n").unwrap();
+
+        let mut st = InstallState::empty(&state_path);
+        st.record(InstallRecord {
+            kind: ArtifactKind::Rule,
+            name: "my-rule".to_string(),
+            pinned: pinned("acme/my-rule"),
+            content_hash: content_hash(&index).unwrap(),
+            target: index.clone(),
+            clients: vec![ClientRecord {
+                client: "claude".to_string(),
+                target: index.clone(),
+                content_hash: content_hash(&index).unwrap(),
+                support_dir: Some(support.clone()),
+            }],
+        });
+
+        let r = uninstall(&mut st, ArtifactKind::Rule, "my-rule").unwrap();
+        assert_eq!(r.outcome, UninstallOutcome::Removed);
+        assert_eq!(r.removed, vec![index.clone(), support.clone()]);
+        assert!(!index.exists(), "index file removed");
+        assert!(!support.exists(), "support directory removed recursively");
+        assert!(st.get(ArtifactKind::Rule, "my-rule").is_none());
+
+        // Idempotent: a second uninstall reports nothing left to do.
+        let again = uninstall(&mut st, ArtifactKind::Rule, "my-rule").unwrap();
+        assert_eq!(again.outcome, UninstallOutcome::NotInstalled);
     }
 
     #[test]

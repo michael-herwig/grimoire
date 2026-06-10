@@ -23,7 +23,7 @@ use crate::oci::access::OciAccess;
 use crate::oci::reference::ArtifactRef;
 use crate::oci::{ArtifactKind, Digest, Identifier};
 
-use super::content_hash::content_hash;
+use super::content_hash::footprint_hash;
 use super::install_error::{InstallError, InstallErrorKind};
 use super::install_state::{InstallRecord, InstallState};
 use super::materializer::ArtifactMaterializer;
@@ -133,7 +133,7 @@ async fn install_one<M: ArtifactMaterializer>(
         let mut all_intact = true;
         for out in rec.client_outputs() {
             if out.target.exists() {
-                let actual = content_hash(&out.target).map_err(|e| target_io(&out.target, e))?;
+                let actual = out.current_hash().map_err(|e| target_io(&out.target, e))?;
                 if actual != out.content_hash {
                     if !force {
                         return Ok(InstallOutcome::Refused {
@@ -224,21 +224,58 @@ async fn install_one<M: ArtifactMaterializer>(
         );
     }
 
+    // A rule may carry a sibling support directory staged beside the index
+    // file (`<root>/<name>/…`); a plain single-file rule has none. Skills
+    // are a single directory tree, never a support dir.
+    let staged_support: Option<std::path::PathBuf> = match kind {
+        ArtifactKind::Rule => {
+            let dir = materialized_root.join(&artifact.name);
+            dir.is_dir().then_some(dir)
+        }
+        _ => None,
+    };
+
     // Materialize into every selected client's final path, replacing any
     // prior output, and hash each client output for the integrity record.
     let mut client_records = Vec::with_capacity(target.clients().len());
     for client in target.clients() {
         let dest = target.path_for(*client, kind, &artifact.name);
+        // A rule's support dir always lives at `<parent>/<name>/`, whether
+        // or not *this* version ships one. `cleanup` is that location (so a
+        // version that drops its support dir still reaps the stale one);
+        // `support_dest` is `Some` only when this version actually
+        // materializes one (so the record + footprint hash cover it).
+        let cleanup = match kind {
+            ArtifactKind::Rule => dest.parent().map(|parent| parent.join(&artifact.name)),
+            _ => None,
+        };
+        let support_dest = staged_support.as_ref().and(cleanup.clone());
+
         if dest.exists() {
             remove_path(&dest).map_err(|e| target_io(&dest, e))?;
+        }
+        if let Some(sd) = &cleanup
+            && sd.exists()
+        {
+            remove_path(sd).map_err(|e| target_io(sd, e))?;
         }
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).map_err(|e| target_io(parent, e))?;
         }
         client
-            .materialize(kind, &artifact.name, &canonical, &dest, &pinned_str)
+            .materialize(
+                kind,
+                &artifact.name,
+                &canonical,
+                &dest,
+                &pinned_str,
+                staged_support.as_deref(),
+            )
             .map_err(crate::error::Error::from)?;
         fsync_tree(&dest).map_err(|e| target_io(&dest, e))?;
+        if let Some(sd) = &support_dest {
+            fsync_tree(sd).map_err(|e| target_io(sd, e))?;
+        }
         #[cfg(unix)]
         if let Some(parent) = dest.parent()
             && !parent.as_os_str().is_empty()
@@ -247,11 +284,12 @@ async fn install_one<M: ArtifactMaterializer>(
                 .and_then(|f| f.sync_all())
                 .map_err(|e| target_io(parent, e))?;
         }
-        let installed_hash = content_hash(&dest).map_err(|e| target_io(&dest, e))?;
+        let installed_hash = footprint_hash(&dest, support_dest.as_deref()).map_err(|e| target_io(&dest, e))?;
         client_records.push(ClientRecord {
             client: client.to_string(),
             target: dest,
             content_hash: installed_hash,
+            support_dir: support_dest,
         });
     }
 
@@ -458,6 +496,24 @@ mod tests {
         b.into_inner().unwrap()
     }
 
+    /// A multi-file rule tar: the index `<name>.md` plus `<name>/<rel>`
+    /// support entries.
+    fn multi_rule_tar(name: &str, index: &[u8], support: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut b = tar::Builder::new(Vec::new());
+        let mut push = |path: String, body: &[u8]| {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(body.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            b.append_data(&mut h, path, body).unwrap();
+        };
+        push(format!("{name}.md"), index);
+        for (rel, body) in support {
+            push(format!("{name}/{rel}"), body);
+        }
+        b.into_inner().unwrap()
+    }
+
     fn locked_rule(name: &str, blob: &[u8]) -> LockedArtifact {
         let digest = Algorithm::Sha256.hash(blob);
         let id = Identifier::new_registry(name, "localhost:5000").clone_with_digest(digest);
@@ -617,6 +673,119 @@ mod tests {
             err,
             crate::error::Error::Install(ie) if matches!(ie.kind, InstallErrorKind::BlobDigestMismatch { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn multi_file_rule_installs_noop_then_support_drift_refused_then_forced() {
+        let dir = tempfile::tempdir().unwrap();
+        let blob = multi_rule_tar("my-rule", b"# index\n", &[("examples.md", b"# ex\n")]);
+        let lock = lock_of(vec![locked_rule("my-rule", &blob)]);
+        let access = arc(BlobMock { blob: blob.clone() });
+        let target = InstallTarget::new(dir.path(), vec![]);
+        let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
+        let m = DefaultMaterializer;
+
+        // Fresh install lands the index and the support file beside it.
+        let r1 = install_all(&lock, &access, &m, &target, &mut state, false).await;
+        assert_eq!(*r1[0].result.as_ref().unwrap(), InstallOutcome::Installed);
+        let index = dir.path().join(".claude/rules/my-rule.md");
+        let support = dir.path().join(".claude/rules/my-rule/examples.md");
+        assert!(index.is_file());
+        assert!(support.is_file());
+
+        // Intact footprint ⇒ no-op.
+        let r2 = install_all(&lock, &access, &m, &target, &mut state, false).await;
+        assert_eq!(*r2[0].result.as_ref().unwrap(), InstallOutcome::AlreadyInstalled);
+
+        // Editing a *support* file (not the index) is detected as drift.
+        std::fs::write(&support, b"hand edited\n").unwrap();
+        let refused = install_all(&lock, &access, &m, &target, &mut state, false).await;
+        assert!(matches!(
+            refused[0].result.as_ref().unwrap(),
+            InstallOutcome::Refused { .. }
+        ));
+        assert_eq!(std::fs::read(&support).unwrap(), b"hand edited\n");
+
+        // Forcing restores the canonical support content.
+        let forced = install_all(&lock, &access, &m, &target, &mut state, true).await;
+        assert_eq!(*forced[0].result.as_ref().unwrap(), InstallOutcome::Updated);
+        assert_eq!(std::fs::read(&support).unwrap(), b"# ex\n");
+    }
+
+    #[tokio::test]
+    async fn deleting_the_support_dir_is_drift_not_an_io_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let blob = multi_rule_tar("my-rule", b"# index\n", &[("examples.md", b"# ex\n")]);
+        let lock = lock_of(vec![locked_rule("my-rule", &blob)]);
+        let access = arc(BlobMock { blob: blob.clone() });
+        let target = InstallTarget::new(dir.path(), vec![]);
+        let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
+        let m = DefaultMaterializer;
+
+        install_all(&lock, &access, &m, &target, &mut state, false).await;
+        let support = dir.path().join(".claude/rules/my-rule");
+        assert!(support.is_dir());
+
+        // The user deletes the whole support dir (index kept).
+        std::fs::remove_dir_all(&support).unwrap();
+
+        // Reinstall must see *drift* (Refused), never a hard I/O error.
+        let refused = install_all(&lock, &access, &m, &target, &mut state, false).await;
+        assert!(
+            matches!(refused[0].result.as_ref().unwrap(), InstallOutcome::Refused { .. }),
+            "a deleted support dir is drift, got {:?}",
+            refused[0].result
+        );
+
+        // Forcing restores the support tree.
+        let forced = install_all(&lock, &access, &m, &target, &mut state, true).await;
+        assert_eq!(*forced[0].result.as_ref().unwrap(), InstallOutcome::Updated);
+        assert_eq!(std::fs::read(support.join("examples.md")).unwrap(), b"# ex\n");
+    }
+
+    #[tokio::test]
+    async fn updating_a_rule_that_drops_its_support_dir_reaps_the_stale_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let blob_v1 = multi_rule_tar("my-rule", b"# index v1\n", &[("examples.md", b"# ex\n")]);
+        let lock_v1 = lock_of(vec![locked_rule("my-rule", &blob_v1)]);
+        let target = InstallTarget::new(dir.path(), vec![]);
+        let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
+        let m = DefaultMaterializer;
+
+        install_all(
+            &lock_v1,
+            &arc(BlobMock { blob: blob_v1 }),
+            &m,
+            &target,
+            &mut state,
+            false,
+        )
+        .await;
+        let support = dir.path().join(".claude/rules/my-rule");
+        assert!(support.is_dir(), "v1 installs the support dir");
+
+        // v2 is a plain single-file rule (different digest ⇒ update).
+        let blob_v2 = rule_tar("my-rule", b"# index v2\n");
+        let lock_v2 = lock_of(vec![locked_rule("my-rule", &blob_v2)]);
+        let r = install_all(
+            &lock_v2,
+            &arc(BlobMock { blob: blob_v2 }),
+            &m,
+            &target,
+            &mut state,
+            false,
+        )
+        .await;
+        assert_eq!(*r[0].result.as_ref().unwrap(), InstallOutcome::Updated);
+
+        assert!(dir.path().join(".claude/rules/my-rule.md").is_file());
+        assert!(
+            !support.exists(),
+            "a version that drops its support dir must reap the stale one"
+        );
+        // The record no longer carries a support dir.
+        let rec = state.get(ArtifactKind::Rule, "my-rule").unwrap();
+        assert!(rec.clients.iter().all(|c| c.support_dir.is_none()));
     }
 
     #[test]

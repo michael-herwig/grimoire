@@ -44,9 +44,61 @@ pub fn content_hash(root: &Path) -> io::Result<Digest> {
     }
 
     entries.sort_by(|a, b| a.0.cmp(&b.0));
+    hash_entries(&entries)
+}
 
+/// Compute the integrity hash over an install output's full footprint: the
+/// `target` alone when `support_dir` is `None`, or the index file plus its
+/// sibling support directory (a multi-file rule) when `Some`.
+///
+/// With `support_dir == None` the result is byte-identical to
+/// [`content_hash`] over `target`, so a skill tree and a single-file rule
+/// hash exactly as before. With `Some`, the index file (keyed by its file
+/// name) and every support file (keyed `<dir>/<rel>`) fold into one
+/// SHA-256 using the same rel-keyed, walk-order- and location-independent
+/// scheme, so a drifted support file changes the digest.
+///
+/// # Errors
+///
+/// Returns any I/O error from walking or reading the footprint.
+pub fn footprint_hash(target: &Path, support_dir: Option<&Path>) -> io::Result<Digest> {
+    // No support dir — or a recorded one the user has since deleted — hashes
+    // the index alone. A deleted dir therefore yields a digest that differs
+    // from the recorded combined one: detected as drift (not surfaced as an
+    // I/O error by the integrity readers), consistent across every reader.
+    let Some(dir) = support_dir.filter(|d| d.is_dir()) else {
+        return content_hash(target);
+    };
+
+    let mut entries: Vec<(PathBuf, PathBuf)> = Vec::new();
+    // The index file, keyed by its own file name (e.g. `my-rule.md`).
+    let index_key = target
+        .file_name()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("artifact"));
+    entries.push((index_key, target.to_path_buf()));
+
+    // The support tree, keyed `<dir>/<rel>` (e.g. `my-rule/examples.md`).
+    let dir_key = dir
+        .file_name()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("support"));
+    let mut support: Vec<(PathBuf, PathBuf)> = Vec::new();
+    collect_files(dir, dir, &mut support)?;
+    for (rel, abs) in support {
+        entries.push((dir_key.join(rel), abs));
+    }
+
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    hash_entries(&entries)
+}
+
+/// Fold `(relative_key, absolute_path)` entries into one SHA-256. Each
+/// entry contributes `rel_key_bytes || 0x00 || file_bytes`; the caller must
+/// sort `entries` by key first for a walk-order-independent digest.
+fn hash_entries(entries: &[(PathBuf, PathBuf)]) -> io::Result<Digest> {
     let mut hasher = sha2::Sha256::new();
-    for (rel, abs) in &entries {
+    for (rel, abs) in entries {
         let rel_bytes = path_to_bytes(rel);
         hasher.update(&rel_bytes);
         hasher.update([0u8]);
@@ -168,6 +220,83 @@ mod tests {
         std::fs::create_dir_all(&tree).unwrap();
         std::fs::write(tree.join("SKILL.md"), b"y").unwrap();
         assert!(matches!(content_hash(&tree).unwrap(), Digest::Sha256(_)));
+    }
+
+    #[test]
+    fn footprint_without_support_equals_content_hash() {
+        // A single-file rule (no support dir) must hash byte-identically to
+        // `content_hash`, so existing rules are unaffected.
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("rust-style.md");
+        std::fs::write(&f, b"# Rust\n").unwrap();
+        assert_eq!(footprint_hash(&f, None).unwrap(), content_hash(&f).unwrap());
+    }
+
+    #[test]
+    fn footprint_with_support_is_stable_and_location_independent() {
+        // The combined footprint is keyed on file names, not absolute
+        // paths, so the same index + support content hashes equally from
+        // two different roots.
+        let build = |root: &Path| -> Digest {
+            let index = root.join("rules/my-rule.md");
+            let support = root.join("rules/my-rule");
+            std::fs::create_dir_all(&support).unwrap();
+            std::fs::write(&index, b"# index\n").unwrap();
+            std::fs::write(support.join("examples.md"), b"ex\n").unwrap();
+            std::fs::write(support.join("schema.json"), b"{}\n").unwrap();
+            footprint_hash(&index, Some(&support)).unwrap()
+        };
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        assert_eq!(build(a.path()), build(b.path()));
+    }
+
+    #[test]
+    fn footprint_changes_when_support_file_edited() {
+        // Editing a support file must be detected as drift.
+        let dir = tempfile::tempdir().unwrap();
+        let index = dir.path().join("my-rule.md");
+        let support = dir.path().join("my-rule");
+        std::fs::create_dir_all(&support).unwrap();
+        std::fs::write(&index, b"# index\n").unwrap();
+        std::fs::write(support.join("examples.md"), b"before\n").unwrap();
+        let before = footprint_hash(&index, Some(&support)).unwrap();
+        std::fs::write(support.join("examples.md"), b"after\n").unwrap();
+        assert_ne!(before, footprint_hash(&index, Some(&support)).unwrap());
+    }
+
+    #[test]
+    fn footprint_with_deleted_support_dir_is_drift_not_error() {
+        // A recorded support dir the user later deletes must hash without
+        // error (index-only) and differ from the recorded combined digest,
+        // so the readers see drift rather than an I/O failure.
+        let dir = tempfile::tempdir().unwrap();
+        let index = dir.path().join("my-rule.md");
+        let support = dir.path().join("my-rule");
+        std::fs::create_dir_all(&support).unwrap();
+        std::fs::write(&index, b"# index\n").unwrap();
+        std::fs::write(support.join("examples.md"), b"# ex\n").unwrap();
+        let recorded = footprint_hash(&index, Some(&support)).unwrap();
+
+        std::fs::remove_dir_all(&support).unwrap();
+        let now = footprint_hash(&index, Some(&support)).expect("missing support dir is not an error");
+        assert_ne!(recorded, now, "a deleted support dir is detected as drift");
+        assert_eq!(now, content_hash(&index).unwrap(), "falls back to the index-only hash");
+    }
+
+    #[test]
+    fn footprint_changes_when_support_file_added() {
+        // Adding a support file shifts the footprint (so a rule gaining a
+        // file is not mistaken for unchanged).
+        let dir = tempfile::tempdir().unwrap();
+        let index = dir.path().join("my-rule.md");
+        let support = dir.path().join("my-rule");
+        std::fs::create_dir_all(&support).unwrap();
+        std::fs::write(&index, b"# index\n").unwrap();
+        std::fs::write(support.join("a.md"), b"a\n").unwrap();
+        let before = footprint_hash(&index, Some(&support)).unwrap();
+        std::fs::write(support.join("b.md"), b"b\n").unwrap();
+        assert_ne!(before, footprint_hash(&index, Some(&support)).unwrap());
     }
 
     #[test]

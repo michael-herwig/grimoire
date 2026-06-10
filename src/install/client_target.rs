@@ -100,10 +100,16 @@ impl ClientTarget {
     /// client layout at `dest`.
     ///
     /// `artifact_root` is the extracted canonical content: the skill
-    /// directory (`<name>/…`) or the rule file (`<name>.md`). `dest` is
-    /// the final path from [`Self::path_for`]. For a skill, the tree is
-    /// copied verbatim. For a rule, Claude/OpenCode copy verbatim;
-    /// Copilot transforms (strip `paths:`, prepend provenance header).
+    /// directory (`<name>/…`) or the rule index file (`<name>.md`). `dest`
+    /// is the final path from [`Self::path_for`]. For a skill, the tree is
+    /// copied verbatim. For a rule, Claude/OpenCode copy the index verbatim;
+    /// Copilot transforms it (strip `paths:`, prepend provenance header).
+    ///
+    /// `support_dir` is the optional sibling support directory of a
+    /// multi-file rule (`<root>/<name>/`). When present it is copied
+    /// verbatim — for every client, including Copilot — beside the index at
+    /// `<dest_parent>/<name>/`, so the index's relative links resolve. Only
+    /// the index is ever transformed.
     ///
     /// # Errors
     ///
@@ -116,10 +122,11 @@ impl ClientTarget {
         artifact_root: &Path,
         dest: &Path,
         pinned: &str,
+        support_dir: Option<&Path>,
     ) -> Result<Vec<MaterializedFile>, InstallError> {
         match kind {
             ArtifactKind::Skill => self.materialize_skill(artifact_root, dest),
-            ArtifactKind::Rule => self.materialize_rule(name, artifact_root, dest, pinned),
+            ArtifactKind::Rule => self.materialize_rule(name, artifact_root, dest, pinned, support_dir),
             // Bundles never materialize; they expand into members.
             ArtifactKind::Bundle => unreachable!("bundles are never materialized; they expand into members"),
         }
@@ -133,38 +140,53 @@ impl ClientTarget {
         Ok(out)
     }
 
-    /// Materialize a rule: a verbatim copy for Claude/OpenCode, the
-    /// transformed `*.instructions.md` for Copilot.
+    /// Materialize a rule: the index is a verbatim copy for Claude/OpenCode
+    /// and the transformed `*.instructions.md` for Copilot; an optional
+    /// support directory is copied verbatim beside the index for every
+    /// client.
     fn materialize_rule(
         self,
-        _name: &str,
+        name: &str,
         artifact_root: &Path,
         dest: &Path,
         pinned: &str,
+        support_dir: Option<&Path>,
     ) -> Result<Vec<MaterializedFile>, InstallError> {
         let bytes = std::fs::read(artifact_root).map_err(|e| target_io(artifact_root, e))?;
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).map_err(|e| target_io(parent, e))?;
         }
 
-        match self {
+        let mut out = match self {
             Self::Claude | Self::OpenCode => {
                 std::fs::write(dest, &bytes).map_err(|e| target_io(dest, e))?;
-                Ok(vec![MaterializedFile {
+                vec![MaterializedFile {
                     path: dest.to_path_buf(),
                     generated: false,
-                }])
+                }]
             }
             Self::Copilot => {
                 let doc = String::from_utf8_lossy(&bytes);
                 let transformed = copilot_instructions(&doc, pinned, artifact_root)?;
                 std::fs::write(dest, transformed.as_bytes()).map_err(|e| target_io(dest, e))?;
-                Ok(vec![MaterializedFile {
+                vec![MaterializedFile {
                     path: dest.to_path_buf(),
                     generated: true,
-                }])
+                }]
             }
+        };
+
+        // Copy the sibling support tree verbatim (all clients, no transform)
+        // beside the index at `<dest_parent>/<name>/`, so the index's
+        // relative links resolve.
+        if let Some(src) = support_dir
+            && let Some(parent) = dest.parent()
+        {
+            copy_tree(src, &parent.join(name), &mut out)?;
         }
+
+        out.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(out)
     }
 }
 
@@ -302,7 +324,7 @@ mod tests {
         std::fs::write(&src, "---\npaths: [\"a\"]\n---\n# R\n").unwrap();
         let dest = tmp.path().join(".claude/rules/rust-style.md");
         let files = ClientTarget::Claude
-            .materialize(ArtifactKind::Rule, "rust-style", &src, &dest, "p")
+            .materialize(ArtifactKind::Rule, "rust-style", &src, &dest, "p", None)
             .unwrap();
         assert_eq!(files.len(), 1);
         assert!(!files[0].generated);
@@ -319,7 +341,7 @@ mod tests {
         std::fs::write(&src, "---\npaths: [\"a\"]\n---\n# R\nbody\n").unwrap();
         let dest = tmp.path().join(".github/instructions/rust-style.instructions.md");
         let files = ClientTarget::Copilot
-            .materialize(ArtifactKind::Rule, "rust-style", &src, &dest, "pin")
+            .materialize(ArtifactKind::Rule, "rust-style", &src, &dest, "pin", None)
             .unwrap();
         assert!(files[0].generated);
         let body = std::fs::read_to_string(&dest).unwrap();
@@ -338,7 +360,7 @@ mod tests {
         for client in [ClientTarget::Claude, ClientTarget::OpenCode, ClientTarget::Copilot] {
             let dest = tmp.path().join(format!("out-{client}/code-review"));
             let files = client
-                .materialize(ArtifactKind::Skill, "code-review", &root, &dest, "p")
+                .materialize(ArtifactKind::Skill, "code-review", &root, &dest, "p", None)
                 .unwrap();
             assert_eq!(files.len(), 2);
             assert!(files.iter().all(|f| !f.generated));
@@ -351,5 +373,75 @@ mod tests {
                 "echo hi\n"
             );
         }
+    }
+
+    #[test]
+    fn materialize_rule_with_support_dir_claude_opencode_verbatim() {
+        // The index lands verbatim and the support tree is copied beside it
+        // at `<dest_parent>/<name>/` for Claude/OpenCode.
+        for client in [ClientTarget::Claude, ClientTarget::OpenCode] {
+            let tmp = tempfile::tempdir().unwrap();
+            let src = tmp.path().join("my-rule.md");
+            std::fs::write(&src, "---\npaths: [\"a\"]\n---\n# index\n").unwrap();
+            let support = tmp.path().join("my-rule");
+            std::fs::create_dir_all(support.join("nested")).unwrap();
+            std::fs::write(support.join("examples.md"), "# ex\n").unwrap();
+            std::fs::write(support.join("nested/schema.json"), "{}\n").unwrap();
+
+            let dest = tmp.path().join(format!("{client}/.x/rules/my-rule.md"));
+            let files = client
+                .materialize(ArtifactKind::Rule, "my-rule", &src, &dest, "p", Some(support.as_path()))
+                .unwrap();
+
+            assert!(files.iter().all(|f| !f.generated), "verbatim copies are not generated");
+            let support_dest = dest.parent().unwrap().join("my-rule");
+            assert_eq!(
+                std::fs::read_to_string(&dest).unwrap(),
+                "---\npaths: [\"a\"]\n---\n# index\n"
+            );
+            assert_eq!(
+                std::fs::read_to_string(support_dest.join("examples.md")).unwrap(),
+                "# ex\n"
+            );
+            assert_eq!(
+                std::fs::read_to_string(support_dest.join("nested/schema.json")).unwrap(),
+                "{}\n"
+            );
+        }
+    }
+
+    #[test]
+    fn materialize_rule_with_support_dir_copilot_transforms_index_copies_support() {
+        // Copilot transforms only the index; the support dir is copied
+        // verbatim beside it at `.github/instructions/<name>/`.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("my-rule.md");
+        std::fs::write(&src, "---\npaths: [\"a\"]\n---\n# index\nbody\n").unwrap();
+        let support = tmp.path().join("my-rule");
+        std::fs::create_dir_all(&support).unwrap();
+        std::fs::write(support.join("examples.md"), "# ex\n").unwrap();
+
+        let dest = tmp.path().join(".github/instructions/my-rule.instructions.md");
+        let files = ClientTarget::Copilot
+            .materialize(
+                ArtifactKind::Rule,
+                "my-rule",
+                &src,
+                &dest,
+                "pin",
+                Some(support.as_path()),
+            )
+            .unwrap();
+
+        // The index is the single generated file; support files are verbatim.
+        assert_eq!(files.iter().filter(|f| f.generated).count(), 1);
+        let index = std::fs::read_to_string(&dest).unwrap();
+        assert!(index.starts_with("<!-- generated by grim from pin;"));
+        assert!(!index.contains("paths:"), "frontmatter stripped on the index only");
+        let support_dest = dest.parent().unwrap().join("my-rule");
+        assert_eq!(
+            std::fs::read_to_string(support_dest.join("examples.md")).unwrap(),
+            "# ex\n"
+        );
     }
 }
