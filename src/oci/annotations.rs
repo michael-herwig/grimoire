@@ -18,7 +18,20 @@
 
 use std::collections::BTreeMap;
 
+use crate::oci::ArtifactKind;
+use crate::oci::artifact_kind::KIND_ANNOTATION;
+use crate::oci::manifest::OciManifest;
 use crate::skill::{RuleFrontmatter, SkillFrontmatter};
+
+/// Read the artifact kind from a pulled manifest's `com.grimoire.kind`
+/// annotation. `None` when the annotation is absent or not a known kind —
+/// the single read path shared by `add` (kind inference) and the catalog.
+pub fn kind_from_manifest(manifest: &OciManifest) -> Option<ArtifactKind> {
+    manifest
+        .annotations
+        .get(KIND_ANNOTATION)
+        .and_then(|s| ArtifactKind::from_annotation(s))
+}
 
 /// Build the manifest annotation map for a skill.
 ///
@@ -47,7 +60,7 @@ pub fn annotations_for_skill(fm: &SkillFrontmatter, version: &str, source: Optio
     // manager). A deterministic content digest is the stronger guarantee;
     // reproducible-build practice drops volatile timestamps for the same
     // reason.
-    a.insert("com.grimoire.kind".to_string(), "skill".to_string());
+    a.insert(KIND_ANNOTATION.to_string(), "skill".to_string());
     if let Some(kw) = fm.metadata.get("keywords") {
         a.insert("com.grimoire.keywords".to_string(), kw.clone());
     }
@@ -76,7 +89,7 @@ pub fn annotations_for_rule(
         a.insert("org.opencontainers.image.source".to_string(), src.to_string());
     }
     // Omitted for idempotent re-release — see `annotations_for_skill`.
-    a.insert("com.grimoire.kind".to_string(), "rule".to_string());
+    a.insert(KIND_ANNOTATION.to_string(), "rule".to_string());
     if let Some(kw) = keywords_from_extra(fm) {
         a.insert("com.grimoire.keywords".to_string(), kw);
     }
@@ -105,7 +118,7 @@ pub fn annotations_for_bundle(
     if let Some(src) = source {
         a.insert("org.opencontainers.image.source".to_string(), src.to_string());
     }
-    a.insert("com.grimoire.kind".to_string(), "bundle".to_string());
+    a.insert(KIND_ANNOTATION.to_string(), "bundle".to_string());
     a
 }
 
@@ -175,6 +188,27 @@ mod tests {
         let rf = RuleFrontmatter::default();
         let a = annotations_for_rule("rust-style", &rf, "\n\n", "1.0.0", None);
         assert_eq!(a["org.opencontainers.image.description"], "grimoire rule rust-style");
+    }
+
+    #[test]
+    fn kind_from_manifest_reads_annotation() {
+        use crate::oci::manifest::OciManifest;
+        let mut annotations = BTreeMap::new();
+        annotations.insert(KIND_ANNOTATION.to_string(), "rule".to_string());
+        let manifest = OciManifest {
+            media_type: None,
+            layers: vec![],
+            annotations,
+        };
+        assert_eq!(kind_from_manifest(&manifest), Some(crate::oci::ArtifactKind::Rule));
+
+        // Absent / unknown annotation ⇒ None (caller must ask for --kind).
+        let bare = OciManifest {
+            media_type: None,
+            layers: vec![],
+            annotations: BTreeMap::new(),
+        };
+        assert_eq!(kind_from_manifest(&bare), None);
     }
 
     #[test]

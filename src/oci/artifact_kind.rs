@@ -5,6 +5,11 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The OCI manifest annotation key the artifact kind is persisted under at
+/// publish time and read back from on pull. Single source of truth for the
+/// key string (writers in `annotations.rs`, readers in the catalog + `add`).
+pub const KIND_ANNOTATION: &str = "com.grimoire.kind";
+
 /// A Grimoire-managed artifact kind.
 ///
 /// Closed internal enum: the binary is the only consumer, so matches stay
@@ -35,6 +40,18 @@ impl ArtifactKind {
             Self::Skill => "skills",
             Self::Rule => "rules",
             Self::Bundle => "bundles",
+        }
+    }
+
+    /// Parse the lowercase annotation/string form (`skill`/`rule`/`bundle`)
+    /// into a kind. `None` for any other string. The single source of truth
+    /// for the string→enum mapping (`add`, `build`, catalog read).
+    pub fn from_annotation(s: &str) -> Option<Self> {
+        match s {
+            "skill" => Some(Self::Skill),
+            "rule" => Some(Self::Rule),
+            "bundle" => Some(Self::Bundle),
+            _ => None,
         }
     }
 
@@ -70,6 +87,19 @@ mod tests {
         assert!(ArtifactKind::Skill.is_dir_artifact());
         assert!(!ArtifactKind::Rule.is_dir_artifact());
         assert!(!ArtifactKind::Bundle.is_dir_artifact());
+    }
+
+    #[test]
+    fn from_annotation_round_trips_and_rejects_unknown() {
+        assert_eq!(ArtifactKind::from_annotation("skill"), Some(ArtifactKind::Skill));
+        assert_eq!(ArtifactKind::from_annotation("rule"), Some(ArtifactKind::Rule));
+        assert_eq!(ArtifactKind::from_annotation("bundle"), Some(ArtifactKind::Bundle));
+        assert_eq!(ArtifactKind::from_annotation("Skill"), None);
+        assert_eq!(ArtifactKind::from_annotation("widget"), None);
+        // Display ⇄ from_annotation round-trip for every kind.
+        for k in [ArtifactKind::Skill, ArtifactKind::Rule, ArtifactKind::Bundle] {
+            assert_eq!(ArtifactKind::from_annotation(&k.to_string()), Some(k));
+        }
     }
 
     #[test]
