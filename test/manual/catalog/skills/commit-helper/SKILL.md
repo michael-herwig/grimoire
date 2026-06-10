@@ -3,7 +3,8 @@ name: commit-helper
 description: Draft a Conventional Commit message from staged changes. Use when the user asks to commit, save progress, or write a commit message.
 license: Apache-2.0
 metadata:
-  keywords: git commit conventional-commits workflow
+  summary: Conventional Commit drafter
+  keywords: git,commit,conventional-commits,workflow
   author: grimoire-manual-rig
 ---
 

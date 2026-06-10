@@ -3,7 +3,8 @@ name: code-reviewer
 description: Review a diff for SOLID/DRY violations, missing tests, and risky changes. Use when asked to review a pull request, audit a patch, or check code quality before merge.
 license: Apache-2.0
 metadata:
-  keywords: review quality solid dry audit pull-request
+  summary: Multi-pass diff reviewer
+  keywords: review,quality,solid,dry,audit
   author: grimoire-manual-rig
 ---
 

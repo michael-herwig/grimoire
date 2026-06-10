@@ -1,0 +1,15 @@
+# A bundle for the manual rig: groups a few catalog members so `grim search`
+# / `grim tui` show a bundle entry carrying its own catalog metadata.
+#
+# Members reference the rig's fixed registry (localhost:5050) on the floating
+# major tag, exactly as the consumer project declares them.
+summary = "Curated starter pack"
+keywords = "starter,review,style,security"
+description = "A starter set: the code-review skill plus the Rust and security rules"
+
+[skills]
+code-reviewer = "localhost:5050/grimoire/skills/code-reviewer:1"
+
+[rules]
+rust-style = "localhost:5050/grimoire/rules/rust-style:1"
+security-baseline = "localhost:5050/grimoire/rules/security-baseline:1"

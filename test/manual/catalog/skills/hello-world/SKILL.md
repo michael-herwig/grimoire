@@ -3,7 +3,8 @@ name: hello-world
 description: A minimal smoke-test skill. Use to verify a grimoire install/transform round-trip end to end with the smallest possible artifact.
 license: Apache-2.0
 metadata:
-  keywords: demo smoke hello example
+  summary: Minimal smoke-test skill
+  keywords: demo,smoke,hello,example
   author: grimoire-manual-rig
 ---
 

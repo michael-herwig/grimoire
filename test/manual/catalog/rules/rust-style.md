@@ -2,8 +2,8 @@
 paths:
   - "**/*.rs"
   - "**/Cargo.toml"
-metadata:
-  keywords: rust style lints quality
+summary: Idiomatic Rust style rules
+keywords: rust,style,lints,quality
 ---
 
 # Rust Style

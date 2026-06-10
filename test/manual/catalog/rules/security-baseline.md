@@ -1,8 +1,8 @@
 ---
 paths:
   - "**/*"
-metadata:
-  keywords: security secrets validation baseline
+summary: Security baseline rules
+keywords: security,secrets,validation,baseline
 ---
 
 # Security Baseline

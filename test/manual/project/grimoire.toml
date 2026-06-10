@@ -16,5 +16,9 @@ code-reviewer = "localhost:5050/grimoire/skills/code-reviewer:1"
 commit-helper = "localhost:5050/grimoire/skills/commit-helper:1"
 
 [rules]
-rust-style        = "localhost:5050/grimoire/rules/rust-style:1"
-security-baseline = "localhost:5050/grimoire/rules/security-baseline:1"
+rust-style         = "localhost:5050/grimoire/rules/rust-style:1"
+security-baseline  = "localhost:5050/grimoire/rules/security-baseline:1"
+# A multi-file rule (index + support dir): install materializes
+# .claude/rules/architecture-guide.md AND .claude/rules/architecture-guide/.
+# Edit a file under that dir to see `grim status` report it as `modified`.
+architecture-guide = "localhost:5050/grimoire/rules/architecture-guide:1"

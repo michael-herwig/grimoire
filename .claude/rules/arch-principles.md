@@ -59,6 +59,7 @@ the relevant ADRs before making decisions in the same domain.
 |-----|----------|
 | [adr_oci_artifact_type.md](../artifacts/adr_oci_artifact_type.md) | Type artifacts with OCI `artifactType` + a Grimoire config media type per kind; retire the `com.grimoire.kind` annotation |
 | [adr_multifile_rules.md](../artifacts/adr_multifile_rules.md) | A rule may carry an optional sibling support directory (`<name>/`) packed into the same single tar layer and installed beside the index `<name>.md`; wire contract unchanged, single-file rules unaffected, install record gains an optional `support_dir` |
+| [adr_catalog_summary_annotation.md](../artifacts/adr_catalog_summary_annotation.md) | Add an optional `com.grimoire.summary` annotation, authored in-file for every kind (skill `metadata`, rule frontmatter, bundle `.toml`); keywords are string-only everywhere; `grim search` shows summary-or-description truncated to a terminal-width-clamped window (full when piped), keeps the full description in JSON, and search matches the summary too |
 
 ## Code Style Conventions
 

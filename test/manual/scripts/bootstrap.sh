@@ -3,10 +3,11 @@
 #
 #   test/manual/scripts/bootstrap.sh
 #
-# Idempotent: re-running re-publishes identical content (same digest, a
-# no-op) and is safe. Publishes every skill/rule at 1.0.0 and additionally
-# a 1.1.0 of `code-reviewer` so the rolling-release / `grim update` flow
-# has something to roll forward.
+# Re-runnable: re-publishes the *current* catalog content with `--force`, so
+# an edited artifact moves its exact-version tag to the new digest (identical
+# content resolves to the same digest, an effective no-op). Publishes every
+# skill/rule/bundle at 1.0.0; the rolling-release / `grim update` flow gets a
+# 1.1.0 of `code-reviewer` from scripts/release-update.sh.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,7 +54,11 @@ mkdir -p "$GRIM_HOME"
 
 release() { # <path> <repo-subpath> <name> <version>
     log "release $3:$4"
-    "$GRIM" release "$1" "$REGISTRY/$NS/$2/$3:$4"
+    # --force so re-seeding after editing the catalog moves the exact-version
+    # tag to the new content. The rig owns this throwaway :5050 registry, so
+    # overwriting an immutable version tag here is intended, not a footgun;
+    # identical content still resolves to the same digest (an effective no-op).
+    "$GRIM" release "$1" "$REGISTRY/$NS/$2/$3:$4" --force
 }
 
 # 4. Publish every skill at 1.0.0.
@@ -62,18 +67,28 @@ for dir in "$CATALOG"/skills/*/; do
     release "$dir" skills "$name" 1.0.0
 done
 
-# 5. Publish every rule at 1.0.0.
+# 5. Publish every rule at 1.0.0. An index `<name>.md` with a sibling
+#    `<name>/` directory is a multi-file rule — `grim release` packs the
+#    support dir automatically (the `rules/*.md` glob is non-recursive, so a
+#    support file is never released as its own rule).
 for file in "$CATALOG"/rules/*.md; do
     name="$(basename "$file" .md)"
     release "$file" rules "$name" 1.0.0
 done
 
-# Note: every skill/rule is published ONCE at 1.0.0. The rolling-release
+# 6. Publish every bundle at 1.0.0 (its members were published above).
+for file in "$CATALOG"/bundles/*.toml; do
+    [ -e "$file" ] || continue
+    name="$(basename "$file" .toml)"
+    release "$file" bundles "$name" 1.0.0
+done
+
+# Note: every skill/rule/bundle is published ONCE at 1.0.0. The rolling-release
 # demo (publishing code-reviewer 1.1.0) is deliberately a separate step —
 # run scripts/release-update.sh AFTER you have locked at 1.0.0 so `grim
 # update` actually shows the pin rolling forward.
 
-log "done. Catalog published to $REGISTRY/$NS/{skills,rules}/* at 1.0.0"
+log "done. Catalog published to $REGISTRY/$NS/{skills,rules,bundles}/* at 1.0.0"
 cat >&2 <<EOF
 
 Next:
