@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Grimoire Authors
 
-//! The editor-transform seam: turn a materialized canonical artifact tree
-//! into the on-disk layout one editor expects.
+//! The client-transform seam: turn a materialized canonical artifact tree
+//! into the on-disk layout one client expects.
 //!
 //! Claude and OpenCode read the canonical files verbatim (only the
 //! directory differs). Copilot reads skills verbatim but **transforms** a
@@ -20,12 +20,12 @@ use crate::skill::RuleFrontmatter;
 
 use super::install_error::{InstallError, InstallErrorKind};
 
-/// A supported editor target.
+/// A supported client target.
 ///
 /// Closed internal enum (the binary is the only consumer); `Default` is
-/// [`EditorTarget::Claude`].
+/// [`ClientTarget::Claude`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum EditorTarget {
+pub enum ClientTarget {
     /// Claude Code — `.claude/{skills,rules}`.
     #[default]
     Claude,
@@ -35,7 +35,7 @@ pub enum EditorTarget {
     Copilot,
 }
 
-impl std::str::FromStr for EditorTarget {
+impl std::str::FromStr for ClientTarget {
     type Err = InstallError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -43,14 +43,14 @@ impl std::str::FromStr for EditorTarget {
             "claude" => Ok(Self::Claude),
             "opencode" => Ok(Self::OpenCode),
             "copilot" => Ok(Self::Copilot),
-            other => Err(InstallError::without_reference(InstallErrorKind::UnsupportedEditor(
+            other => Err(InstallError::without_reference(InstallErrorKind::UnsupportedClient(
                 other.to_string(),
             ))),
         }
     }
 }
 
-impl std::fmt::Display for EditorTarget {
+impl std::fmt::Display for ClientTarget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Claude => "claude",
@@ -60,7 +60,7 @@ impl std::fmt::Display for EditorTarget {
     }
 }
 
-/// One file produced for an editor target.
+/// One file produced for an client target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaterializedFile {
     /// The absolute on-disk path written.
@@ -71,8 +71,8 @@ pub struct MaterializedFile {
     pub generated: bool,
 }
 
-impl EditorTarget {
-    /// The editor root directory name under the workspace (`.claude`,
+impl ClientTarget {
+    /// The client root directory name under the workspace (`.claude`,
     /// `.opencode`, `.github`).
     fn root_dir(self) -> &'static str {
         match self {
@@ -84,7 +84,7 @@ impl EditorTarget {
 
     /// The absolute install path for the named artifact of `kind` under
     /// `workspace`. A skill installs as a directory; a rule as a single
-    /// file (whose name/extension may differ per editor).
+    /// file (whose name/extension may differ per client).
     pub fn path_for(self, workspace: &Path, kind: ArtifactKind, name: &str) -> PathBuf {
         let root = workspace.join(self.root_dir());
         match (self, kind) {
@@ -97,7 +97,7 @@ impl EditorTarget {
     }
 
     /// Materialize the canonical artifact tree at `artifact_root` into the
-    /// editor layout at `dest`.
+    /// client layout at `dest`.
     ///
     /// `artifact_root` is the extracted canonical content: the skill
     /// directory (`<name>/…`) or the rule file (`<name>.md`). `dest` is
@@ -125,7 +125,7 @@ impl EditorTarget {
         }
     }
 
-    /// Copy a skill tree verbatim into `dest` (all editors).
+    /// Copy a skill tree verbatim into `dest` (all clients).
     fn materialize_skill(self, artifact_root: &Path, dest: &Path) -> Result<Vec<MaterializedFile>, InstallError> {
         let mut out = Vec::new();
         copy_tree(artifact_root, dest, &mut out)?;
@@ -228,42 +228,42 @@ mod tests {
     #[test]
     fn from_str_and_display_round_trip_lowercase() {
         for (s, t) in [
-            ("claude", EditorTarget::Claude),
-            ("opencode", EditorTarget::OpenCode),
-            ("copilot", EditorTarget::Copilot),
+            ("claude", ClientTarget::Claude),
+            ("opencode", ClientTarget::OpenCode),
+            ("copilot", ClientTarget::Copilot),
         ] {
-            assert_eq!(EditorTarget::from_str(s).unwrap(), t);
+            assert_eq!(ClientTarget::from_str(s).unwrap(), t);
             assert_eq!(t.to_string(), s);
         }
-        assert!(EditorTarget::from_str("vscode").is_err());
-        assert_eq!(EditorTarget::default(), EditorTarget::Claude);
+        assert!(ClientTarget::from_str("vscode").is_err());
+        assert_eq!(ClientTarget::default(), ClientTarget::Claude);
     }
 
     #[test]
-    fn path_for_matches_each_editor_layout() {
+    fn path_for_matches_each_client_layout() {
         let w = Path::new("/w");
         assert_eq!(
-            EditorTarget::Claude.path_for(w, ArtifactKind::Skill, "code-review"),
+            ClientTarget::Claude.path_for(w, ArtifactKind::Skill, "code-review"),
             PathBuf::from("/w/.claude/skills/code-review")
         );
         assert_eq!(
-            EditorTarget::Claude.path_for(w, ArtifactKind::Rule, "rust-style"),
+            ClientTarget::Claude.path_for(w, ArtifactKind::Rule, "rust-style"),
             PathBuf::from("/w/.claude/rules/rust-style.md")
         );
         assert_eq!(
-            EditorTarget::OpenCode.path_for(w, ArtifactKind::Skill, "x"),
+            ClientTarget::OpenCode.path_for(w, ArtifactKind::Skill, "x"),
             PathBuf::from("/w/.opencode/skills/x")
         );
         assert_eq!(
-            EditorTarget::OpenCode.path_for(w, ArtifactKind::Rule, "x"),
+            ClientTarget::OpenCode.path_for(w, ArtifactKind::Rule, "x"),
             PathBuf::from("/w/.opencode/rules/x.md")
         );
         assert_eq!(
-            EditorTarget::Copilot.path_for(w, ArtifactKind::Skill, "x"),
+            ClientTarget::Copilot.path_for(w, ArtifactKind::Skill, "x"),
             PathBuf::from("/w/.github/skills/x")
         );
         assert_eq!(
-            EditorTarget::Copilot.path_for(w, ArtifactKind::Rule, "rust-style"),
+            ClientTarget::Copilot.path_for(w, ArtifactKind::Rule, "rust-style"),
             PathBuf::from("/w/.github/instructions/rust-style.instructions.md")
         );
     }
@@ -301,7 +301,7 @@ mod tests {
         let src = tmp.path().join("rust-style.md");
         std::fs::write(&src, "---\npaths: [\"a\"]\n---\n# R\n").unwrap();
         let dest = tmp.path().join(".claude/rules/rust-style.md");
-        let files = EditorTarget::Claude
+        let files = ClientTarget::Claude
             .materialize(ArtifactKind::Rule, "rust-style", &src, &dest, "p")
             .unwrap();
         assert_eq!(files.len(), 1);
@@ -318,7 +318,7 @@ mod tests {
         let src = tmp.path().join("rust-style.md");
         std::fs::write(&src, "---\npaths: [\"a\"]\n---\n# R\nbody\n").unwrap();
         let dest = tmp.path().join(".github/instructions/rust-style.instructions.md");
-        let files = EditorTarget::Copilot
+        let files = ClientTarget::Copilot
             .materialize(ArtifactKind::Rule, "rust-style", &src, &dest, "pin")
             .unwrap();
         assert!(files[0].generated);
@@ -328,16 +328,16 @@ mod tests {
     }
 
     #[test]
-    fn materialize_skill_copies_tree_verbatim_all_editors() {
+    fn materialize_skill_copies_tree_verbatim_all_clients() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("code-review");
         std::fs::create_dir_all(root.join("scripts")).unwrap();
         std::fs::write(root.join("SKILL.md"), "---\nname: code-review\ndescription: d\n---\n").unwrap();
         std::fs::write(root.join("scripts/run.sh"), "echo hi\n").unwrap();
 
-        for editor in [EditorTarget::Claude, EditorTarget::OpenCode, EditorTarget::Copilot] {
-            let dest = tmp.path().join(format!("out-{editor}/code-review"));
-            let files = editor
+        for client in [ClientTarget::Claude, ClientTarget::OpenCode, ClientTarget::Copilot] {
+            let dest = tmp.path().join(format!("out-{client}/code-review"));
+            let files = client
                 .materialize(ArtifactKind::Skill, "code-review", &root, &dest, "p")
                 .unwrap();
             assert_eq!(files.len(), 2);

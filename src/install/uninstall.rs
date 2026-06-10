@@ -4,7 +4,7 @@
 //! The shared uninstall seam: the inverse of the installer's
 //! materialize + record step.
 //!
-//! [`uninstall`] deletes every recorded editor output for an artifact
+//! [`uninstall`] deletes every recorded client output for an artifact
 //! from disk and drops its [`InstallState`] record. It is the single
 //! source of truth for "remove an installed artifact's files", reused by
 //! the `grim uninstall` command and the TUI delete action so neither
@@ -43,7 +43,7 @@ pub struct UninstallResult {
     pub removed: Vec<PathBuf>,
 }
 
-/// Remove every recorded editor output for `(kind, name)` from disk and
+/// Remove every recorded client output for `(kind, name)` from disk and
 /// drop its install-state record.
 ///
 /// The caller still owns saving `state` and (for a full uninstall)
@@ -64,7 +64,7 @@ pub fn uninstall(state: &mut InstallState, kind: ArtifactKind, name: &str) -> st
     };
 
     let mut removed = Vec::new();
-    for out in record.editor_outputs() {
+    for out in record.client_outputs() {
         match std::fs::symlink_metadata(&out.target) {
             Ok(meta) => {
                 // `symlink_metadata` does not traverse links, so a
@@ -93,7 +93,7 @@ pub fn uninstall(state: &mut InstallState, kind: ArtifactKind, name: &str) -> st
 mod tests {
     use super::*;
     use crate::install::content_hash::content_hash;
-    use crate::install::install_state::{EditorRecord, InstallRecord};
+    use crate::install::install_state::{ClientRecord, InstallRecord};
     use crate::oci::pinned_identifier::PinnedIdentifier;
     use crate::oci::{Digest, Identifier};
 
@@ -123,8 +123,8 @@ mod tests {
             pinned: pinned("acme/hello"),
             content_hash: content_hash(&skill_dir).unwrap(),
             target: skill_dir.clone(),
-            editors: vec![EditorRecord {
-                editor: "claude".to_string(),
+            clients: vec![ClientRecord {
+                client: "claude".to_string(),
                 target: skill_dir.clone(),
                 content_hash: content_hash(&skill_dir).unwrap(),
             }],
@@ -135,7 +135,7 @@ mod tests {
             pinned: pinned("acme/style"),
             content_hash: content_hash(&rule_file).unwrap(),
             target: rule_file.clone(),
-            editors: vec![],
+            clients: vec![],
         });
 
         let r = uninstall(&mut st, ArtifactKind::Skill, "hello").unwrap();
@@ -171,7 +171,7 @@ mod tests {
             pinned: pinned("acme/ghost"),
             content_hash: Digest::Sha256("b".repeat(64)),
             target: gone.clone(),
-            editors: vec![],
+            clients: vec![],
         });
         // Files never existed on disk; record still drops cleanly.
         let r = uninstall(&mut st, ArtifactKind::Skill, "ghost").unwrap();

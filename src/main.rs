@@ -77,7 +77,7 @@ pub enum Command {
     Init(InitArgs),
     /// Resolve declared floating tags to pinned digests in `grimoire.lock`.
     Lock(LockArgs),
-    /// Materialize the locked artifacts into the editor.
+    /// Materialize the locked artifacts into the configured AI client(s).
     Install(InstallArgs),
     /// Re-resolve floating tags and re-materialize changed artifacts.
     Update(UpdateArgs),

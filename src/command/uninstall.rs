@@ -5,7 +5,7 @@
 //!
 //! Unlike `grim remove` (which only undeclares — config + lock — and
 //! leaves materialized files on disk), `uninstall` is the *full* inverse
-//! of `install`: it deletes the materialized editor outputs and drops the
+//! of `install`: it deletes the materialized client outputs and drops the
 //! install-state record via the shared [`crate::install::uninstall`]
 //! seam, **and** undeclares the entry from the config + lock so nothing
 //! is left behind. The TUI delete action reuses the same seam.

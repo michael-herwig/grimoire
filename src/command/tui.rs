@@ -80,7 +80,7 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
             workspace: other.workspace.clone(),
             lock_path: other.lock_path.clone(),
             state_path: other.state_path.clone(),
-            editor_default: other.options.editor.clone(),
+            clients_default: other.options.clients.clone(),
             label: scope_label(other.scope).to_string(),
         });
 
@@ -93,7 +93,7 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
         workspace: scope.workspace.clone(),
         lock_path: scope.lock_path.clone(),
         state_path: scope.state_path.clone(),
-        editor_default: scope.options.editor.clone(),
+        clients_default: scope.options.clients.clone(),
         scope_label: scope_label(scope.scope).to_string(),
         alt,
     };

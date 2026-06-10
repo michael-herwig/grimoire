@@ -60,7 +60,7 @@ pub fn resolve(ctx: &Context, global: bool, config: Option<&Path>) -> Result<Res
             lock_path: paths.global_lock(),
             state_path: InstallState::global_path(&paths.state_dir()),
             // Global artifacts install under `$GRIM_HOME` so a global
-            // declaration is editor config that follows the user.
+            // declaration is client config that follows the user.
             workspace: paths.root().to_path_buf(),
             config_path,
         })

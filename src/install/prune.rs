@@ -139,14 +139,14 @@ pub fn prune_orphans(
     Ok(acted)
 }
 
-/// Whether any recorded editor output for `(kind, name)` that is still on
+/// Whether any recorded client output for `(kind, name)` that is still on
 /// disk has drifted from its recorded content hash. An absent output is not
 /// "modified" — it is simply gone, and safe to prune.
 fn is_modified(state: &InstallState, kind: ArtifactKind, name: &str) -> Result<bool, PruneError> {
     let Some(record) = state.get(kind, name) else {
         return Ok(false);
     };
-    for out in record.editor_outputs() {
+    for out in record.client_outputs() {
         if out.target.exists() {
             let actual = content_hash(&out.target).map_err(|source| PruneError {
                 path: out.target.clone(),
@@ -163,7 +163,7 @@ fn is_modified(state: &InstallState, kind: ArtifactKind, name: &str) -> Result<b
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::install::install_state::{EditorRecord, InstallRecord};
+    use crate::install::install_state::{ClientRecord, InstallRecord};
     use crate::lock::grimoire_lock::LockMetadata;
     use crate::lock::lock_version::LockVersion;
     use crate::lock::locked_artifact::LockedArtifact;
@@ -187,8 +187,8 @@ mod tests {
             pinned: pinned(name),
             content_hash: hash.clone(),
             target: file.clone(),
-            editors: vec![EditorRecord {
-                editor: "claude".to_string(),
+            clients: vec![ClientRecord {
+                client: "claude".to_string(),
                 target: file.clone(),
                 content_hash: hash,
             }],
@@ -208,8 +208,8 @@ mod tests {
             pinned: pinned(name),
             content_hash: hash.clone(),
             target: dir.clone(),
-            editors: vec![EditorRecord {
-                editor: "claude".to_string(),
+            clients: vec![ClientRecord {
+                client: "claude".to_string(),
                 target: dir.clone(),
                 content_hash: hash,
             }],

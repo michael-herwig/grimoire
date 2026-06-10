@@ -53,10 +53,10 @@ pub struct UpdateArgs {
     #[arg(long)]
     pub config: Option<std::path::PathBuf>,
 
-    /// Editor target(s) to re-materialize into (comma-separated,
-    /// repeatable). Defaults to the config `editor` option, then `claude`.
-    #[arg(long = "target")]
-    pub target: Vec<String>,
+    /// AI client(s) to re-materialize into (comma-separated, repeatable).
+    /// Defaults to the config `clients` option, then `claude`.
+    #[arg(long = "client")]
+    pub client: Vec<String>,
 }
 
 /// Run `grim update`.
@@ -109,8 +109,8 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     // overwritten — `status` still surfaces it as `modified` beforehand.
     let target = super::grim(InstallTarget::parse(
         &scope.workspace,
-        &args.target,
-        scope.options.editor.as_deref(),
+        &args.client,
+        &scope.options.clients,
     ))?;
     let mut state = InstallState::load(&scope.state_path).map_err(|e| state_io(&scope.state_path, e))?;
     let materializer = DefaultMaterializer;

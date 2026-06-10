@@ -7,7 +7,7 @@
 //!
 //! JSON format: a single object `{kind, name, status}` (not an array —
 //! `uninstall` touches exactly one declared entry). Unlike `remove`,
-//! `uninstall` also deletes the materialized editor files and drops the
+//! `uninstall` also deletes the materialized client files and drops the
 //! install-state record (full uninstall).
 
 use std::io::{self, Write};

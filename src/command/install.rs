@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Grimoire Authors
 
-//! `grim install` — materialize the locked artifacts into the editor.
+//! `grim install` — materialize the locked artifacts into the client.
 //!
 //! Install does **not** resolve: it requires a lock that is present and
 //! whose `declaration_hash` matches the live config (otherwise it tells
@@ -40,11 +40,11 @@ pub struct InstallArgs {
     #[arg(long)]
     pub force: bool,
 
-    /// Editor target(s) to materialize into (comma-separated, repeatable;
-    /// `claude`, `opencode`, `copilot`). Defaults to the config `editor`
+    /// AI client(s) to materialize into (comma-separated, repeatable;
+    /// `claude`, `opencode`, `copilot`). Defaults to the config `clients`
     /// option, then `claude`.
-    #[arg(long = "target")]
-    pub target: Vec<String>,
+    #[arg(long = "client")]
+    pub client: Vec<String>,
 }
 
 /// Run `grim install`.
@@ -65,8 +65,8 @@ pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallRe
 
     let target = super::grim(InstallTarget::parse(
         &scope.workspace,
-        &args.target,
-        scope.options.editor.as_deref(),
+        &args.client,
+        &scope.options.clients,
     ))?;
     let access = super::access_seam(ctx)?;
     let mut state = super::grim(InstallState::load(&scope.state_path).map_err(|e| state_io(&scope.state_path, e)))?;

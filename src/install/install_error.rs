@@ -90,9 +90,9 @@ pub enum InstallErrorKind {
     #[error("blob digest mismatch: expected {expected}, got {actual}")]
     BlobDigestMismatch { expected: Digest, actual: Digest },
 
-    /// The configured editor target is not supported by this build.
-    #[error("unsupported editor target '{0}'; this build supports 'claude'")]
-    UnsupportedEditor(String),
+    /// The configured client target is not supported by this build.
+    #[error("unsupported client target '{0}'; supported clients are 'claude', 'opencode', 'copilot'")]
+    UnsupportedClient(String),
 }
 
 #[cfg(test)]
@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn display_without_reference_no_leading_separator() {
-        let err = InstallError::without_reference(InstallErrorKind::UnsupportedEditor("vscode".to_string()));
+        let err = InstallError::without_reference(InstallErrorKind::UnsupportedClient("vscode".to_string()));
         assert!(!err.to_string().starts_with(':'));
         assert!(!err.to_string().starts_with(' '));
         assert!(err.to_string().contains("vscode"));

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Grimoire Authors
 
-//! The editor-transform seam: turn an artifact blob into files on disk.
+//! The client-transform seam: turn an artifact blob into files on disk.
 //!
-//! [`ArtifactMaterializer`] is the trait Phase 5 extends with per-editor
+//! [`ArtifactMaterializer`] is the trait Phase 5 extends with per-client
 //! transforms (Copilot rule rewriting, etc.). This milestone ships only
 //! [`DefaultMaterializer`]: the blob is an uncompressed tar of the
 //! artifact tree (a skill is a directory tree rooted at `<name>/`; a rule
@@ -19,7 +19,7 @@ use super::install_error::{InstallError, InstallErrorKind};
 /// Turns an artifact blob into a set of files under a destination dir.
 ///
 /// Implementations decide how the on-wire blob maps to on-disk files.
-/// Phase 5 adds editor-specific transforms behind this same trait.
+/// Phase 5 adds client-specific transforms behind this same trait.
 pub trait ArtifactMaterializer {
     /// Materialize `blob` for the artifact `name` of `kind` into
     /// `dest_dir`, returning the written file paths relative to
@@ -39,7 +39,7 @@ pub trait ArtifactMaterializer {
 }
 
 /// The Phase-4 materializer: the blob is an uncompressed tar of the
-/// artifact tree. No editor transform — the canonical bytes land verbatim.
+/// artifact tree. No client transform — the canonical bytes land verbatim.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DefaultMaterializer;
 

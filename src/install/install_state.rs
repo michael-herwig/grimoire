@@ -37,13 +37,13 @@ pub enum InstallStateVersion {
     V1 = 1,
 }
 
-/// One editor target's materialized output for an artifact.
+/// One client target's materialized output for an artifact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct EditorRecord {
-    /// The editor target name (`claude`/`opencode`/`copilot`).
-    pub editor: String,
-    /// The on-disk path the artifact was materialized to for this editor.
+pub struct ClientRecord {
+    /// The client target name (`claude`/`opencode`/`copilot`).
+    pub client: String,
+    /// The on-disk path the artifact was materialized to for this client.
     pub target: PathBuf,
     /// The content hash of the materialized output at install time. For a
     /// generated (transformed) target this is the hash of the *expected*
@@ -53,11 +53,11 @@ pub struct EditorRecord {
 
 /// One installed artifact's recorded state.
 ///
-/// `target` / `content_hash` track the *primary* (first) editor for
-/// backward compatibility with the Phase-4 single-editor records and the
-/// `status` report; `editors` carries every materialized editor target so
-/// the integrity gate covers multi-editor (and generated) installs. An
-/// old single-editor record (no `editors`) is read transparently.
+/// `target` / `content_hash` track the *primary* (first) client for
+/// backward compatibility with the single-client records and the `status`
+/// report; `clients` carries every materialized client target so the
+/// integrity gate covers multi-client (and generated) installs. An old
+/// single-client record (no `clients`) is read transparently.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InstallRecord {
@@ -67,28 +67,28 @@ pub struct InstallRecord {
     pub name: String,
     /// The pin the artifact was installed from.
     pub pinned: PinnedIdentifier,
-    /// The content hash of the primary editor's materialized output.
+    /// The content hash of the primary client's materialized output.
     pub content_hash: Digest,
-    /// The primary editor's on-disk path.
+    /// The primary client's on-disk path.
     pub target: PathBuf,
-    /// Per-editor materialized outputs (empty ⇒ legacy single-editor
+    /// Per-client materialized outputs (empty ⇒ legacy single-client
     /// record described by `target`/`content_hash`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub editors: Vec<EditorRecord>,
+    pub clients: Vec<ClientRecord>,
 }
 
 impl InstallRecord {
-    /// Every editor output to integrity-check: the explicit per-editor
-    /// list when present, else the legacy single `(target, content_hash)`.
-    pub fn editor_outputs(&self) -> Vec<EditorRecord> {
-        if self.editors.is_empty() {
-            vec![EditorRecord {
-                editor: "claude".to_string(),
+    /// Every client output to integrity-check: the explicit per-client list
+    /// when present, else the legacy single `(target, content_hash)`.
+    pub fn client_outputs(&self) -> Vec<ClientRecord> {
+        if self.clients.is_empty() {
+            vec![ClientRecord {
+                client: "claude".to_string(),
                 target: self.target.clone(),
                 content_hash: self.content_hash.clone(),
             }]
         } else {
-            self.editors.clone()
+            self.clients.clone()
         }
     }
 }
@@ -223,7 +223,7 @@ mod tests {
             pinned: pinned(name, 'a'),
             content_hash: Algorithm::Sha256.hash(name.as_bytes()),
             target: PathBuf::from(format!("/w/.claude/{}/{name}", kind.subdir())),
-            editors: vec![],
+            clients: vec![],
         }
     }
 

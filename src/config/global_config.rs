@@ -94,7 +94,7 @@ mod tests {
             &path,
             r#"
 [options]
-editor = "claude"
+clients = ["claude"]
 
 [rules]
 rust-style = "ghcr.io/acme/rules/rust-style:v3"
@@ -102,7 +102,7 @@ rust-style = "ghcr.io/acme/rules/rust-style:v3"
         )
         .unwrap();
         let cfg = GlobalConfig::load(&path).expect("parse");
-        assert_eq!(cfg.options.editor.as_deref(), Some("claude"));
+        assert_eq!(cfg.options.clients, vec!["claude".to_string()]);
         assert_eq!(cfg.set.rules.len(), 1);
     }
 

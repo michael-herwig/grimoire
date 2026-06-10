@@ -225,7 +225,7 @@ code-review = "ghcr.io/acme/skills/code-review:stable"
             r#"
 [options]
 default_registry = "ghcr.io/acme"
-editor = "claude"
+clients = ["claude", "opencode"]
 
 [skills]
 code-review = "ghcr.io/acme/skills/code-review:stable"
@@ -236,7 +236,7 @@ rust-style = "ghcr.io/acme/rules/rust-style:v3"
         )
         .expect("parse");
         assert_eq!(cfg.options.default_registry.as_deref(), Some("ghcr.io/acme"));
-        assert_eq!(cfg.options.editor.as_deref(), Some("claude"));
+        assert_eq!(cfg.options.clients, vec!["claude".to_string(), "opencode".to_string()]);
         assert_eq!(cfg.set.skills.len(), 1);
         assert_eq!(cfg.set.rules.len(), 1);
     }

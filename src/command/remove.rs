@@ -6,7 +6,7 @@
 //! Drops the entry from the discovered config's `[skills]`/`[rules]`
 //! table and from the lock (re-saved). Materialized files are
 //! **intentionally left on disk** this milestone — removing installed
-//! editor files is deferred (a future `grim clean`); `remove` only
+//! client files is deferred (a future `grim clean`); `remove` only
 //! affects the declaration and the lock so the change is reversible.
 
 use clap::Args;

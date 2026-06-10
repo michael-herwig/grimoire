@@ -27,9 +27,11 @@ pub struct ConfigOptions {
     /// Default registry for short identifiers (overrides `GRIM_DEFAULT_REGISTRY`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_registry: Option<String>,
-    /// Editor target used by install/update when `--target` is absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub editor: Option<String>,
+    /// AI client targets install/update materialize into when `--client` is
+    /// absent. A list so one declaration can generate for several clients
+    /// at once (e.g. `["claude", "opencode"]`); empty defaults to `claude`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clients: Vec<String>,
 }
 
 /// The declared skills and rules.

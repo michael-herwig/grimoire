@@ -4,14 +4,14 @@
 //! Pull → materialize → integrity-gate → record: the grimoire divergence
 //! from a plain OCI pull.
 //!
-//! [`materializer`] is the editor-transform seam Phase 5 extends;
+//! [`materializer`] is the client-transform seam;
 //! [`content_hash`] is the deterministic integrity anchor; [`target`]
 //! resolves on-disk install paths; [`install_state`] persists what is
 //! installed where; [`installer`] coordinates the per-artifact pass with
 //! the local-modification refusal.
 
+pub mod client_target;
 pub mod content_hash;
-pub mod editor_target;
 pub mod install_error;
 pub mod install_state;
 pub mod installer;
@@ -22,9 +22,9 @@ pub mod target;
 pub mod uninstall;
 
 #[allow(unused_imports)]
-pub use content_hash::content_hash;
+pub use client_target::{ClientTarget, MaterializedFile};
 #[allow(unused_imports)]
-pub use editor_target::{EditorTarget, MaterializedFile};
+pub use content_hash::content_hash;
 #[allow(unused_imports)]
 pub use install_error::{InstallError, InstallErrorKind};
 #[allow(unused_imports)]

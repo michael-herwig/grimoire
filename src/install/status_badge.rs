@@ -66,7 +66,7 @@ pub fn derive_badge(
         return StatusBadge::NotInstalled;
     };
 
-    let outputs = record.editor_outputs();
+    let outputs = record.client_outputs();
     if outputs.iter().any(|o| !o.target.exists()) {
         return StatusBadge::NotInstalled;
     }
@@ -133,7 +133,7 @@ mod tests {
             pinned: pinned(repo, byte),
             content_hash: content_hash(target).unwrap(),
             target: target.to_path_buf(),
-            editors: vec![],
+            clients: vec![],
         });
         st
     }

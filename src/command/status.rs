@@ -184,12 +184,12 @@ fn derive_state(
     let Some(record) = state.get(kind, name) else {
         return ArtifactStatus::Missing;
     };
-    let outputs = record.editor_outputs();
-    // Any missing editor output ⇒ the artifact is not fully installed.
+    let outputs = record.client_outputs();
+    // Any missing client output ⇒ the artifact is not fully installed.
     if outputs.iter().any(|o| !o.target.exists()) {
         return ArtifactStatus::Missing;
     }
-    // Any drifted editor output (canonical OR generated — the recorded
+    // Any drifted client output (canonical OR generated — the recorded
     // hash for a generated target is over its expected bytes) ⇒ modified.
     for out in &outputs {
         match content_hash(&out.target) {
@@ -259,7 +259,7 @@ mod tests {
             pinned: pinned('a'),
             content_hash: hash.clone(),
             target: target.clone(),
-            editors: vec![],
+            clients: vec![],
         });
 
         // Same pin, intact content ⇒ installed.

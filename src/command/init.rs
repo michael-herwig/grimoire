@@ -63,7 +63,7 @@ pub async fn run(ctx: &Context, args: &InitArgs) -> anyhow::Result<(InitReport, 
 }
 
 /// Render the seed config. `[options]` is emitted only when there is
-/// something to put in it (a registry); the editor stays unset so the
+/// something to put in it (a registry); the clients list stays unset so the
 /// install default (`claude`) applies.
 fn render_config(registry: Option<&str>) -> String {
     let mut out = String::new();

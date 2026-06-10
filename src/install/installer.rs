@@ -69,7 +69,7 @@ pub struct ArtifactInstall {
 /// overwritten instead of refused). The first hard error for an artifact
 /// is recorded against that artifact; siblings still process so the report
 /// reflects the whole set. Each artifact is materialized into every
-/// editor target the [`InstallTarget`] selects.
+/// client target the [`InstallTarget`] selects.
 pub async fn install_all<M: ArtifactMaterializer>(
     lock: &GrimoireLock,
     access: &Arc<dyn OciAccess>,
@@ -92,12 +92,12 @@ pub async fn install_all<M: ArtifactMaterializer>(
             name: artifact.name.clone(),
             id: artifact.pinned.as_identifier().clone(),
         };
-        // The primary editor's path is the report target (back-compat).
+        // The primary client's path is the report target (back-compat).
         let primary = target
-            .editors()
+            .clients()
             .first()
             .copied()
-            .unwrap_or(crate::install::editor_target::EditorTarget::Claude);
+            .unwrap_or(crate::install::client_target::ClientTarget::Claude);
         let report_target = target.path_for(primary, kind, &artifact.name);
         let result = install_one(artifact, kind, access, materializer, target, state, force).await;
         results.push(ArtifactInstall {
@@ -109,7 +109,7 @@ pub async fn install_all<M: ArtifactMaterializer>(
     results
 }
 
-/// Install one artifact into every selected editor through the integrity
+/// Install one artifact into every selected client through the integrity
 /// gate.
 async fn install_one<M: ArtifactMaterializer>(
     artifact: &LockedArtifact,
@@ -120,18 +120,18 @@ async fn install_one<M: ArtifactMaterializer>(
     state: &mut InstallState,
     force: bool,
 ) -> Result<InstallOutcome, crate::error::Error> {
-    use crate::install::install_state::EditorRecord;
+    use crate::install::install_state::ClientRecord;
 
     let recorded = state.get(kind, &artifact.name).cloned();
     let pinned_str = artifact.pinned.strip_advisory().to_string();
 
-    // Integrity gate: for every editor output a prior record described,
+    // Integrity gate: for every client output a prior record described,
     // an on-disk content hash that drifted from what was recorded is a
     // local modification. Refuse unless forced; if every output is intact
     // and the pin is unchanged the install is a no-op.
     if let Some(rec) = &recorded {
         let mut all_intact = true;
-        for out in rec.editor_outputs() {
+        for out in rec.client_outputs() {
             if out.target.exists() {
                 let actual = content_hash(&out.target).map_err(|e| target_io(&out.target, e))?;
                 if actual != out.content_hash {
@@ -197,7 +197,7 @@ async fn install_one<M: ArtifactMaterializer>(
         .into());
     }
 
-    // Materialize the canonical tree once into a temp dir; every editor
+    // Materialize the canonical tree once into a temp dir; every client
     // target then transforms/copies from that single extracted tree.
     let staging = tempfile::Builder::new()
         .prefix(".grim-staging-")
@@ -224,18 +224,18 @@ async fn install_one<M: ArtifactMaterializer>(
         );
     }
 
-    // Materialize into every selected editor's final path, replacing any
-    // prior output, and hash each editor output for the integrity record.
-    let mut editor_records = Vec::with_capacity(target.editors().len());
-    for editor in target.editors() {
-        let dest = target.path_for(*editor, kind, &artifact.name);
+    // Materialize into every selected client's final path, replacing any
+    // prior output, and hash each client output for the integrity record.
+    let mut client_records = Vec::with_capacity(target.clients().len());
+    for client in target.clients() {
+        let dest = target.path_for(*client, kind, &artifact.name);
         if dest.exists() {
             remove_path(&dest).map_err(|e| target_io(&dest, e))?;
         }
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).map_err(|e| target_io(parent, e))?;
         }
-        editor
+        client
             .materialize(kind, &artifact.name, &canonical, &dest, &pinned_str)
             .map_err(crate::error::Error::from)?;
         fsync_tree(&dest).map_err(|e| target_io(&dest, e))?;
@@ -248,27 +248,27 @@ async fn install_one<M: ArtifactMaterializer>(
                 .map_err(|e| target_io(parent, e))?;
         }
         let installed_hash = content_hash(&dest).map_err(|e| target_io(&dest, e))?;
-        editor_records.push(EditorRecord {
-            editor: editor.to_string(),
+        client_records.push(ClientRecord {
+            client: client.to_string(),
             target: dest,
             content_hash: installed_hash,
         });
     }
 
-    // `target`/`content_hash` mirror the primary (first) editor so the
-    // status report and the Phase-4 single-editor contract are preserved.
+    // `target`/`content_hash` mirror the primary (first) client so the
+    // status report and the single-client contract are preserved.
     #[allow(clippy::expect_used)]
-    let primary = editor_records
+    let primary = client_records
         .first()
         .cloned()
-        .expect("InstallTarget always has at least one editor (defaults to claude)");
+        .expect("InstallTarget always has at least one client (defaults to claude)");
     state.record(InstallRecord {
         kind,
         name: artifact.name.clone(),
         pinned: artifact.pinned.clone(),
         content_hash: primary.content_hash,
         target: primary.target,
-        editors: editor_records,
+        clients: client_records,
     });
 
     Ok(if recorded.is_some() {
