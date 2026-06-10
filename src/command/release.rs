@@ -27,7 +27,7 @@ use crate::oci::annotations::annotations_for_bundle;
 use crate::oci::bundle::{BUNDLE_LAYER_MEDIA_TYPE, BundleManifest};
 use crate::oci::manifest::{Descriptor, OciManifest};
 use crate::oci::reference::ArtifactRef;
-use crate::oci::release::{ReleaseError, ReleaseErrorKind, cascade_tags};
+use crate::oci::release::{ReleaseError, ReleaseErrorKind, publish_tags};
 use crate::oci::{Algorithm, ArtifactKind, Identifier};
 use crate::resolve::resolve_error::{ResolveError, ResolveErrorKind};
 
@@ -70,13 +70,16 @@ pub struct ReleaseArgs {
 /// tag overwrite (65), or a registry/auth failure (69/80) propagate via
 /// the typed error chain.
 pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseReport, ExitCode)> {
-    // Parse the release reference; the version is its tag.
-    let id = super::grim(parse_reference(ctx, &args.reference))?;
-    // The version is the reference tag; a reference with no tag has no
-    // version, which `cascade_tags` rejects as invalid semver (carrying
-    // semver's own parse error as the source).
+    // Parse the release reference, expanding a short identifier against the
+    // effective default registry (config `[options].default_registry` first,
+    // then `--registry` / `GRIM_DEFAULT_REGISTRY`).
+    let default_registry = release_default_registry(ctx);
+    let id = super::grim(parse_reference(&args.reference, default_registry.as_deref()))?;
+    // The published tag is the reference tag; a reference with no tag is
+    // rejected (a release must carry a tag). A non-version tag publishes
+    // exactly itself (no cascade); full semver cascades.
     let version = id.tag().unwrap_or("").to_string();
-    let tags = super::grim(cascade_tags(&version))?;
+    let tags = super::grim(publish_tags(&version))?;
 
     let kind = detect_kind(&args.path, args.kind.as_deref())?;
     let repo = id.without_tag();
@@ -228,15 +231,28 @@ fn member_error(member: &crate::oci::bundle::BundleMember, kind: ResolveErrorKin
     )
 }
 
-/// Parse `<ref>` with the context default registry.
+/// Parse `<ref>`, expanding a short identifier against `default_registry`
+/// when one is configured.
 fn parse_reference(
-    ctx: &Context,
     reference: &str,
+    default_registry: Option<&str>,
 ) -> Result<Identifier, crate::oci::identifier::error::IdentifierError> {
-    match ctx.default_registry() {
+    match default_registry {
         Some(def) => Identifier::parse_with_default_registry(reference, def),
         None => Identifier::parse(reference),
     }
+}
+
+/// The effective default registry for the publish reference: the project
+/// config `[options].default_registry` wins (best-effort discovery — a
+/// publish run from outside a project tree simply has none), else the
+/// context default (`--registry` / `GRIM_DEFAULT_REGISTRY`). Owned so the
+/// transient discovered config can drop.
+fn release_default_registry(ctx: &Context) -> Option<String> {
+    crate::config::project_config::ProjectConfig::discover(None)
+        .ok()
+        .and_then(|d| d.config.options.default_registry)
+        .or_else(|| ctx.default_registry().map(str::to_string))
 }
 
 /// Move every cascade tag onto `digest`. The exact version (`version`) is
@@ -355,7 +371,7 @@ mod tests {
         let repo = Identifier::parse("localhost:5000/acme/code-review").unwrap();
         let tar = b"skill tarball v1".to_vec();
         let manifest = manifest_of(&tar);
-        let tags = cascade_tags("1.2.3").unwrap();
+        let tags = publish_tags("1.2.3").unwrap();
 
         // First release: blob + manifest + all four cascade tags.
         access.push_blob(&repo, &tar).await.unwrap();

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Grimoire Authors
 
-//! Rolling-release cascade-tag computation.
+//! Rolling-release publish-tag computation.
 //!
 //! A normal release of semver `X.Y.Z` is published once and then the
 //! floating tags `X.Y.Z`, `X.Y`, `X`, and `latest` are all pointed at it
@@ -12,6 +12,12 @@
 //! floating version users pull. Build metadata (`+meta`) does not affect
 //! the published tag set (it is not a valid OCI tag character anyway and
 //! is dropped from the cascade).
+//!
+//! A tag that is **not** a semantic version (`canary`, `edge`, `pr-123`,
+//! or even a partial `1.2`) is published as a single literal tag with no
+//! cascade — there is no version to derive `X.Y`/`X`/`latest` from, so the
+//! exact tag is the whole published set. Only a reference with no tag at
+//! all is rejected.
 
 use super::Identifier;
 
@@ -69,6 +75,11 @@ pub enum ReleaseErrorKind {
         source: semver::Error,
     },
 
+    /// The release reference carried no tag, so there is nothing to
+    /// publish under.
+    #[error("release reference has no tag; expected registry/repo:tag")]
+    MissingTag,
+
     /// The exact version tag already exists pointing at a different
     /// digest, and `--force` was not given.
     #[error(
@@ -77,28 +88,36 @@ pub enum ReleaseErrorKind {
     TagExists { tag: String, existing: String, new: String },
 }
 
-/// Compute the cascade tag set for `version`.
+/// Compute the published tag set for `tag`.
 ///
-/// - `1.2.3` → `["1.2.3", "1.2", "1", "latest"]`
+/// - `1.2.3` → `["1.2.3", "1.2", "1", "latest"]` (full semver cascades)
 /// - `2.0.0` → `["2.0.0", "2.0", "2", "latest"]`
 /// - `1.2.3-rc.1` (prerelease) → `["1.2.3-rc.1"]` (no cascade, no latest)
 /// - `1.2.3+build` → `["1.2.3", "1.2", "1", "latest"]` (build metadata
 ///   dropped from the tag set)
+/// - `canary` / `1.2` / any non-semver → `["canary"]` / `["1.2"]` (the
+///   literal tag only — there is no version to cascade, so the cascade is
+///   disabled and exactly the requested tag is published)
 ///
-/// The exact version is always element `0` so the caller can publish it
-/// first (crash safety: the specific tag exists before any floating tag
-/// is moved to it).
+/// The exact tag is always element `0` so the caller can publish it first
+/// (crash safety: the specific tag exists before any floating tag is moved
+/// to it).
 ///
 /// # Errors
 ///
-/// [`ReleaseErrorKind::InvalidVersion`] when `version` is not semver.
-pub fn cascade_tags(version: &str) -> Result<Vec<String>, ReleaseError> {
-    let parsed = semver::Version::parse(version).map_err(|source| {
-        ReleaseError::without_reference(ReleaseErrorKind::InvalidVersion {
-            version: version.to_string(),
-            source,
-        })
-    })?;
+/// [`ReleaseErrorKind::MissingTag`] when `tag` is empty (a release
+/// reference must carry a tag).
+pub fn publish_tags(tag: &str) -> Result<Vec<String>, ReleaseError> {
+    if tag.is_empty() {
+        return Err(ReleaseError::without_reference(ReleaseErrorKind::MissingTag));
+    }
+
+    // A non-semver tag (`canary`, `edge`, or a partial `1.2`) has no
+    // version to derive floating pointers from: publish exactly that one
+    // literal tag, no cascade. Only a full `X.Y.Z` semver cascades.
+    let Ok(parsed) = semver::Version::parse(tag) else {
+        return Ok(vec![tag.to_string()]);
+    };
 
     if !parsed.pre.is_empty() {
         // Prerelease: only the exact tag, normalized (build metadata
@@ -122,16 +141,16 @@ mod tests {
 
     #[test]
     fn full_version_cascades_to_four_tags() {
-        assert_eq!(cascade_tags("1.2.3").unwrap(), vec!["1.2.3", "1.2", "1", "latest"]);
-        assert_eq!(cascade_tags("2.0.0").unwrap(), vec!["2.0.0", "2.0", "2", "latest"]);
-        assert_eq!(cascade_tags("0.10.5").unwrap(), vec!["0.10.5", "0.10", "0", "latest"]);
+        assert_eq!(publish_tags("1.2.3").unwrap(), vec!["1.2.3", "1.2", "1", "latest"]);
+        assert_eq!(publish_tags("2.0.0").unwrap(), vec!["2.0.0", "2.0", "2", "latest"]);
+        assert_eq!(publish_tags("0.10.5").unwrap(), vec!["0.10.5", "0.10", "0", "latest"]);
     }
 
     #[test]
     fn prerelease_is_exact_only_no_cascade_no_latest() {
-        assert_eq!(cascade_tags("1.2.3-rc.1").unwrap(), vec!["1.2.3-rc.1"]);
-        assert_eq!(cascade_tags("2.0.0-alpha").unwrap(), vec!["2.0.0-alpha"]);
-        let t = cascade_tags("1.0.0-beta.2").unwrap();
+        assert_eq!(publish_tags("1.2.3-rc.1").unwrap(), vec!["1.2.3-rc.1"]);
+        assert_eq!(publish_tags("2.0.0-alpha").unwrap(), vec!["2.0.0-alpha"]);
+        let t = publish_tags("1.0.0-beta.2").unwrap();
         assert_eq!(t.len(), 1);
         assert!(!t.contains(&"latest".to_string()));
     }
@@ -139,28 +158,36 @@ mod tests {
     #[test]
     fn build_metadata_dropped_from_tag_set() {
         assert_eq!(
-            cascade_tags("1.2.3+20260101").unwrap(),
+            publish_tags("1.2.3+20260101").unwrap(),
             vec!["1.2.3", "1.2", "1", "latest"]
         );
     }
 
     #[test]
-    fn invalid_version_is_error() {
-        let err = cascade_tags("not-a-version").expect_err("must reject");
-        assert!(matches!(err.kind, ReleaseErrorKind::InvalidVersion { .. }));
-        let err = cascade_tags("1.2").expect_err("incomplete semver rejected");
-        assert!(matches!(err.kind, ReleaseErrorKind::InvalidVersion { .. }));
+    fn non_version_tag_publishes_single_tag_no_cascade() {
+        // Arbitrary names and partial semver alike: exactly one literal tag,
+        // no `X.Y`/`X`/`latest` cascade (cascade is disabled for non-versions).
+        for tag in ["canary", "edge", "pr-123", "nightly", "1.2", "1", "v1.2.3"] {
+            assert_eq!(publish_tags(tag).unwrap(), vec![tag.to_string()], "tag {tag}");
+        }
     }
 
     #[test]
-    fn exact_version_is_first() {
-        assert_eq!(cascade_tags("3.4.5").unwrap()[0], "3.4.5");
-        assert_eq!(cascade_tags("3.4.5-rc.1").unwrap()[0], "3.4.5-rc.1");
+    fn empty_tag_is_missing_tag_error() {
+        let err = publish_tags("").expect_err("a release reference must carry a tag");
+        assert!(matches!(err.kind, ReleaseErrorKind::MissingTag));
     }
 
     #[test]
-    fn error_display_includes_version() {
-        let err = cascade_tags("bad").expect_err("reject");
-        assert!(err.to_string().contains("bad"));
+    fn exact_tag_is_first() {
+        assert_eq!(publish_tags("3.4.5").unwrap()[0], "3.4.5");
+        assert_eq!(publish_tags("3.4.5-rc.1").unwrap()[0], "3.4.5-rc.1");
+        assert_eq!(publish_tags("canary").unwrap()[0], "canary");
+    }
+
+    #[test]
+    fn missing_tag_error_displays_guidance() {
+        let err = publish_tags("").expect_err("reject");
+        assert!(err.to_string().contains("no tag"));
     }
 }
