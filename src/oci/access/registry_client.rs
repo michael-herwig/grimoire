@@ -377,8 +377,14 @@ impl OciAccess for RegistryClient {
             repositories: Vec<String>,
         }
 
-        let scheme = Self::scheme_for(registry);
-        let mut next: Option<String> = Some(format!("{scheme}://{registry}/v2/_catalog?n={PAGE_SIZE}"));
+        // The `_catalog` endpoint lives on the bare registry HOST. A
+        // configured default registry may carry a namespace
+        // (`ghcr.io/acme`); using it verbatim would build the malformed URL
+        // `https://ghcr.io/acme/v2/_catalog` and silently return nothing.
+        // Extract the host for both the URL and the HTTP/HTTPS decision.
+        let host = registry_host(registry);
+        let scheme = Self::scheme_for(host);
+        let mut next: Option<String> = Some(format!("{scheme}://{host}/v2/_catalog?n={PAGE_SIZE}"));
         let mut all: Vec<String> = Vec::new();
         let mut pages = 0;
 
@@ -409,7 +415,7 @@ impl OciAccess for RegistryClient {
                 .get(reqwest::header::LINK)
                 .and_then(|v| v.to_str().ok())
                 .and_then(parse_next_link)
-                .map(|rel| absolutize_link(scheme, registry, &rel));
+                .map(|rel| absolutize_link(scheme, host, &rel));
             match resp.json::<Catalog>().await {
                 Ok(catalog) => {
                     if catalog.repositories.is_empty() {
@@ -565,6 +571,14 @@ fn parse_next_link(header: &str) -> Option<String> {
     None
 }
 
+/// The bare registry host (first path segment) of a possibly-namespaced
+/// registry string: `ghcr.io/acme` → `ghcr.io`; `localhost:5000` →
+/// `localhost:5000`. The OCI distribution API (`/v2/_catalog`, auth scope)
+/// is served by the host, not a host+namespace prefix.
+fn registry_host(registry: &str) -> &str {
+    registry.split_once('/').map_or(registry, |(host, _)| host)
+}
+
 /// Resolve a possibly-relative `Link` target against the registry origin.
 /// Registries return an absolute-path reference (`/v2/_catalog?…`); a
 /// fully-qualified URL is passed through unchanged.
@@ -683,6 +697,13 @@ mod tests {
             message: "down".to_string(),
         };
         assert!(matches!(classify(err), Classified::Registry(_)));
+    }
+
+    #[test]
+    fn registry_host_strips_namespace() {
+        assert_eq!(registry_host("ghcr.io/acme"), "ghcr.io");
+        assert_eq!(registry_host("localhost:5000"), "localhost:5000");
+        assert_eq!(registry_host("localhost:5000/a/b"), "localhost:5000");
     }
 
     #[test]

@@ -16,7 +16,7 @@ use super::tree;
 ///
 /// Richer than [`crate::install::status_badge::StatusBadge`] (which
 /// `search`/`status` share): it splits "an install record exists but its
-/// editor outputs are gone or unreadable" out of `NotInstalled` into its
+/// client outputs are gone or unreadable" out of `NotInstalled` into its
 /// own [`ArtifactState::IntegrityMissing`] so the user can tell a
 /// never-installed entry apart from a broken/tampered one. Precedence
 /// otherwise mirrors `status.rs::derive_state`.
@@ -32,7 +32,7 @@ pub enum ArtifactState {
     Outdated,
     /// Recorded, outputs present, but on-disk content drifted.
     Modified,
-    /// An install record exists but one or more editor outputs are
+    /// An install record exists but one or more client outputs are
     /// missing or unreadable — the integrity record cannot be honored.
     IntegrityMissing,
 }

@@ -301,10 +301,17 @@ impl Catalog {
         /// Concurrent per-repository metadata lookups.
         const CONCURRENCY: usize = 16;
 
+        // A configured default registry may carry a namespace
+        // (`ghcr.io/acme`). The OCI `_catalog` endpoint lives on the bare
+        // host, so list against the host and scope the result to the
+        // namespace prefix. Entries are keyed by the host (matching how
+        // identifiers parse `registry/repository`).
+        let (host, namespace) = split_host_namespace(registry);
         let repos = access.list_catalog(registry).await?;
-        // Cheap name prefilter (no network) + hard cap.
+        // Namespace scope (no network) + cheap name prefilter + hard cap.
         let selected: Vec<String> = repos
             .into_iter()
+            .filter(|r| namespace.is_none_or(|ns| r == ns || r.starts_with(&format!("{ns}/"))))
             .filter(|r| scope.is_empty() || r.to_lowercase().contains(scope))
             .take(MAX_CATALOG_REPOS)
             .collect();
@@ -316,7 +323,7 @@ impl Catalog {
         // Prime the window.
         for _ in 0..CONCURRENCY {
             let Some(repository) = iter.next() else { break };
-            spawn_entry(&mut set, registry, repository, access);
+            spawn_entry(&mut set, host, repository, access);
         }
         while let Some(joined) = set.join_next().await {
             // A task panic is a bug, not a registry condition; surface it
@@ -325,7 +332,7 @@ impl Catalog {
                 entries.insert(repository, entry);
             }
             if let Some(repository) = iter.next() {
-                spawn_entry(&mut set, registry, repository, access);
+                spawn_entry(&mut set, host, repository, access);
             }
         }
 
@@ -394,7 +401,7 @@ impl Catalog {
         };
         let (kind, description, keywords) = manifest
             .map(|m| {
-                let kind = m.annotations.get("com.grimoire.kind").cloned();
+                let kind = m.annotations.get(crate::oci::artifact_kind::KIND_ANNOTATION).cloned();
                 let description = m.annotations.get("org.opencontainers.image.description").cloned();
                 let keywords = m
                     .annotations
@@ -421,6 +428,21 @@ impl Catalog {
             version,
             fetched_at,
         }
+    }
+}
+
+/// Split a configured registry string into its host (the first path
+/// segment) and an optional namespace prefix (the rest).
+///
+/// `ghcr.io/acme` → (`ghcr.io`, `Some("acme")`); `localhost:5000` →
+/// (`localhost:5000`, `None`); `host/a/b` → (`host`, `Some("a/b")`). The
+/// OCI `_catalog` endpoint lives on the bare host; the namespace scopes
+/// which repositories the catalog keeps. Used by [`Catalog::build`] so a
+/// namespaced default registry still discovers its own repositories.
+fn split_host_namespace(registry: &str) -> (&str, Option<&str>) {
+    match registry.split_once('/') {
+        Some((host, ns)) if !ns.is_empty() => (host, Some(ns)),
+        _ => (registry, None),
     }
 }
 
@@ -852,6 +874,54 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cat.entries().count(), MAX_CATALOG_REPOS, "build is capped");
+    }
+
+    #[test]
+    fn split_host_namespace_separates_host_and_namespace() {
+        assert_eq!(split_host_namespace("ghcr.io/acme"), ("ghcr.io", Some("acme")));
+        assert_eq!(split_host_namespace("localhost:5000"), ("localhost:5000", None));
+        assert_eq!(
+            split_host_namespace("localhost:5000/a/b"),
+            ("localhost:5000", Some("a/b"))
+        );
+        assert_eq!(split_host_namespace("ghcr.io/"), ("ghcr.io/", None));
+    }
+
+    /// Seed a host with two namespaces; a namespaced configured registry
+    /// must list the `_catalog` against the bare host and keep only its own
+    /// namespace, with entries rooted at the host so `repo()` is consistent.
+    async fn seed_namespaced() -> CatalogRegistry {
+        let inner = MemoryRegistry::new();
+        let host = "localhost:5000";
+        for repo in ["acme/code-review", "other/foo"] {
+            let id = Identifier::new_registry(repo.to_string(), host.to_string());
+            let manifest = skill_manifest("kw", "desc");
+            let d = inner.push_manifest(&id, &manifest).await.unwrap();
+            inner.put_tag(&id, "latest", &d).await.unwrap();
+        }
+        CatalogRegistry {
+            inner,
+            repos: vec!["acme/code-review".to_string(), "other/foo".to_string()],
+            registry: "localhost:5000/acme".to_string(),
+            blob_pulled: std::sync::Arc::new(Mutex::new(false)),
+        }
+    }
+
+    #[tokio::test]
+    async fn namespaced_registry_scopes_to_its_namespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let reg: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(seed_namespaced().await);
+        let cat = Catalog::load_or_refresh(&path, "localhost:5000/acme", "", &reg, false, true)
+            .await
+            .unwrap();
+        let repos: Vec<String> = cat.entries().map(CatalogEntry::repo).collect();
+        // Only the configured namespace survives, and the entry is rooted
+        // at the bare host (no doubled namespace).
+        assert_eq!(repos, vec!["localhost:5000/acme/code-review".to_string()]);
+        let e = cat.entries().next().unwrap();
+        assert_eq!(e.registry, "localhost:5000");
+        assert_eq!(e.repository, "acme/code-review");
     }
 
     #[tokio::test]

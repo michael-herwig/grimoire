@@ -65,8 +65,9 @@ pub struct TuiContext {
     pub lock_path: std::path::PathBuf,
     /// The scope's install-state path.
     pub state_path: std::path::PathBuf,
-    /// The editor target(s) to materialize into.
-    pub editor_default: Option<String>,
+    /// The AI client target(s) to materialize into (the config `clients`
+    /// option; empty defaults to `claude`).
+    pub clients_default: Vec<String>,
     /// Human label for the active scope (`project` / `global`), shown in
     /// the title.
     pub scope_label: String,
@@ -88,8 +89,8 @@ pub struct ScopeSwap {
     pub lock_path: std::path::PathBuf,
     /// The scope's install-state path.
     pub state_path: std::path::PathBuf,
-    /// The editor target(s) to materialize into.
-    pub editor_default: Option<String>,
+    /// The AI client target(s) to materialize into.
+    pub clients_default: Vec<String>,
     /// Human label (`project` / `global`).
     pub label: String,
 }
@@ -107,7 +108,7 @@ impl TuiContext {
             workspace: std::mem::replace(&mut self.workspace, alt.workspace),
             lock_path: std::mem::replace(&mut self.lock_path, alt.lock_path),
             state_path: std::mem::replace(&mut self.state_path, alt.state_path),
-            editor_default: std::mem::replace(&mut self.editor_default, alt.editor_default),
+            clients_default: std::mem::replace(&mut self.clients_default, alt.clients_default),
             label: std::mem::replace(&mut self.scope_label, alt.label),
         };
         self.scope = alt.scope;
@@ -251,6 +252,13 @@ async fn reload_into(ctx: &TuiContext, state: &mut TuiState, force: bool) {
             state.set_rows(rows);
             state.set_status(if ctx.offline {
                 format!("offline — {n} cached entr{} ", if n == 1 { "y" } else { "ies" })
+            } else if n == 0 {
+                // An online build that yields nothing is most often a
+                // registry whose `_catalog` listing is unsupported or
+                // access-restricted (GHCR, Docker Hub) — say so rather than
+                // showing a silent blank list, and point at targeted search.
+                "0 entries — registry catalog listing may be unsupported or restricted; try `grim search <name>`"
+                    .to_string()
             } else {
                 format!("{n} entr{}", if n == 1 { "y" } else { "ies" })
             });
@@ -286,7 +294,7 @@ fn rows_from_catalog(catalog: &Catalog, lock: Option<&GrimoireLock>, state: &Ins
 ///
 /// Precedence mirrors `status.rs::derive_state` and
 /// `status_badge::derive_badge` — the *only* divergence is that a present
-/// install record whose editor outputs are missing or unreadable is
+/// install record whose client outputs are missing or unreadable is
 /// surfaced as [`ArtifactState::IntegrityMissing`] rather than collapsed
 /// into `NotInstalled`, so a broken/tampered install is distinguishable
 /// from a never-installed entry. No lock entry or no record at all is
@@ -312,7 +320,7 @@ fn derive_artifact_state(
         return ArtifactState::NotInstalled;
     };
 
-    let outputs = record.editor_outputs();
+    let outputs = record.client_outputs();
     if outputs.iter().any(|o| !o.target.exists()) {
         return ArtifactState::IntegrityMissing;
     }
@@ -550,7 +558,7 @@ async fn perform(ctx: &TuiContext, row: &TuiRow, is_update: bool) -> anyhow::Res
         .await
         .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
 
-    let target = InstallTarget::parse(&ctx.workspace, &[], ctx.editor_default.as_deref())
+    let target = InstallTarget::parse(&ctx.workspace, &[], &ctx.clients_default)
         .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
     let mut install_state =
         InstallState::load(&ctx.state_path).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
