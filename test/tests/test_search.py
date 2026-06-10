@@ -62,6 +62,54 @@ def test_search_finds_matching_entries_with_kind_and_status(
     assert ru["kind"] == "rule"
 
 
+def test_search_exposes_summary_and_full_description(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """`com.grimoire.summary` surfaces in JSON alongside the full,
+    untruncated `description`."""
+    long_desc = (
+        "A deliberately long description that would wrap a narrow "
+        "terminal but must round-trip in full through the JSON output."
+    )
+    make_artifact(
+        f"{unique_repo}/with-summary",
+        "skill",
+        {"with-summary/SKILL.md": "---\nname: with-summary\n---\n# WS\n"},
+        tag="latest",
+        annotations={
+            "com.grimoire.summary": "short blurb",
+            "org.opencontainers.image.description": long_desc,
+        },
+    )
+    make_artifact(
+        f"{unique_repo}/no-summary",
+        "skill",
+        {"no-summary/SKILL.md": "---\nname: no-summary\n---\n# NS\n"},
+        tag="latest",
+        annotations={
+            "org.opencontainers.image.description": "only a description",
+        },
+    )
+    runner = grim_at(project_dir)
+
+    rows = runner.json(
+        "search", unique_repo, "--registry", REGISTRY_HOST, "--refresh"
+    )
+    by_repo = {r["repo"]: r for r in rows}
+    with_summary = next(
+        v for k, v in by_repo.items() if k.endswith(f"{unique_repo}/with-summary")
+    )
+    no_summary = next(
+        v for k, v in by_repo.items() if k.endswith(f"{unique_repo}/no-summary")
+    )
+    # Summary is exposed; the long description is preserved verbatim.
+    assert with_summary["summary"] == "short blurb"
+    assert with_summary["description"] == long_desc
+    # Absent summary serializes as null, description still present.
+    assert no_summary["summary"] is None
+    assert no_summary["description"] == "only a description"
+
+
 def test_search_query_miss_is_empty_array_exit_0(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:

@@ -325,9 +325,18 @@ pub fn frame(state: &TuiState) -> RenderModel {
                     Some(p) => format!("\npinned: {p}"),
                     None => String::new(),
                 };
+                // Short blurb above the full description, only when present
+                // (keeps the layout — and snapshot tests — unchanged for
+                // entries without a summary).
+                let summary = if r.summary.is_empty() {
+                    String::new()
+                } else {
+                    format!("summary: {}\n\n", r.summary)
+                };
                 format!(
-                    "{}\n\n{}\n\nkeywords: {}\nversion: {}{}\nstatus: {}",
+                    "{}\n\n{}{}\n\nkeywords: {}\nversion: {}{}\nstatus: {}",
                     r.repo,
+                    summary,
                     if r.description.is_empty() { "-" } else { &r.description },
                     kw,
                     version,
@@ -771,6 +780,7 @@ mod tests {
             kind: "skill".to_string(),
             repo: repo.to_string(),
             description: "review code".to_string(),
+            summary: String::new(),
             keywords: vec!["rust".to_string(), "lint".to_string()],
             latest_tag: "latest".to_string(),
             version: "2.1.0".to_string(),

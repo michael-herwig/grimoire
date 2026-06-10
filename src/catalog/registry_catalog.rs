@@ -73,6 +73,10 @@ pub struct CatalogEntry {
     /// `org.opencontainers.image.description`, if present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// `com.grimoire.summary`, a short single-line blurb shown in the
+    /// catalog, if present. Distinct from the longer `description`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
     /// `com.grimoire.keywords` split on commas (trimmed, empties dropped).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keywords: Vec<String>,
@@ -96,8 +100,8 @@ impl CatalogEntry {
     }
 
     /// Whether `query` matches this entry: a case-insensitive substring of
-    /// the repo path, the description, or any keyword. An empty query
-    /// matches everything.
+    /// the repo path, the summary, the description, or any keyword. An
+    /// empty query matches everything.
     pub fn matches(&self, query: &str) -> bool {
         if query.is_empty() {
             return true;
@@ -108,6 +112,11 @@ impl CatalogEntry {
         }
         if let Some(d) = &self.description
             && d.to_lowercase().contains(&q)
+        {
+            return true;
+        }
+        if let Some(s) = &self.summary
+            && s.to_lowercase().contains(&q)
         {
             return true;
         }
@@ -358,6 +367,7 @@ impl Catalog {
             repository: repository.to_string(),
             kind: None,
             description: None,
+            summary: None,
             keywords: Vec::new(),
             latest_tag,
             version,
@@ -399,10 +409,11 @@ impl Catalog {
             Ok(m) => m,
             Err(_) => return bare(Some(tag), version.clone()),
         };
-        let (kind, description, keywords) = manifest
+        let (kind, description, summary, keywords) = manifest
             .map(|m| {
                 let kind = crate::oci::annotations::kind_from_manifest(&m).map(|k| k.to_string());
                 let description = m.annotations.get("org.opencontainers.image.description").cloned();
+                let summary = m.annotations.get("com.grimoire.summary").cloned();
                 let keywords = m
                     .annotations
                     .get("com.grimoire.keywords")
@@ -414,15 +425,16 @@ impl Catalog {
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
-                (kind, description, keywords)
+                (kind, description, summary, keywords)
             })
-            .unwrap_or((None, None, Vec::new()));
+            .unwrap_or((None, None, None, Vec::new()));
 
         CatalogEntry {
             registry: registry.to_string(),
             repository: repository.to_string(),
             kind,
             description,
+            summary,
             keywords,
             latest_tag: Some(tag),
             version,
@@ -623,6 +635,7 @@ mod tests {
                 repository: "acme/code-review".to_string(),
                 kind: Some("skill".to_string()),
                 description: Some("Review code.".to_string()),
+                summary: Some("review skill".to_string()),
                 keywords: vec!["review".to_string(), "quality".to_string()],
                 latest_tag: Some("latest".to_string()),
                 version: Some("1.2.0".to_string()),
@@ -674,6 +687,7 @@ mod tests {
         let mut annotations = BTreeMap::new();
         annotations.insert("com.grimoire.keywords".to_string(), kw.to_string());
         annotations.insert("org.opencontainers.image.description".to_string(), desc.to_string());
+        annotations.insert("com.grimoire.summary".to_string(), "short summary".to_string());
         OciManifest {
             media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
             artifact_type: Some(crate::oci::ArtifactKind::Skill.artifact_type().to_string()),
@@ -794,6 +808,7 @@ mod tests {
         assert_eq!(e.repository, "acme/code-review");
         assert_eq!(e.kind.as_deref(), Some("skill"));
         assert_eq!(e.description.as_deref(), Some("Review code."));
+        assert_eq!(e.summary.as_deref(), Some("short summary"));
         assert_eq!(e.keywords, vec!["review", "quality"]);
         assert_eq!(e.latest_tag.as_deref(), Some("latest"));
         assert!(!*blob_flag.lock().unwrap(), "catalog must not pull a blob");
@@ -962,6 +977,7 @@ mod tests {
             repository: "acme/code-review".to_string(),
             kind: Some("skill".to_string()),
             description: Some("Review code quality".to_string()),
+            summary: Some("terse blurb".to_string()),
             keywords: vec!["lint".to_string()],
             latest_tag: Some("latest".to_string()),
             version: None,
@@ -970,6 +986,7 @@ mod tests {
         assert!(e.matches(""), "empty query matches all");
         assert!(e.matches("REVIEW"), "repo path, case-insensitive");
         assert!(e.matches("quality"), "description substring");
+        assert!(e.matches("BLURB"), "summary substring, case-insensitive");
         assert!(e.matches("lint"), "keyword");
         assert!(!e.matches("python"), "non-match");
     }

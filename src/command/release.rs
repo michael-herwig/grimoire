@@ -149,7 +149,7 @@ async fn release_bundle(
     tags: &[String],
     source: &str,
 ) -> anyhow::Result<(ReleaseReport, ExitCode)> {
-    let (name, mut members) = read_bundle_members(&args.path)?;
+    let (name, mut members, metadata) = read_bundle_members(&args.path)?;
     let access: Arc<dyn OciAccess> = super::access_seam(ctx)?;
 
     // `--pin`: resolve every floating member to a digest and bake it in, so
@@ -164,7 +164,15 @@ async fn release_bundle(
         .to_layer_bytes()
         .map_err(|e| anyhow::anyhow!("failed to serialize bundle layer: {e}"))?;
     let layer_digest = Algorithm::Sha256.hash(&layer);
-    let annotations = annotations_for_bundle(&name, version, manifest.members.len(), Some(source));
+    let annotations = annotations_for_bundle(
+        &name,
+        version,
+        manifest.members.len(),
+        Some(source),
+        metadata.summary.as_deref(),
+        metadata.keywords.as_deref(),
+        metadata.description.as_deref(),
+    );
     let oci_manifest = OciManifest {
         media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
         artifact_type: Some(ArtifactKind::Bundle.artifact_type().to_string()),

@@ -102,6 +102,8 @@ pub struct TuiRow {
     pub repo: String,
     /// Catalog description (empty string when absent).
     pub description: String,
+    /// Catalog short summary (empty string when absent).
+    pub summary: String,
     /// Catalog keywords.
     pub keywords: Vec<String>,
     /// The representative tag (empty string when absent) — may be the
@@ -490,7 +492,8 @@ impl TuiState {
     }
 
     /// Recompute `filtered` from `rows` against the current query
-    /// (case-insensitive substring over repo / description / keywords).
+    /// (case-insensitive substring over repo / summary / description /
+    /// keywords).
     fn recompute_filter(&mut self) {
         let q = self.query.to_lowercase();
         self.filtered = self
@@ -500,6 +503,7 @@ impl TuiState {
             .filter(|(_, r)| {
                 q.is_empty()
                     || r.repo.to_lowercase().contains(&q)
+                    || r.summary.to_lowercase().contains(&q)
                     || r.description.to_lowercase().contains(&q)
                     || r.keywords.iter().any(|k| k.to_lowercase().contains(&q))
             })
@@ -526,6 +530,7 @@ mod tests {
             kind: "skill".to_string(),
             repo: repo.to_string(),
             description: desc.to_string(),
+            summary: String::new(),
             keywords: kw.iter().map(|s| s.to_string()).collect(),
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
@@ -715,6 +720,17 @@ mod tests {
         s.apply_query("LINT");
         assert_eq!(s.filtered.len(), 1);
         assert_eq!(s.selected_row().unwrap().repo, "r/gamma");
+    }
+
+    #[test]
+    fn summary_match_is_case_insensitive() {
+        let mut s = TuiState::new();
+        let mut r = row("r/delta", "plain description", &[], ArtifactState::NotInstalled);
+        r.summary = "Concise Blurb".to_string();
+        s.set_rows(vec![r]);
+        s.apply_query("blurb");
+        assert_eq!(s.filtered.len(), 1);
+        assert_eq!(s.selected_row().unwrap().repo, "r/delta");
     }
 
     fn tree_seeded() -> TuiState {

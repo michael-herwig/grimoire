@@ -278,6 +278,7 @@ fn rows_from_catalog(catalog: &Catalog, lock: Option<&GrimoireLock>, state: &Ins
             kind: e.kind.clone().unwrap_or_else(|| "-".to_string()),
             repo: e.repo(),
             description: e.description.clone().unwrap_or_default(),
+            summary: e.summary.clone().unwrap_or_default(),
             keywords: e.keywords.clone(),
             latest_tag: e.latest_tag.clone().unwrap_or_default(),
             // Show the explicit highest version; fall back to the

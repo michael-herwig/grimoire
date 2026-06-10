@@ -118,29 +118,36 @@ pub fn validate_and_pack(
 }
 
 /// Parse a bundle source file (a `grimoire.toml`-shaped document whose
-/// `[skills]`/`[rules]` tables are the members) into its name and member
-/// list. The bundle name is the file stem.
+/// `[skills]`/`[rules]` tables are the members, with optional top-level
+/// `summary`/`keywords`/`description`) into its name, member list, and
+/// catalog metadata. The bundle name is the file stem.
 ///
 /// # Errors
 ///
 /// A config parse/validation failure (78/79/74) or an I/O error.
-pub fn read_bundle_members(path: &Path) -> anyhow::Result<(String, Vec<crate::oci::bundle::BundleMember>)> {
+pub fn read_bundle_members(
+    path: &Path,
+) -> anyhow::Result<(
+    String,
+    Vec<crate::oci::bundle::BundleMember>,
+    crate::config::project_config::BundleMetadata,
+)> {
     use crate::oci::bundle::BundleMember;
 
     let content = std::fs::read_to_string(path).map_err(|e| {
         crate::error::Error::from(crate::skill::SkillError::new(path, crate::skill::SkillErrorKind::Io(e)))
     })?;
-    let cfg = super::grim(crate::config::project_config::ProjectConfig::from_toml_str(&content))?;
+    let source = super::grim(crate::config::project_config::BundleSource::from_toml_str(&content))?;
 
     let mut members = Vec::new();
-    for (name, id) in &cfg.set.skills {
+    for (name, id) in &source.skills {
         members.push(BundleMember {
             kind: ArtifactKind::Skill,
             name: name.clone(),
             id: id.to_string(),
         });
     }
-    for (name, id) in &cfg.set.rules {
+    for (name, id) in &source.rules {
         members.push(BundleMember {
             kind: ArtifactKind::Rule,
             name: name.clone(),
@@ -152,7 +159,7 @@ pub fn read_bundle_members(path: &Path) -> anyhow::Result<(String, Vec<crate::oc
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "bundle".to_string());
-    Ok((name, members))
+    Ok((name, members, source.metadata))
 }
 
 /// Run `grim build`.
@@ -165,7 +172,7 @@ pub async fn run(_ctx: &Context, args: &BuildArgs) -> anyhow::Result<(BuildRepor
     let kind = detect_kind(&args.path, args.kind.as_deref())?;
 
     if kind == ArtifactKind::Bundle {
-        let (name, members) = read_bundle_members(&args.path)?;
+        let (name, members, _metadata) = read_bundle_members(&args.path)?;
         let manifest = crate::oci::bundle::BundleManifest::new(members);
         let layer = manifest
             .to_layer_bytes()

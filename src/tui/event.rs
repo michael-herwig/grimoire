@@ -289,6 +289,7 @@ mod tests {
             kind: "skill".to_string(),
             repo: repo.to_string(),
             description: "d".to_string(),
+            summary: String::new(),
             keywords: vec!["kw".to_string()],
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),

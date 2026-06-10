@@ -8,7 +8,8 @@
 //! Each `print_plain` implementation must make exactly one
 //! [`print_table`] call (single-table rule, see `subsystem-cli-api.md`).
 
-use std::io::{self, Write};
+use std::borrow::Cow;
+use std::io::{self, IsTerminal, Write};
 
 /// A command result that can render as a plain table or as JSON.
 pub trait Printable {
@@ -79,6 +80,37 @@ fn write_row<'a>(
     writeln!(w, "{}", line.trim_end())
 }
 
+/// The current terminal width in columns, or `None` when stdout is not a
+/// terminal (piped to a file, a pager, or a test harness).
+///
+/// Callers treat `None` as "do not truncate" so non-interactive output
+/// stays complete and byte-deterministic (the git/ls convention).
+#[must_use]
+pub fn terminal_width() -> Option<usize> {
+    if !io::stdout().is_terminal() {
+        return None;
+    }
+    crossterm::terminal::size().ok().map(|(cols, _)| cols as usize)
+}
+
+/// Truncate `s` to at most `max` characters, appending an ellipsis (`…`)
+/// when it overflows.
+///
+/// Operates on `char` boundaries so multi-byte text never splits
+/// mid-codepoint. The ellipsis counts toward `max`. Returns the input
+/// borrowed unchanged when it already fits.
+#[must_use]
+pub fn truncate_ellipsis(s: &str, max: usize) -> Cow<'_, str> {
+    if max == 0 {
+        return Cow::Borrowed("");
+    }
+    if s.chars().count() <= max {
+        return Cow::Borrowed(s);
+    }
+    let keep: String = s.chars().take(max - 1).collect();
+    Cow::Owned(format!("{keep}…"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,5 +149,32 @@ mod tests {
         let mut buf = Vec::new();
         print_table(&mut buf, &["A", "B"], &[]).unwrap();
         assert_eq!(String::from_utf8(buf).unwrap(), "A  B\n");
+    }
+
+    #[test]
+    fn truncate_ellipsis_leaves_short_strings_borrowed() {
+        let out = truncate_ellipsis("short", 10);
+        assert_eq!(out, "short");
+        assert!(matches!(out, Cow::Borrowed(_)), "no allocation when it fits");
+    }
+
+    #[test]
+    fn truncate_ellipsis_appends_ellipsis_on_overflow() {
+        // 1 ellipsis char counts toward the budget ⇒ 4 kept + "…" = 5 chars.
+        assert_eq!(truncate_ellipsis("abcdefgh", 5), "abcd…");
+        assert_eq!(truncate_ellipsis("abcdefgh", 5).chars().count(), 5);
+    }
+
+    #[test]
+    fn truncate_ellipsis_respects_char_boundaries() {
+        // Multi-byte chars must never be split mid-codepoint.
+        let out = truncate_ellipsis("héllo wörld", 6);
+        assert_eq!(out, "héllo…");
+        assert_eq!(out.chars().count(), 6);
+    }
+
+    #[test]
+    fn truncate_ellipsis_zero_max_is_empty() {
+        assert_eq!(truncate_ellipsis("anything", 0), "");
     }
 }

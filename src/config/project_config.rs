@@ -152,6 +152,79 @@ fn parse_config(s: &str, path: PathBuf) -> Result<ProjectConfig, ConfigError> {
     })
 }
 
+/// Catalog metadata authored at the top of a bundle source file
+/// (`summary` / `keywords` / `description`). All optional.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BundleMetadata {
+    /// Short one-line blurb → `com.grimoire.summary`.
+    pub summary: Option<String>,
+    /// Comma-separated keywords → `com.grimoire.keywords`.
+    pub keywords: Option<String>,
+    /// Overrides the default `grimoire bundle of N members` description.
+    pub description: Option<String>,
+}
+
+/// A parsed bundle source: validated members plus catalog metadata.
+///
+/// The source is `grimoire.toml`-shaped — its `[skills]`/`[rules]` tables are
+/// the members — with optional top-level `summary`/`keywords`/`description`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BundleSource {
+    /// Skill members, name → validated identifier.
+    pub skills: BTreeMap<String, Identifier>,
+    /// Rule members, name → validated identifier.
+    pub rules: BTreeMap<String, Identifier>,
+    /// Catalog metadata for the bundle artifact.
+    pub metadata: BundleMetadata,
+}
+
+impl BundleSource {
+    /// Parse a bundle source from a TOML string.
+    ///
+    /// # Errors
+    ///
+    /// A TOML parse failure or an invalid member identifier (`ConfigError`).
+    pub fn from_toml_str(s: &str) -> Result<Self, ConfigError> {
+        parse_bundle_source(s, PathBuf::new())
+    }
+}
+
+/// Raw bundle-source shape: members plus optional catalog metadata. Strict
+/// (`deny_unknown_fields`) so a typo'd key in the small bundle file is a hard
+/// error rather than silently dropped metadata.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawBundleSource {
+    #[serde(default)]
+    skills: BTreeMap<String, String>,
+    #[serde(default)]
+    rules: BTreeMap<String, String>,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    keywords: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+/// Parse + validate a bundle source: members through [`parse_artifact_map`],
+/// metadata passed through verbatim.
+fn parse_bundle_source(s: &str, path: PathBuf) -> Result<BundleSource, ConfigError> {
+    let raw: RawBundleSource =
+        toml::from_str(s).map_err(|e| ConfigError::new(path.clone(), ConfigErrorKind::TomlParse(e)))?;
+    let skills = parse_artifact_map(&raw.skills, &path)?;
+    let rules = parse_artifact_map(&raw.rules, &path)?;
+    Ok(BundleSource {
+        skills,
+        rules,
+        metadata: BundleMetadata {
+            summary: raw.summary,
+            keywords: raw.keywords,
+            description: raw.description,
+        },
+    })
+}
+
 /// Validate every `(name → value)` entry as a fully-qualified identifier.
 ///
 /// A bare entry (registry + repository, no tag, no digest) gets `:latest`
@@ -408,5 +481,64 @@ x = "ghcr.io/acme/x:1"
             lock_path_for(Path::new("/p/NoExtension")),
             PathBuf::from("/p/grimoire.lock")
         );
+    }
+
+    #[test]
+    fn bundle_source_reads_members_and_metadata() {
+        let src = BundleSource::from_toml_str(
+            r#"
+summary = "Python dev stack"
+keywords = "python,lint,test"
+description = "Skills and rules for Python work"
+
+[skills]
+code-review = "ghcr.io/acme/code-review:1"
+
+[rules]
+rust-style = "ghcr.io/acme/rust-style:2"
+"#,
+        )
+        .expect("parse");
+        assert_eq!(src.skills.len(), 1);
+        assert_eq!(src.rules.len(), 1);
+        assert_eq!(src.metadata.summary.as_deref(), Some("Python dev stack"));
+        assert_eq!(src.metadata.keywords.as_deref(), Some("python,lint,test"));
+        assert_eq!(
+            src.metadata.description.as_deref(),
+            Some("Skills and rules for Python work")
+        );
+    }
+
+    #[test]
+    fn bundle_source_metadata_optional() {
+        let src = BundleSource::from_toml_str(
+            r#"
+[skills]
+code-review = "ghcr.io/acme/code-review:1"
+"#,
+        )
+        .expect("parse");
+        assert_eq!(src.metadata, BundleMetadata::default());
+    }
+
+    #[test]
+    fn bundle_source_keywords_array_is_rejected() {
+        // Keywords are string-only; a TOML array is a hard parse error.
+        let err = BundleSource::from_toml_str(
+            r#"
+keywords = ["python", "lint"]
+
+[skills]
+code-review = "ghcr.io/acme/code-review:1"
+"#,
+        )
+        .expect_err("array keywords rejected");
+        assert!(matches!(err.kind, ConfigErrorKind::TomlParse(_)));
+    }
+
+    #[test]
+    fn bundle_source_unknown_key_rejected() {
+        let err = BundleSource::from_toml_str("summary = \"x\"\nsumary = \"typo\"\n").expect_err("typo'd key rejected");
+        assert!(matches!(err.kind, ConfigErrorKind::TomlParse(_)));
     }
 }

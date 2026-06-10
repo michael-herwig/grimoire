@@ -85,8 +85,10 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
         .map(|e| SearchEntry {
             kind: e.kind.clone(),
             repo: e.repo(),
+            summary: e.summary.clone(),
             description: e.description.clone(),
             latest_tag: e.latest_tag.clone(),
+            version: e.version.clone(),
             status: derive_badge(&e.registry, &e.repository, lock.as_ref(), &state),
         })
         .collect();

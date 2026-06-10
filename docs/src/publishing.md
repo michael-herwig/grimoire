@@ -43,6 +43,86 @@ verbatim for every [client](./concepts.md#clients) — only the index is ever
 transformed. A rule with no support directory packs to exactly the single
 `my-rule.md` it always did.
 
+## Catalog metadata {#metadata}
+
+[`grim search`](./commands.md#search) and the [TUI](./commands.md#tui) list
+every match in a table. To make a result legible and findable, an artifact
+carries three pieces of catalog metadata, all optional:
+
+| Field | Annotation | Purpose |
+|-------|-----------|---------|
+| `summary` | `com.grimoire.summary` | One-line blurb shown in the catalog (preferred over the description). |
+| `keywords` | `com.grimoire.keywords` | Comma-separated terms that search matches. |
+| `description` | `org.opencontainers.image.description` | The full description. |
+
+`grim search` shows the `summary` in place of the `description`, truncated to
+fit the terminal; the full description stays in `--format json` and in piped
+output. Search matches the repository, summary, description, **and** keywords,
+so a query hits regardless of which one carries the term. Omit `summary` and
+the catalog falls back to the description.
+
+You author this metadata in the source file, so a `grim release` always
+publishes whatever the file currently says — no separate flags to remember.
+Where it lives differs by kind.
+
+### In a skill {#metadata-skill}
+
+A skill puts catalog metadata under the `metadata` map of its `SKILL.md`
+frontmatter (the map the [Agent Skills](https://docs.claude.com/en/docs/agents-and-tools/agent-skills/overview)
+format defines), separate from the top-level `description`:
+
+```yaml
+# code-review/SKILL.md
+---
+name: code-review
+description: A thorough multi-pass reviewer that checks correctness, security, and style across the whole diff.
+metadata:
+  summary: Multi-pass code reviewer
+  keywords: review,quality
+---
+```
+
+### In a rule {#metadata-rule}
+
+A rule has no `description` field — that is derived from the body's first
+heading or paragraph. `summary` and `keywords` sit at the top level of its
+frontmatter:
+
+```yaml
+# rust-style.md
+---
+paths: ["**/*.rs"]
+summary: Idiomatic Rust style rules
+keywords: rust,lint
+---
+# Rust Style
+…
+```
+
+### In a bundle {#metadata-bundle}
+
+A [bundle](#bundles) sets the same keys at the top level of its `.toml`, above
+the member tables. Here `description` overrides the otherwise-automatic
+`grimoire bundle of N members`:
+
+```toml
+# python-stack.toml
+summary = "Python dev stack"
+keywords = "python,lint,test"
+description = "Skills and rules for Python work"
+
+[skills]
+code-review = "ghcr.io/acme/code-review:1"
+[rules]
+rust-style = "ghcr.io/acme/rust-style:2"
+```
+
+### Keywords are a string {#metadata-keywords}
+
+`keywords` is always a single comma-separated string — in every kind — because
+an OCI annotation value is itself a string. A YAML or TOML list is **not**
+accepted; write `keywords: rust,lint`, not `keywords: [rust, lint]`.
+
 ## Validate before you push
 
 [`grim build`](./commands.md#build) validates and packs an artifact **without**

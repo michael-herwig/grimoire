@@ -136,9 +136,14 @@ the config and lock. The interactive TUI's delete action reuses the same seam.
 ## grim search {#search}
 
 `grim search [query]` searches the registry catalog by case-insensitive
-substring against repository, description, and keywords; an empty query lists
-the whole catalog. `--refresh` forces a catalog rebuild; `--registry <ref>`
-chooses which registry to search.
+substring against repository, summary, description, and keywords; an empty
+query lists the whole catalog. `--refresh` forces a catalog rebuild;
+`--registry <ref>` chooses which registry to search.
+
+The plain table shows each entry's short summary (`com.grimoire.summary`),
+falling back to the description when no summary is set. On an interactive
+terminal that column is truncated to fit the width; piped output and
+`--format json` keep the full description.
 
 ```sh
 grim search review
