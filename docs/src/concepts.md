@@ -8,12 +8,35 @@ ideas that make the [commands](./commands.md) feel obvious.
 
 Grimoire distributes two kinds of artifact. A **skill** is a directory — a
 `SKILL.md` plus any supporting scripts or references — that teaches an agent a
-capability. A **rule** is a single Markdown file that states a standard or
-constraint the agent should always follow.
+capability. A **rule** is a Markdown file that states a standard or constraint
+the agent should always follow.
 
 Both are declared the same way and travel through the same pipeline; the only
-difference is shape on disk (a folder versus one file) and the `kind` argument
+difference is shape on disk (a folder versus a file) and the `kind` argument
 (`skill` or `rule`) you pass to commands like [`grim add`](./commands.md#add).
+
+### Rules with a support directory {#rule-support-dir}
+
+A rule is often an *index* that points at extra context — a worked example, a
+JSON schema, a script — that would clutter the rule itself. The convention
+across AI-config tooling is to put that next to the rule in a sibling folder
+with the same name (`rules/my-rule.md` referencing `./my-rule/examples.md`).
+
+A bare index whose links resolved to nothing would be useless, so a rule may
+carry an optional **support directory**: a folder beside the index sharing its
+stem (`my-rule.md` + `my-rule/`). Grimoire packs the index and every file under
+that folder into the one artifact, and installs them beside each other so the
+index's relative links resolve:
+
+```
+.claude/rules/my-rule.md
+.claude/rules/my-rule/examples.md
+.claude/rules/my-rule/schema.json
+```
+
+A rule with no support directory is unchanged — it remains the single
+`my-rule.md` file. See [Publishing](./publishing.md#rule-support-dir) for how
+the directory is packed.
 
 ## Artifacts as OCI content
 

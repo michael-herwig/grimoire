@@ -7,10 +7,41 @@ others can [`grim add`](./commands.md#add).
 ## Author locally
 
 A **skill** is a directory containing a `SKILL.md` and any supporting files; a
-**rule** is a single Markdown file; a [**bundle**](./concepts.md#bundles) is a
-`.toml` file listing members. Grimoire detects which one you mean from the path
-— a directory packs as a skill, a `.md` file as a rule, a `.toml` file as a
-bundle — and `--kind` overrides the guess when you need to.
+**rule** is a Markdown file, optionally with a
+[sibling support directory](#rule-support-dir); a
+[**bundle**](./concepts.md#bundles) is a `.toml` file listing members. Grimoire
+detects which one you mean from the path — a directory packs as a skill, a `.md`
+file as a rule, a `.toml` file as a bundle — and `--kind` overrides the guess
+when you need to.
+
+### Rules with a support directory {#rule-support-dir}
+
+An index rule often references extra context — examples, a schema, a script —
+that does not belong inside the rule body. Put those in a folder beside the
+rule that shares its stem, and Grimoire packs both into the one artifact:
+
+```
+rules/
+  my-rule.md        # the index you pass to build/release
+  my-rule/          # optional support directory, same stem
+    examples.md
+    schema.json
+```
+
+You still point [`grim build`](./commands.md#build) and
+[`grim release`](./commands.md#release) at the index `.md` file — the sibling
+directory is discovered automatically when it exists:
+
+```sh
+grim release ./my-rule.md ghcr.io/acme/my-rule:1.0.0
+```
+
+Every file under `my-rule/` rides along in the same layer and installs beside
+the index (`.claude/rules/my-rule.md` + `.claude/rules/my-rule/…`), so the
+index's relative links resolve on the consumer. Support files are copied
+verbatim for every [client](./concepts.md#clients) — only the index is ever
+transformed. A rule with no support directory packs to exactly the single
+`my-rule.md` it always did.
 
 ## Validate before you push
 
