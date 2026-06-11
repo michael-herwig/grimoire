@@ -194,27 +194,46 @@ impl TuiState {
         self.marked.clear();
     }
 
-    /// Merge a freshly-refreshed catalog row set in, carrying live per-row
-    /// detail forward, then route through [`Self::set_rows`] so the
+    /// Reconcile a freshly-refreshed catalog row set into the current screen
+    /// model, **preserving the user's in-flight interaction** across a
+    /// background refresh, then route through [`Self::set_rows`] so the
     /// kind-sort and the active filter stay consistent.
     ///
-    /// A background catalog refresh re-derives every row's `state` from the
-    /// on-disk lock + install record, which has **not** seen the live
-    /// registry re-resolve — so a naive replace would erase a just-flipped
-    /// `↑ Outdated` until the next per-row check. To avoid that flicker this
-    /// carries two pieces of live, in-memory-only detail from the current
-    /// rows onto the fresh ones, keyed by `repo`:
+    /// A background catalog refresh arrives *while the user is browsing*: it
+    /// re-derives every row's `state` from the on-disk lock + install record
+    /// (which has not seen the live registry re-resolve) and may add or drop
+    /// repositories. A naive replace would (a) erase a just-flipped
+    /// `↑ Outdated`, (b) wipe the marked batch set, and (c) snap the cursor
+    /// back to the top mid-scroll — a spec violation. This reconciler keys
+    /// everything by the stable `repo` string so none of that happens:
     ///
-    /// - a live `Outdated` flag is re-applied **only** when the fresh row is
-    ///   `Installed` (the same precedence as [`Self::mark_outdated_if_installed`]
-    ///   — a fresh `Modified` / `IntegrityMissing` is stronger on-disk truth
-    ///   and wins);
-    /// - the user's picker `pinned_version` (never part of the catalog).
+    /// - **Live `↑` flag**: a live `Outdated` is re-applied **only** when the
+    ///   fresh row is `Installed` (same precedence as
+    ///   [`Self::mark_outdated_if_installed`] — a fresh `Modified` /
+    ///   `IntegrityMissing` is stronger on-disk truth and wins).
+    /// - **Picker pin**: the user's `pinned_version` is carried forward (it
+    ///   is never part of the catalog).
+    /// - **Marks**: the marked set is translated old-index → `repo` → new
+    ///   index, so a mark survives the resort; marks on repos that vanished
+    ///   from the fresh set drop (the row no longer exists to act on).
+    /// - **Cursor**: the selection stays on the same `repo`; if that repo
+    ///   vanished (or was filtered out) the selection clamps into range
+    ///   rather than snapping to the top.
+    /// - **Filter**: the active query is untouched; `set_rows` recomputes
+    ///   `filtered` against it.
     ///
-    /// New repositories appear; vanished ones drop. Marks are cleared by
-    /// `set_rows` (row identities changed wholesale) — acceptable for a
-    /// background refresh.
+    /// New repositories appear; vanished ones drop.
     pub fn merge_catalog_rows(&mut self, mut fresh: Vec<TuiRow>) {
+        // Snapshot what the user is currently interacting with, keyed by the
+        // stable repo string (indices are about to be invalidated by the
+        // resort inside `set_rows`).
+        let marked_repos: std::collections::HashSet<String> = self
+            .marked
+            .iter()
+            .filter_map(|&i| self.rows.get(i).map(|r| r.repo.clone()))
+            .collect();
+        let selected_repo = self.selected_row().map(|r| r.repo.clone());
+
         for row in &mut fresh {
             let Some(existing) = self.rows.iter().find(|r| r.repo == row.repo) else {
                 continue;
@@ -226,7 +245,33 @@ impl TuiState {
                 row.pinned_version = existing.pinned_version.clone();
             }
         }
+
+        // The single kind-sort + filter choke point; clears marks and resets
+        // selection, both of which we restore by repo key below.
         self.set_rows(fresh);
+
+        // Re-apply marks by repo: a mark survives the resort, and a mark on a
+        // repo that vanished simply drops (no row to act on).
+        if !marked_repos.is_empty() {
+            self.marked = self
+                .rows
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| marked_repos.contains(&r.repo))
+                .map(|(i, _)| i)
+                .collect();
+        }
+
+        // Re-position the cursor on the same repo. If it vanished or is
+        // filtered out, `clamp_selection` keeps the selection in range rather
+        // than snapping to the top.
+        if let Some(repo) = selected_repo
+            && let Some(rows_idx) = self.rows.iter().position(|r| r.repo == repo)
+            && let Some(filtered_pos) = self.filtered.iter().position(|&i| i == rows_idx)
+        {
+            self.selected = filtered_pos;
+        }
+        self.clamp_selection();
     }
 
     /// Number of selectable rows (the filtered view).
@@ -843,6 +888,141 @@ mod tests {
             s.rows[0].state,
             ArtifactState::Modified,
             "Modified wins over a stale live ↑"
+        );
+    }
+
+    #[test]
+    fn merge_catalog_rows_preserves_marks_by_repo() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            row("acme/alpha", "old", &[], ArtifactState::Installed),
+            row("acme/beta", "old", &[], ArtifactState::Installed),
+            row("acme/gamma", "old", &[], ArtifactState::Installed),
+        ]);
+        // Mark alpha (idx 0) and gamma (idx 2).
+        s.toggle_mark_selected();
+        s.move_selection(2);
+        s.toggle_mark_selected();
+        assert_eq!(s.action_targets(), vec![0, 2]);
+
+        // A background refresh arrives reordered, drops beta, adds delta.
+        let fresh = vec![
+            row("acme/delta", "new", &[], ArtifactState::Installed),
+            row("acme/gamma", "new", &[], ArtifactState::Installed),
+            row("acme/alpha", "new", &[], ArtifactState::Installed),
+        ];
+        s.merge_catalog_rows(fresh);
+
+        // Rows re-sorted by leaf name: alpha, delta, gamma.
+        let order: Vec<&str> = s.rows.iter().map(|r| r.repo.as_str()).collect();
+        assert_eq!(order, vec!["acme/alpha", "acme/delta", "acme/gamma"]);
+        // Marks follow alpha (now idx 0) and gamma (now idx 2) by repo key.
+        assert!(s.is_row_marked(0), "alpha mark survived the resort");
+        assert!(s.is_row_marked(2), "gamma mark survived the resort");
+        assert!(!s.is_row_marked(1), "delta is unmarked");
+        assert_eq!(s.action_targets(), vec![0, 2]);
+    }
+
+    #[test]
+    fn merge_catalog_rows_drops_marks_for_vanished_repos() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            row("acme/alpha", "d", &[], ArtifactState::Installed),
+            row("acme/beta", "d", &[], ArtifactState::Installed),
+        ]);
+        s.move_selection(1);
+        s.toggle_mark_selected(); // mark beta
+        assert_eq!(s.action_targets(), vec![1]);
+
+        // beta vanishes from the fresh set; its mark must drop.
+        s.merge_catalog_rows(vec![row("acme/alpha", "d", &[], ArtifactState::Installed)]);
+        assert!(s.marked.is_empty(), "a mark on a vanished repo drops");
+    }
+
+    #[test]
+    fn merge_catalog_rows_keeps_cursor_on_same_repo() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            row("acme/alpha", "d", &[], ArtifactState::Installed),
+            row("acme/beta", "d", &[], ArtifactState::Installed),
+            row("acme/gamma", "d", &[], ArtifactState::Installed),
+        ]);
+        s.move_selection(2); // cursor on gamma
+        assert_eq!(s.selected_row().unwrap().repo, "acme/gamma");
+
+        // A refresh adds 'aaa' which sorts to the very top, shifting indices.
+        let fresh = vec![
+            row("acme/gamma", "d", &[], ArtifactState::Installed),
+            row("acme/aaa", "d", &[], ArtifactState::Installed),
+            row("acme/beta", "d", &[], ArtifactState::Installed),
+            row("acme/alpha", "d", &[], ArtifactState::Installed),
+        ];
+        s.merge_catalog_rows(fresh);
+
+        // Despite the new top row shifting every index, the cursor stays on
+        // gamma rather than snapping to index 0.
+        assert_eq!(
+            s.selected_row().unwrap().repo,
+            "acme/gamma",
+            "cursor follows the repo, not the index"
+        );
+    }
+
+    #[test]
+    fn merge_catalog_rows_clamps_cursor_when_selected_repo_vanishes() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            row("acme/alpha", "d", &[], ArtifactState::Installed),
+            row("acme/beta", "d", &[], ArtifactState::Installed),
+            row("acme/gamma", "d", &[], ArtifactState::Installed),
+        ]);
+        s.move_selection(2); // cursor on gamma (last row)
+        assert_eq!(s.selected_row().unwrap().repo, "acme/gamma");
+
+        // gamma vanishes; the cursor must clamp into range, never dangle.
+        s.merge_catalog_rows(vec![
+            row("acme/alpha", "d", &[], ArtifactState::Installed),
+            row("acme/beta", "d", &[], ArtifactState::Installed),
+        ]);
+        assert_eq!(s.filtered.len(), 2);
+        assert!(s.selected < s.filtered.len(), "selection stays in range");
+        assert!(s.selected_row().is_some(), "a valid row is always selected");
+    }
+
+    #[test]
+    fn merge_catalog_rows_keeps_cursor_under_active_filter() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            row("acme/rust-a", "d", &["rust"], ArtifactState::Installed),
+            row("acme/py-b", "d", &["python"], ArtifactState::Installed),
+            row("acme/rust-c", "d", &["rust"], ArtifactState::Installed),
+        ]);
+        s.apply_query("rust"); // rust-a (idx 0) + rust-c (idx 2) visible
+        s.move_selection(1); // cursor on rust-c within the filtered view
+        assert_eq!(s.selected_row().unwrap().repo, "acme/rust-c");
+
+        // A refresh reorders and adds a row; the filter must stay applied and
+        // the cursor stay on rust-c.
+        let fresh = vec![
+            row("acme/rust-c", "d", &["rust"], ArtifactState::Installed),
+            row("acme/py-b", "d", &["python"], ArtifactState::Installed),
+            row("acme/rust-a", "d", &["rust"], ArtifactState::Installed),
+            row("acme/rust-z", "d", &["rust"], ArtifactState::Installed),
+        ];
+        s.merge_catalog_rows(fresh);
+
+        // Filter still narrows to the three rust rows.
+        assert_eq!(s.filtered.len(), 3, "the active query still filters");
+        assert!(
+            s.filtered
+                .iter()
+                .all(|&i| s.rows[i].keywords.contains(&"rust".to_string())),
+            "only rust rows are visible"
+        );
+        assert_eq!(
+            s.selected_row().unwrap().repo,
+            "acme/rust-c",
+            "cursor stays on the same repo under an active filter"
         );
     }
 

@@ -20,7 +20,7 @@
 //! task analog of [`super::app`]'s impure role, while everything testable
 //! stays out of the runtime.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::Sender;
@@ -56,6 +56,12 @@ const SEARCH_COALESCE: Duration = Duration::from_millis(300);
 /// a check is scheduled and the moment its result is drained, so an index
 /// would dangle.
 ///
+/// Per-row variants additionally carry the `generation` the check was
+/// scheduled under. A scope toggle or refresh bumps the checker's
+/// generation; the drain loop discards any per-row result whose stamp is
+/// older than the live generation, so a check spawned under one scope can
+/// never flip a row that now belongs to a different scope's lock/row set.
+///
 /// Closed internal enum — matches stay total, no `#[non_exhaustive]`.
 #[derive(Debug)]
 pub enum CheckMsg {
@@ -64,14 +70,17 @@ pub enum CheckMsg {
     /// selection, and any live per-row `↑` flags.
     CatalogReady(Box<Catalog>),
     /// The row's floating tag now resolves to a digest that differs from
-    /// its locked pin — a newer version is available.
-    RowOutdated { repo: String },
+    /// its locked pin — a newer version is available. Stamped with the
+    /// generation the check was scheduled under (stale stamps are dropped).
+    RowOutdated { repo: String, generation: u64 },
     /// The row's floating tag still resolves to its locked digest (or the
-    /// tag vanished / offline yielded nothing). No state change.
-    RowUpToDate { repo: String },
+    /// tag vanished / offline yielded nothing). No state change. Stamped
+    /// with the scheduling generation.
+    RowUpToDate { repo: String, generation: u64 },
     /// The per-row check failed (transport/auth). Degrade silently — the
     /// row keeps whatever state it had; the next scheduled check retries.
-    Failed { repo: String },
+    /// Stamped with the scheduling generation.
+    Failed { repo: String, generation: u64 },
 }
 
 /// The work a single per-row check needs: the stable key to report back
@@ -116,9 +125,11 @@ pub fn outdated_from_resolve(locked: &Digest, resolved: Option<&Digest>) -> bool
 /// bound, the access seam, and the spawned-task handles.
 ///
 /// Held by [`super::app::run`] for the lifetime of the TUI. Tasks are kept
-/// in a [`JoinSet`] and aborted on drop (no detached orphans — `quality-rust`
-/// "tasks observed"); the channel sender is dropped with the checker on
-/// exit, so any in-flight send fails harmlessly.
+/// in a [`JoinSet`]; the app drains finished handles non-blockingly each
+/// tick (see [`Self::reap_finished`]) and the set aborts any still-running
+/// task on drop, so no detached orphan outlives the TUI. The channel sender
+/// is dropped with the checker on exit, so any in-flight send fails
+/// harmlessly.
 pub struct UpdateChecker {
     /// The results sink. Cloned into each spawned task.
     tx: Sender<CheckMsg>,
@@ -128,14 +139,22 @@ pub struct UpdateChecker {
     access: Arc<dyn OciAccess>,
     /// The registry whose catalog is refreshed.
     registry: String,
-    /// In-flight + finished task handles, aborted on drop.
+    /// In-flight + finished task handles, reaped each tick and aborted on
+    /// drop.
     tasks: JoinSet<()>,
-    /// Repos with a per-row check already spawned and not yet drained, so a
+    /// Repos with a per-row check already spawned and not yet finished, so a
     /// re-schedule does not fire a duplicate in-flight check for the same
-    /// row. Cleared by the app each time it drains a per-row result.
-    in_flight: std::collections::HashSet<String>,
+    /// row. Owned by the task lifecycle: each spawned task removes its repo
+    /// once its send attempt resolves (success *or* failure), so a dropped
+    /// result on a full channel can never strand a repo as permanently
+    /// in-flight. Shared with the tasks via [`Arc`].
+    in_flight: Arc<Mutex<std::collections::HashSet<String>>>,
     /// When the last search-triggered scheduling pass ran, for debounce.
     last_scheduled: Option<Instant>,
+    /// Monotonically increasing scope/refresh generation. Stamped onto every
+    /// per-row check at spawn; a scope toggle or refresh bumps it so results
+    /// scheduled under a now-superseded scope are discarded on drain.
+    generation: u64,
 }
 
 impl UpdateChecker {
@@ -149,8 +168,9 @@ impl UpdateChecker {
             access,
             registry,
             tasks: JoinSet::new(),
-            in_flight: std::collections::HashSet::new(),
+            in_flight: Arc::new(Mutex::new(std::collections::HashSet::new())),
             last_scheduled: None,
+            generation: 0,
         };
         (checker, rx)
     }
@@ -177,11 +197,37 @@ impl UpdateChecker {
         self.last_scheduled
     }
 
-    /// Forget that `repo` had a per-row check in flight, so a future
-    /// scheduling pass may re-check it. The app calls this when it drains a
-    /// per-row result for `repo`.
-    pub fn clear_in_flight(&mut self, repo: &str) {
-        self.in_flight.remove(repo);
+    /// The live scope/refresh generation. A per-row [`CheckMsg`] whose stamp
+    /// is older than this is stale (scheduled under a superseded scope) and
+    /// the drain loop discards it.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Bump the scope/refresh generation, invalidating every per-row check
+    /// already in flight: their results carry the old stamp and are dropped
+    /// on drain. Call on a scope toggle or a refresh, *before* re-arming the
+    /// fresh per-row sweep, so a check spawned under the previous scope can
+    /// never flip a row that now belongs to the new scope's lock/row set.
+    pub fn bump_generation(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// Non-blockingly reap finished background tasks so panics surface and
+    /// the [`JoinSet`] does not accumulate completed handles for the whole
+    /// session. Called each event-loop tick.
+    ///
+    /// A panicking task is *deliberately swallowed*: this is a TUI in raw
+    /// mode, so writing to stderr (or any logging that targets the terminal)
+    /// would corrupt the alternate screen. The work is best-effort
+    /// (idempotent registry re-checks) and the next scheduled pass retries,
+    /// so a lost task degrades silently rather than crashing the UI. Task
+    /// cancellation (on `abort_all` at drop) is likewise ignored.
+    pub fn reap_finished(&mut self) {
+        while let Some(_joined) = self.tasks.try_join_next() {
+            // Intentionally not inspected: see the doc comment — surfacing a
+            // panic here would require terminal output that raw mode forbids.
+        }
     }
 
     /// Spawn a background catalog refresh (force-rebuild of the empty-query
@@ -209,19 +255,37 @@ impl UpdateChecker {
     /// any whose `repo` already has a check in flight. Each task acquires a
     /// [`Semaphore`] permit first (so at most [`ROW_CHECK_CONCURRENCY`] run
     /// at once), resolves the floating tag with [`Operation::Query`] (a
-    /// read-only-fresh lookup that never writes a tag pointer), and reports
-    /// the pure [`outdated_from_resolve`] decision.
+    /// read-only-fresh lookup that never writes a tag pointer), reports the
+    /// pure [`outdated_from_resolve`] decision stamped with the current
+    /// [`Self::generation`], and clears its own in-flight slot once the send
+    /// attempt resolves.
     pub fn spawn_row_checks(&mut self, checks: Vec<RowCheck>) {
+        let generation = self.generation;
         for check in checks {
-            if !self.in_flight.insert(check.repo.clone()) {
-                // A check for this repo is already in flight — do not
-                // duplicate it (dedup, the spec's "no duplicate in-flight").
-                continue;
+            {
+                // Hold the in-flight lock only to test-and-set the dedup slot;
+                // never across the await below.
+                let mut guard = self.in_flight.lock().unwrap_or_else(|p| p.into_inner());
+                if !guard.insert(check.repo.clone()) {
+                    // A check for this repo is already in flight — do not
+                    // duplicate it (dedup, the spec's "no duplicate in-flight").
+                    continue;
+                }
             }
             let tx = self.tx.clone();
             let access = Arc::clone(&self.access);
             let permits = Arc::clone(&self.permits);
+            let in_flight = Arc::clone(&self.in_flight);
             self.tasks.spawn(async move {
+                // Clear the in-flight slot when this task ends, however it
+                // ends (send dropped on a full channel, resolve error, even a
+                // panic mid-task). Owning the slot here — not in the drain
+                // loop — is what prevents a dropped result from stranding the
+                // repo as permanently in-flight and never re-checked.
+                let _slot = InFlightGuard {
+                    set: Arc::clone(&in_flight),
+                    repo: check.repo.clone(),
+                };
                 // Acquire a permit for the lifetime of the registry call so
                 // concurrency stays bounded; the permit drops when the task
                 // ends. `acquire_owned` fails only if the semaphore is
@@ -233,12 +297,21 @@ impl UpdateChecker {
                 let msg = match access.resolve_digest(&check.id, Operation::Query).await {
                     Ok(resolved) => {
                         if outdated_from_resolve(&check.locked_digest, resolved.as_ref()) {
-                            CheckMsg::RowOutdated { repo: check.repo }
+                            CheckMsg::RowOutdated {
+                                repo: check.repo,
+                                generation,
+                            }
                         } else {
-                            CheckMsg::RowUpToDate { repo: check.repo }
+                            CheckMsg::RowUpToDate {
+                                repo: check.repo,
+                                generation,
+                            }
                         }
                     }
-                    Err(_) => CheckMsg::Failed { repo: check.repo },
+                    Err(_) => CheckMsg::Failed {
+                        repo: check.repo,
+                        generation,
+                    },
                 };
                 // Drop on a full channel: a stale per-row result is
                 // superseded by the next scheduled check; never block.
@@ -248,12 +321,35 @@ impl UpdateChecker {
     }
 }
 
+/// Removes a repo from the shared in-flight set on drop, so the slot is
+/// freed when the owning task ends *regardless of how it ends* — a clean
+/// send, a dropped send on a full channel, a resolve error, or a panic.
+/// This RAII tie to the task lifecycle (not the drain loop) is what fixes
+/// the dedup-leak where a dropped result would otherwise strand a repo as
+/// permanently in-flight.
+struct InFlightGuard {
+    set: Arc<Mutex<std::collections::HashSet<String>>>,
+    repo: String,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        // Recover from a poisoned lock: the set is a plain dedup cache, so a
+        // prior panic while holding it leaves no broken invariant — just
+        // take the inner set and remove our slot.
+        let mut guard = self.set.lock().unwrap_or_else(|p| p.into_inner());
+        guard.remove(&self.repo);
+    }
+}
+
 impl Drop for UpdateChecker {
     fn drop(&mut self) {
-        // Abort every in-flight background task on exit — no detached
-        // orphans outlive the TUI (`quality-rust` "tasks observed"). The
-        // tasks are short-lived and side-effect-free beyond the channel send
-        // and the catalog write-through, so an abort mid-flight is safe.
+        // Abort every still-running background task on exit — no detached
+        // orphan outlives the TUI. Finished tasks are reaped each tick by
+        // [`Self::reap_finished`]; this catches whatever is mid-flight at
+        // quit. The tasks are short-lived and side-effect-free beyond the
+        // channel send and the catalog write-through, so an abort mid-flight
+        // is safe.
         self.tasks.abort_all();
     }
 }
@@ -353,24 +449,49 @@ mod tests {
         assert!(UpdateChecker::should_schedule(Some(prev), well_after));
     }
 
-    // ── in-flight dedup (no duplicate per-row checks) ─────────────────────
+    // ── in-flight dedup + leak-free re-check (no duplicate per-row checks) ─
 
     use crate::oci::PinnedIdentifier;
     use crate::oci::access::error::AccessError;
     use crate::oci::manifest::OciManifest;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Notify;
 
-    /// A mock that counts `resolve_digest` calls and always returns a fixed
-    /// "newer" digest so a check would flip the row to outdated.
-    struct CountingAccess {
+    /// A mock that counts `resolve_digest` calls and, until released, blocks
+    /// inside `resolve_digest` so the calling task stays in flight (holding
+    /// its dedup slot). Returns a fixed "newer" digest so a completed check
+    /// flips the row to outdated.
+    struct GatedAccess {
         calls: AtomicUsize,
         newer: Digest,
+        /// When set, `resolve_digest` waits on `gate` before returning, so a
+        /// test can pin a task in flight to exercise dedup deterministically.
+        gate: Notify,
+        gated: std::sync::atomic::AtomicBool,
+    }
+
+    impl GatedAccess {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                calls: AtomicUsize::new(0),
+                newer: Algorithm::Sha256.hash(b"newer"),
+                gate: Notify::new(),
+                gated: std::sync::atomic::AtomicBool::new(false),
+            })
+        }
+        fn release(&self) {
+            self.gated.store(false, Ordering::SeqCst);
+            self.gate.notify_waiters();
+        }
     }
 
     #[async_trait::async_trait]
-    impl OciAccess for CountingAccess {
+    impl OciAccess for GatedAccess {
         async fn resolve_digest(&self, _id: &Identifier, _op: Operation) -> Result<Option<Digest>, AccessError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.gated.load(Ordering::SeqCst) {
+                self.gate.notified().await;
+            }
             Ok(Some(self.newer.clone()))
         }
         async fn fetch_manifest(&self, _id: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
@@ -396,54 +517,142 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn duplicate_in_flight_row_checks_are_deduped() {
-        // Keep a concrete handle so the call counter is readable directly.
-        let concrete = Arc::new(CountingAccess {
-            calls: AtomicUsize::new(0),
-            newer: digest(b"newer"),
-        });
-        let access: Arc<dyn OciAccess> = concrete.clone();
-        let (mut checker, mut rx) = UpdateChecker::new(access, "localhost:5000".to_string());
-
-        let check = RowCheck {
+    fn sample_check() -> RowCheck {
+        RowCheck {
             repo: "localhost:5000/acme/code-review".to_string(),
             id: Identifier::new_registry("acme/code-review", "localhost:5000").clone_with_tag("latest"),
             locked_digest: digest(b"locked"),
-        };
+        }
+    }
 
-        // Schedule the same repo three times before any drain: dedup must
-        // collapse them to a single in-flight check.
-        checker.spawn_row_checks(vec![check.clone()]);
-        checker.spawn_row_checks(vec![check.clone()]);
-        checker.spawn_row_checks(vec![check.clone()]);
+    #[tokio::test]
+    async fn duplicate_in_flight_row_checks_are_deduped() {
+        let access = GatedAccess::new();
+        // Gate the first task so it stays in flight while we re-schedule.
+        access.gated.store(true, Ordering::SeqCst);
+        let dyn_access: Arc<dyn OciAccess> = access.clone();
+        let (mut checker, mut rx) = UpdateChecker::new(dyn_access, "localhost:5000".to_string());
+        let check = sample_check();
 
-        // Exactly one result arrives, and it is RowOutdated (newer digest).
+        // First schedule spawns a task that blocks inside resolve_digest.
+        checker.spawn_row_checks(vec![check.clone()]);
+        // Let the spawned task reach the gated await so its slot is held.
+        while access.calls.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        // Re-schedule twice while the first is gated: dedup must suppress both.
+        checker.spawn_row_checks(vec![check.clone()]);
+        checker.spawn_row_checks(vec![check.clone()]);
+        tokio::task::yield_now().await;
+        assert_eq!(
+            access.calls.load(Ordering::SeqCst),
+            1,
+            "duplicate in-flight checks for one repo collapse to a single registry call"
+        );
+
+        // Release the gate; the result arrives and the slot frees itself.
+        access.release();
         let first = rx.recv().await.expect("one result");
         assert!(
             matches!(first, CheckMsg::RowOutdated { .. }),
             "newer digest flips the row"
         );
+    }
 
-        // Give any erroneously-spawned task a chance to run, then assert the
-        // access seam was hit exactly once (dedup suppressed the rest).
-        tokio::task::yield_now().await;
-        assert_eq!(
-            concrete.calls.load(Ordering::SeqCst),
-            1,
-            "duplicate in-flight checks for one repo collapse to a single registry call"
-        );
+    #[tokio::test]
+    async fn finished_task_frees_its_in_flight_slot_for_re_check() {
+        let access = GatedAccess::new(); // not gated ⇒ completes immediately
+        let dyn_access: Arc<dyn OciAccess> = access.clone();
+        let (mut checker, mut rx) = UpdateChecker::new(dyn_access, "localhost:5000".to_string());
+        let check = sample_check();
 
-        // After draining, clearing in-flight lets the repo be re-checked.
-        checker.clear_in_flight(&check.repo);
         checker.spawn_row_checks(vec![check.clone()]);
-        let second = rx.recv().await.expect("re-check after clear");
-        assert!(matches!(second, CheckMsg::RowOutdated { .. }));
+        assert!(matches!(rx.recv().await, Some(CheckMsg::RowOutdated { .. })));
+        // The task cleared its own slot on completion — no explicit clear.
+        tokio::task::yield_now().await;
+        checker.spawn_row_checks(vec![check.clone()]);
+        assert!(
+            matches!(rx.recv().await, Some(CheckMsg::RowOutdated { .. })),
+            "a finished repo may be re-checked without an external clear"
+        );
         tokio::task::yield_now().await;
         assert_eq!(
-            concrete.calls.load(Ordering::SeqCst),
+            access.calls.load(Ordering::SeqCst),
             2,
-            "a cleared repo may be re-checked"
+            "both scheduling passes reached the registry once the slot freed"
         );
+    }
+
+    #[tokio::test]
+    async fn dropped_result_on_full_channel_does_not_strand_in_flight() {
+        // Regression for the dedup-leak: with the in-flight slot freed in the
+        // drain loop, a result dropped on a full channel would leave the repo
+        // marked in-flight forever and never re-checked. Now the task frees
+        // its own slot, so a re-schedule still reaches the registry.
+        let access = GatedAccess::new();
+        let dyn_access: Arc<dyn OciAccess> = access.clone();
+        let (mut checker, mut rx) = UpdateChecker::new(dyn_access, "localhost:5000".to_string());
+        let check = sample_check();
+
+        // Saturate the bounded results channel so the task's `try_send` drops
+        // its result (the UI is "behind"). The channel holds RESULT_CHANNEL_
+        // CAPACITY filler messages; the real per-row result is then dropped.
+        for _ in 0..RESULT_CHANNEL_CAPACITY {
+            checker
+                .tx
+                .try_send(CheckMsg::CatalogReady(Box::new(Catalog::empty("localhost:5000"))))
+                .expect("filler fits");
+        }
+        checker.spawn_row_checks(vec![check.clone()]);
+        // Let the task run, hit the full channel, drop its result, and (the
+        // fix) free its in-flight slot on the way out.
+        while access.calls.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        tokio::task::yield_now().await;
+
+        // Drain the filler so the channel has room for the next result.
+        while let Ok(CheckMsg::CatalogReady(_)) = rx.try_recv() {}
+
+        // Re-schedule: the slot was freed despite the dropped result, so this
+        // pass reaches the registry and a result actually lands.
+        checker.spawn_row_checks(vec![check.clone()]);
+        let second = rx.recv().await.expect("re-check after a dropped result");
+        assert!(matches!(second, CheckMsg::RowOutdated { .. }));
+        assert_eq!(
+            access.calls.load(Ordering::SeqCst),
+            2,
+            "a repo whose result was dropped on a full channel is re-checkable"
+        );
+    }
+
+    // ── generation stamping (stale per-row results are invalidated) ───────
+
+    #[test]
+    fn bump_generation_increments_and_stamps_fresh_checks() {
+        let access = GatedAccess::new();
+        let dyn_access: Arc<dyn OciAccess> = access.clone();
+        let (mut checker, _rx) = UpdateChecker::new(dyn_access, "localhost:5000".to_string());
+        assert_eq!(checker.generation(), 0, "starts at generation 0");
+        checker.bump_generation();
+        assert_eq!(checker.generation(), 1, "a scope toggle / refresh advances it");
+        checker.bump_generation();
+        assert_eq!(checker.generation(), 2);
+    }
+
+    #[tokio::test]
+    async fn per_row_result_carries_scheduling_generation() {
+        let access = GatedAccess::new();
+        let dyn_access: Arc<dyn OciAccess> = access.clone();
+        let (mut checker, mut rx) = UpdateChecker::new(dyn_access, "localhost:5000".to_string());
+        checker.bump_generation(); // now at generation 1
+        checker.spawn_row_checks(vec![sample_check()]);
+        let msg = rx.recv().await.expect("one result");
+        match msg {
+            CheckMsg::RowOutdated { generation, .. } => {
+                assert_eq!(generation, 1, "result is stamped with the live generation at spawn");
+            }
+            other => panic!("expected RowOutdated, got {other:?}"),
+        }
     }
 }

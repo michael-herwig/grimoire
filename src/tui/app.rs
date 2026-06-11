@@ -185,6 +185,10 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
     arm_background_checks(&ctx, &state, &mut checker);
 
     loop {
+        // Reap finished background tasks so panics surface (deliberately
+        // swallowed in raw mode — see `UpdateChecker::reap_finished`) and the
+        // JoinSet does not accumulate completed handles for the whole session.
+        checker.reap_finished();
         // Drain any background results that arrived since the last tick and
         // redraw if state changed — the 200ms poll below doubles as the
         // result-drain tick (no event needed to surface a flipped icon).
@@ -264,31 +268,57 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Spawn the initial round of background checks against the current rows: a
-/// catalog refresh (new packages) plus a per-row floating-tag re-check for
-/// every eligible (installed/outdated) row. A no-op when offline (zero
-/// network). Called after the first load, after `Refresh`, and after a
-/// scope toggle.
+/// Spawn the launch/refresh/scope-toggle round of background checks against
+/// the current rows: a catalog refresh (new packages) plus a per-row
+/// floating-tag re-check for every eligible (installed/outdated) row. A
+/// no-op when offline (zero network). Called after the first load, after
+/// `Refresh`, and after a scope toggle.
+///
+/// This is the **forced** entry point: it bypasses the search-debounce
+/// window (`r` / `--refresh` / a scope flip are explicit "check again now"
+/// gestures the user expects to act immediately) and bumps the checker
+/// generation first, so any per-row check still in flight under the previous
+/// scope/refresh has its result discarded on drain. The per-keystroke search
+/// path uses [`schedule_row_checks`] instead, which *does* debounce.
 fn arm_background_checks(ctx: &TuiContext, state: &TuiState, checker: &mut UpdateChecker) {
     if ctx.offline {
         return;
     }
+    // Invalidate results from the previous scope/refresh before re-arming.
+    checker.bump_generation();
     checker.spawn_catalog_refresh(ctx.catalog_path.clone());
-    // The initial per-row sweep ignores the debounce window — it is the
-    // launch/refresh check, not a per-keystroke storm.
-    schedule_row_checks(ctx, state, checker, Instant::now());
+    // Force past the debounce: this is the launch/refresh/scope check, not a
+    // per-keystroke storm.
+    schedule_row_checks_forced(ctx, state, checker, Instant::now(), true);
 }
 
 /// Schedule bounded per-row registry re-checks for the eligible rows,
 /// debounced so per-keystroke search never spawns a storm. Each eligible
 /// row contributes one [`RowCheck`] (its floating identifier + locked
 /// digest); the checker dedups any repo already in flight. A no-op when
-/// offline.
+/// offline. This is the **debounced** path (the search edit); the forced
+/// re-arm path is [`arm_background_checks`].
 fn schedule_row_checks(ctx: &TuiContext, state: &TuiState, checker: &mut UpdateChecker, now: Instant) {
+    schedule_row_checks_forced(ctx, state, checker, now, false);
+}
+
+/// The shared body behind [`schedule_row_checks`] (debounced) and
+/// [`arm_background_checks`] (forced). When `force` is `true` the
+/// [`SEARCH_COALESCE`] debounce window is bypassed entirely, so a refresh or
+/// scope toggle that lands inside the window of a recent search keystroke
+/// still arms its per-row sweep instead of being silently swallowed. When
+/// `force` is `false` the pass is suppressed inside the coalesce window.
+fn schedule_row_checks_forced(
+    ctx: &TuiContext,
+    state: &TuiState,
+    checker: &mut UpdateChecker,
+    now: Instant,
+    force: bool,
+) {
     if ctx.offline {
         return;
     }
-    if !UpdateChecker::should_schedule(checker.last_scheduled(), now) {
+    if !force && !UpdateChecker::should_schedule(checker.last_scheduled(), now) {
         return;
     }
     let (lock, _install_state) = load_scope_for_badges(ctx);
@@ -334,6 +364,16 @@ fn build_row_check(lock: &GrimoireLock, row: &TuiRow) -> Option<RowCheck> {
     })
 }
 
+/// Apply a per-row "outdated" result to `state` **only** when its stamp is
+/// fresh. A `msg_generation` older than `live_generation` means the check was
+/// scheduled under a scope/refresh the user has since left (a scope toggle or
+/// `r` bumped the generation), so flipping a row from it would mutate the
+/// wrong scope's view — discard it. Returns `true` when a flip happened.
+/// Pure over `state` so the discard is unit-testable without a [`TuiContext`].
+fn apply_outdated_if_fresh(state: &mut TuiState, repo: &str, msg_generation: u64, live_generation: u64) -> bool {
+    msg_generation == live_generation && state.mark_outdated_if_installed(repo)
+}
+
 /// Drain every pending [`CheckMsg`] non-blockingly and apply it to `state`.
 /// Returns `true` when anything changed (so the caller redraws). This is the
 /// only place background results touch the screen model — through the pure
@@ -345,25 +385,33 @@ fn drain_checks(
     rx: &mut Receiver<CheckMsg>,
 ) -> bool {
     let mut changed = false;
+    let live_generation = checker.generation();
     // `try_recv` never blocks; loop until the channel is momentarily empty.
     while let Ok(msg) = rx.try_recv() {
         match msg {
             CheckMsg::CatalogReady(catalog) => {
                 // Re-derive rows from the fresh catalog against the active
-                // scope, then merge preserving live ↑ / pins + the kind-sort
-                // and filter. The scope load is cheap (advisory).
+                // scope, then reconcile preserving marks, cursor, live ↑ /
+                // pins + the kind-sort and filter. The scope load is cheap
+                // (advisory).
                 drain_catalog_ready(ctx, state, &catalog);
                 changed = true;
             }
-            CheckMsg::RowOutdated { repo } => {
-                checker.clear_in_flight(&repo);
-                if state.mark_outdated_if_installed(&repo) {
+            // A per-row result is honored only when its stamp matches the
+            // live generation: a scope toggle or refresh bumped the
+            // generation, so a check spawned under the previous scope would
+            // flip the wrong row (different lock / row set) and is dropped.
+            // The in-flight slot is freed by the task itself on completion,
+            // so no bookkeeping is needed here.
+            CheckMsg::RowOutdated { repo, generation } => {
+                if apply_outdated_if_fresh(state, &repo, generation, live_generation) {
                     changed = true;
                 }
             }
-            CheckMsg::RowUpToDate { repo } | CheckMsg::Failed { repo } => {
-                // No state change; just free the repo for a future re-check.
-                checker.clear_in_flight(&repo);
+            CheckMsg::RowUpToDate { generation, .. } | CheckMsg::Failed { generation, .. } => {
+                // No state change either way; the stamp is irrelevant beyond
+                // the (intentional) no-op. Stale stamps are simply ignored.
+                let _ = generation;
             }
         }
     }
@@ -876,6 +924,45 @@ mod tests {
         assert_eq!(map_key(mk(KeyCode::Backspace)), Some(TuiInput::Backspace));
         assert_eq!(map_key(mk(KeyCode::Char('i'))), Some(TuiInput::Char('i')));
         assert_eq!(map_key(mk(KeyCode::Tab)), None);
+    }
+
+    fn installed_row(repo: &str) -> TuiRow {
+        TuiRow {
+            kind: "skill".to_string(),
+            repo: repo.to_string(),
+            description: String::new(),
+            summary: String::new(),
+            keywords: Vec::new(),
+            latest_tag: "latest".to_string(),
+            version: "1.0.0".to_string(),
+            pinned_version: None,
+            state: ArtifactState::Installed,
+        }
+    }
+
+    #[test]
+    fn fresh_generation_flips_row_stale_is_discarded() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![installed_row("r/a")]);
+
+        // A stale-stamped result (scheduled under generation 0 but the live
+        // generation has advanced to 1) must NOT flip the row.
+        assert!(
+            !apply_outdated_if_fresh(&mut s, "r/a", 0, 1),
+            "a stale-generation result is discarded"
+        );
+        assert_eq!(
+            s.rows[0].state,
+            ArtifactState::Installed,
+            "the row keeps its state across a stale result"
+        );
+
+        // A matching-generation result flips the row.
+        assert!(
+            apply_outdated_if_fresh(&mut s, "r/a", 1, 1),
+            "a fresh-generation result flips the row"
+        );
+        assert_eq!(s.rows[0].state, ArtifactState::Outdated);
     }
 
     #[test]
