@@ -27,8 +27,8 @@ use super::scope_resolution;
 /// `grim uninstall` arguments.
 #[derive(Debug, Args)]
 pub struct UninstallArgs {
-    /// `skill` or `rule`.
-    #[arg(value_parser = ["skill", "rule"])]
+    /// `skill`, `rule`, or `agent`.
+    #[arg(value_parser = ["skill", "rule", "agent"])]
     pub kind: String,
 
     /// The config binding name to uninstall.
@@ -52,10 +52,11 @@ pub struct UninstallArgs {
 /// entry that is neither installed nor declared is reported, not an
 /// error.
 pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(UninstallReport, ExitCode)> {
-    let kind = if args.kind == "skill" {
-        ArtifactKind::Skill
-    } else {
-        ArtifactKind::Rule
+    // The value_parser above constrains the string to known kinds.
+    let kind = match args.kind.as_str() {
+        "skill" => ArtifactKind::Skill,
+        "agent" => ArtifactKind::Agent,
+        _ => ArtifactKind::Rule,
     };
 
     let scope = super::grim(scope_resolution::resolve(ctx, args.global, args.config.as_deref()))?;
@@ -151,6 +152,7 @@ pub(crate) fn undeclare_and_unlock(
     let declared = match kind {
         ArtifactKind::Skill => set.skills.remove(name).is_some(),
         ArtifactKind::Rule => set.rules.remove(name).is_some(),
+        ArtifactKind::Agent => set.agents.remove(name).is_some(),
         ArtifactKind::Bundle => set.bundles.remove(name).is_some(),
     };
     if declared {
@@ -214,6 +216,7 @@ mod tests {
                 })
                 .collect(),
             rules: Vec::new(),
+            agents: Vec::new(),
         }
     }
 

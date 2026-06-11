@@ -183,19 +183,11 @@ fn state_io(path: &std::path::Path, source: std::io::Error) -> crate::error::Err
 /// appending one row per pruned/kept orphan.
 fn build_report(new_lock: &GrimoireLock, previous: Option<&GrimoireLock>, pruned: &[PrunedArtifact]) -> UpdateReport {
     let prev_index: BTreeMap<(ArtifactKind, &str), &LockedArtifact> = previous
-        .map(|p| {
-            p.skills
-                .iter()
-                .chain(p.rules.iter())
-                .map(|a| ((a.kind, a.name.as_str()), a))
-                .collect()
-        })
+        .map(|p| p.iter_artifacts().map(|a| ((a.kind, a.name.as_str()), a)).collect())
         .unwrap_or_default();
 
     let mut entries: Vec<UpdateEntry> = new_lock
-        .skills
-        .iter()
-        .chain(new_lock.rules.iter())
+        .iter_artifacts()
         .map(|a| {
             let old = prev_index.get(&(a.kind, a.name.as_str())).map(|p| p.pinned.digest());
             let new = a.pinned.digest();
@@ -258,6 +250,7 @@ mod tests {
             },
             skills,
             rules: vec![],
+            agents: vec![],
         }
     }
 

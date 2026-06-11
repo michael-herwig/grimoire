@@ -111,7 +111,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
     // resolves to a `direct` lock entry, so these never duplicate the rows
     // above.
     if let Some(l) = lock.as_ref() {
-        for member in l.skills.iter().chain(l.rules.iter()).filter(|a| a.is_from_bundle()) {
+        for member in l.iter_artifacts().filter(|a| a.is_from_bundle()) {
             let st = derive_state(member.kind, &member.name, Some(member), &state, lock_matches_config);
             let repo = member.bundle.clone().unwrap_or_default();
             entries.push(StatusEntry {
@@ -133,7 +133,7 @@ fn load_state_or_empty(path: &std::path::Path) -> InstallState {
     InstallState::load(path).unwrap_or_else(|_| InstallState::empty(path))
 }
 
-/// Every declared artifact (skills then rules) as a reference.
+/// Every declared artifact (skills, then rules, then agents) as a reference.
 fn collect_declared(scope: &scope_resolution::ResolvedScope) -> Vec<ArtifactRef> {
     let mut out = Vec::new();
     for (name, id) in &scope.set.skills {
@@ -150,14 +150,18 @@ fn collect_declared(scope: &scope_resolution::ResolvedScope) -> Vec<ArtifactRef>
             id: id.clone(),
         });
     }
+    for (name, id) in &scope.set.agents {
+        out.push(ArtifactRef {
+            kind: ArtifactKind::Agent,
+            name: name.clone(),
+            id: id.clone(),
+        });
+    }
     out
 }
 
 fn find_locked<'a>(lock: &'a GrimoireLock, kind: ArtifactKind, name: &str) -> Option<&'a LockedArtifact> {
-    lock.skills
-        .iter()
-        .chain(lock.rules.iter())
-        .find(|a| a.kind == kind && a.name == name)
+    lock.iter_artifacts().find(|a| a.kind == kind && a.name == name)
 }
 
 /// Derive the reported state for one declared artifact.

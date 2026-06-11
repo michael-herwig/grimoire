@@ -71,9 +71,7 @@ pub async fn run(ctx: &Context, args: &LockArgs) -> anyhow::Result<(LockReport, 
 /// already pinned the same content, `locked` otherwise.
 fn build_report(lock: &GrimoireLock, previous: Option<&GrimoireLock>, _scope: &ResolvedScope) -> LockReport {
     let entries = lock
-        .skills
-        .iter()
-        .chain(lock.rules.iter())
+        .iter_artifacts()
         .map(|a| {
             let action = if previous_has_same(previous, a) {
                 LockAction::Unchanged
@@ -93,9 +91,7 @@ fn build_report(lock: &GrimoireLock, previous: Option<&GrimoireLock>, _scope: &R
 
 fn previous_has_same(previous: Option<&GrimoireLock>, artifact: &LockedArtifact) -> bool {
     let Some(prev) = previous else { return false };
-    prev.skills
-        .iter()
-        .chain(prev.rules.iter())
+    prev.iter_artifacts()
         .any(|p| p.kind == artifact.kind && p.name == artifact.name && p.pinned.eq_content(&artifact.pinned))
 }
 
@@ -124,6 +120,7 @@ mod tests {
             },
             skills,
             rules: vec![],
+            agents: vec![],
         }
     }
 

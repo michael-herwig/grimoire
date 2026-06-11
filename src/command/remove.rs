@@ -26,8 +26,8 @@ use super::scope_resolution;
 /// `grim remove` arguments.
 #[derive(Debug, Args)]
 pub struct RemoveArgs {
-    /// `skill`, `rule`, or `bundle`.
-    #[arg(value_parser = ["skill", "rule", "bundle"])]
+    /// `skill`, `rule`, `agent`, or `bundle`.
+    #[arg(value_parser = ["skill", "rule", "agent", "bundle"])]
     pub kind: String,
 
     /// The config binding name to remove.
@@ -49,8 +49,10 @@ pub struct RemoveArgs {
 /// Config (78/79/74) or lock save (74) failures propagate via the typed
 /// error chain. An absent entry is reported, not an error.
 pub async fn run(ctx: &Context, args: &RemoveArgs) -> anyhow::Result<(RemoveReport, ExitCode)> {
+    // The value_parser above constrains the string to known kinds.
     let kind = match args.kind.as_str() {
         "skill" => ArtifactKind::Skill,
+        "agent" => ArtifactKind::Agent,
         "bundle" => ArtifactKind::Bundle,
         _ => ArtifactKind::Rule,
     };
@@ -76,6 +78,7 @@ pub async fn run(ctx: &Context, args: &RemoveArgs) -> anyhow::Result<(RemoveRepo
     let removed = match kind {
         ArtifactKind::Skill => set.skills.remove(&args.name).is_some(),
         ArtifactKind::Rule => set.rules.remove(&args.name).is_some(),
+        ArtifactKind::Agent => set.agents.remove(&args.name).is_some(),
         ArtifactKind::Bundle => set.bundles.remove(&args.name).is_some(),
     };
 
@@ -118,6 +121,7 @@ pub(crate) fn drop_from_lock(
     match kind {
         ArtifactKind::Skill => lock.skills.retain(|a| a.name != name),
         ArtifactKind::Rule => lock.rules.retain(|a| a.name != name),
+        ArtifactKind::Agent => lock.agents.retain(|a| a.name != name),
         ArtifactKind::Bundle => {
             // Removing a bundle drops every locked member it contributed,
             // identified by BOTH the provenance repo and tag so a sibling
@@ -130,6 +134,7 @@ pub(crate) fn drop_from_lock(
             };
             lock.skills.retain(&keep);
             lock.rules.retain(&keep);
+            lock.agents.retain(&keep);
         }
     }
     lock.metadata.declaration_hash = set.declaration_hash_cached().to_string();
@@ -168,6 +173,7 @@ mod tests {
             },
             skills: vec![locked("a"), locked("b")],
             rules: vec![],
+            agents: vec![],
         };
         let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
         let after = drop_from_lock(&prev, ArtifactKind::Skill, "a", None, &set);

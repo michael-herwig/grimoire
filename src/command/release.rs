@@ -43,7 +43,7 @@ pub struct ReleaseArgs {
     pub reference: String,
 
     /// Force the artifact kind instead of auto-detecting it.
-    #[arg(long, value_parser = ["skill", "rule", "bundle"])]
+    #[arg(long, value_parser = ["skill", "rule", "agent", "bundle"])]
     pub kind: Option<String>,
 
     /// Print the push plan (tags + digest) without pushing.

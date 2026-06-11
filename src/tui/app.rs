@@ -363,9 +363,7 @@ fn schedule_row_checks_forced(
 fn build_row_check(lock: &GrimoireLock, row: &TuiRow) -> Option<RowCheck> {
     let (registry, repository) = split_repo(&row.repo)?;
     let locked = lock
-        .skills
-        .iter()
-        .chain(lock.rules.iter())
+        .iter_artifacts()
         .find(|a| a.pinned.registry() == registry && a.pinned.repository() == repository)?;
     // Resolve the same floating tag the badge derivation pins against: the
     // representative tag, else the conventional `latest`.
@@ -636,9 +634,7 @@ fn derive_bundle_state(bundle_repo: &str, lock: Option<&GrimoireLock>, state: &I
             ArtifactState::IntegrityMissing => 4,
         }
     }
-    lock.skills
-        .iter()
-        .chain(lock.rules.iter())
+    lock.iter_artifacts()
         .filter(|a| a.bundle.as_deref() == Some(bundle_repo))
         .map(|m| derive_artifact_state(m.pinned.registry(), m.pinned.repository(), Some(lock), state))
         .max_by_key(|s| rank(*s))
@@ -661,9 +657,7 @@ fn derive_artifact_state(
     state: &InstallState,
 ) -> ArtifactState {
     let Some(locked) = lock.and_then(|l| {
-        l.skills
-            .iter()
-            .chain(l.rules.iter())
+        l.iter_artifacts()
             .find(|a| a.pinned.registry() == registry && a.pinned.repository() == repository)
     }) else {
         return ArtifactState::NotInstalled;
@@ -842,9 +836,7 @@ fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
     let targets: Vec<(ArtifactKind, String)> = match kind {
         ArtifactKind::Bundle => lock_io::load(&ctx.lock_path)
             .map(|lock| {
-                lock.skills
-                    .iter()
-                    .chain(lock.rules.iter())
+                lock.iter_artifacts()
                     .filter(|a| a.bundle.as_deref() == Some(row.repo.as_str()))
                     .map(|a| (a.kind, a.name.clone()))
                     .collect()
@@ -1047,6 +1039,7 @@ fn bundle_members_lock(lock: &GrimoireLock, bundle_repo: &str, bundle_tag: &str)
         metadata: lock.metadata.clone(),
         skills: lock.skills.iter().filter(|a| is_member(a)).cloned().collect(),
         rules: lock.rules.iter().filter(|a| is_member(a)).cloned().collect(),
+        agents: lock.agents.iter().filter(|a| is_member(a)).cloned().collect(),
     }
 }
 
@@ -1057,20 +1050,20 @@ fn bundle_members_lock(lock: &GrimoireLock, bundle_repo: &str, bundle_tag: &str)
 /// go through [`bundle_members_lock`] instead.
 fn single_entry_lock(lock: &GrimoireLock, kind: ArtifactKind, name: &str) -> Option<GrimoireLock> {
     let entry = lock
-        .skills
-        .iter()
-        .chain(lock.rules.iter())
+        .iter_artifacts()
         .find(|a| a.kind == kind && a.name == name)
         .cloned()?;
-    let (skills, rules) = match kind {
-        ArtifactKind::Skill => (vec![entry], Vec::new()),
-        ArtifactKind::Rule => (Vec::new(), vec![entry]),
+    let (skills, rules, agents) = match kind {
+        ArtifactKind::Skill => (vec![entry], Vec::new(), Vec::new()),
+        ArtifactKind::Rule => (Vec::new(), vec![entry], Vec::new()),
+        ArtifactKind::Agent => (Vec::new(), Vec::new(), vec![entry]),
         ArtifactKind::Bundle => return None,
     };
     Some(GrimoireLock {
         metadata: lock.metadata.clone(),
         skills,
         rules,
+        agents,
     })
 }
 
@@ -1195,6 +1188,7 @@ mod tests {
             },
             skills,
             rules,
+            agents: vec![],
         }
     }
 
@@ -1219,23 +1213,32 @@ mod tests {
 
     #[test]
     fn single_entry_lock_projects_one_artifact_with_metadata() {
-        let lock = lock_fixture(
+        let mut lock = lock_fixture(
             vec![
                 locked("a", ArtifactKind::Skill, '1'),
                 locked("b", ArtifactKind::Skill, '2'),
             ],
             vec![locked("c", ArtifactKind::Rule, '3')],
         );
+        lock.agents = vec![locked("d", ArtifactKind::Agent, '4')];
 
         let single = single_entry_lock(&lock, ArtifactKind::Skill, "b").expect("entry exists");
         assert_eq!(single.skills.len(), 1);
         assert_eq!(single.skills[0].name, "b");
         assert!(single.rules.is_empty());
+        assert!(single.agents.is_empty());
         assert_eq!(single.metadata, lock.metadata, "metadata carries over unchanged");
 
         let rule = single_entry_lock(&lock, ArtifactKind::Rule, "c").expect("rule entry exists");
         assert!(rule.skills.is_empty());
         assert_eq!(rule.rules.len(), 1);
+        assert!(rule.agents.is_empty());
+
+        let agent = single_entry_lock(&lock, ArtifactKind::Agent, "d").expect("agent entry exists");
+        assert!(agent.skills.is_empty());
+        assert!(agent.rules.is_empty());
+        assert_eq!(agent.agents.len(), 1);
+        assert_eq!(agent.agents[0].name, "d");
 
         assert!(
             single_entry_lock(&lock, ArtifactKind::Skill, "missing").is_none(),
@@ -1432,6 +1435,7 @@ mod tests {
     fn row_kind_maps_every_catalog_kind() {
         assert_eq!(row_kind("skill"), ArtifactKind::Skill);
         assert_eq!(row_kind("rule"), ArtifactKind::Rule);
+        assert_eq!(row_kind("agent"), ArtifactKind::Agent);
         assert_eq!(row_kind("bundle"), ArtifactKind::Bundle);
         // Unknown / absent kind defaults to skill; the materializer
         // validates the actual payload shape.
@@ -1450,18 +1454,71 @@ mod tests {
         rule_member.bundle = Some("r/bundles/pack".to_string());
         rule_member.bundle_tag = Some("latest".to_string());
         let direct = locked("direct", ArtifactKind::Skill, '7');
+        let mut agent_member = locked("amember", ArtifactKind::Agent, '8');
+        agent_member.bundle = Some("r/bundles/pack".to_string());
+        agent_member.bundle_tag = Some("latest".to_string());
 
-        let lock = lock_fixture(vec![member, other_tag, direct], vec![rule_member]);
+        let mut lock = lock_fixture(vec![member, other_tag, direct], vec![rule_member]);
+        lock.agents = vec![agent_member];
         let projected = bundle_members_lock(&lock, "r/bundles/pack", "latest");
 
         assert_eq!(projected.skills.len(), 1, "only the latest-tag member projects");
         assert_eq!(projected.skills[0].name, "member");
         assert_eq!(projected.rules.len(), 1);
         assert_eq!(projected.rules[0].name, "rmember");
+        assert_eq!(projected.agents.len(), 1, "agent bundle member projects");
+        assert_eq!(projected.agents[0].name, "amember");
         assert_eq!(projected.metadata, lock.metadata, "metadata carries over unchanged");
 
         let empty = bundle_members_lock(&lock, "r/bundles/unknown", "latest");
-        assert!(empty.skills.is_empty() && empty.rules.is_empty());
+        assert!(empty.skills.is_empty() && empty.rules.is_empty() && empty.agents.is_empty());
+    }
+
+    /// A bundle whose members include an agent: verify that state derivation
+    /// counts the agent member and that the bundle-expand helpers collect it.
+    #[test]
+    fn bundle_with_agent_member_state_and_expand() {
+        use crate::install::install_state::InstallState;
+
+        let mut agent_member = locked("my-agent", ArtifactKind::Agent, 'a');
+        agent_member.bundle = Some("r/bundles/ai-pack".to_string());
+        agent_member.bundle_tag = Some("latest".to_string());
+        let mut lock = lock_fixture(vec![], vec![]);
+        lock.agents = vec![agent_member];
+
+        // derive_bundle_state: agent member provenance matches → bundle
+        // reports NotInstalled (no install record) rather than hiding the
+        // member entirely.
+        let state = InstallState::empty(std::path::Path::new("/nonexistent"));
+        assert_eq!(
+            derive_bundle_state("r/bundles/ai-pack", Some(&lock), &state),
+            ArtifactState::NotInstalled,
+            "bundle with only an agent member derives NotInstalled when not installed"
+        );
+
+        // A bundle with no matching provenance in the lock is NotInstalled.
+        assert_eq!(
+            derive_bundle_state("r/bundles/other", Some(&lock), &state),
+            ArtifactState::NotInstalled,
+            "bundle with no matching provenance is NotInstalled"
+        );
+
+        // bundle_members_lock: agent member is included.
+        let projected = bundle_members_lock(&lock, "r/bundles/ai-pack", "latest");
+        assert!(projected.skills.is_empty());
+        assert!(projected.rules.is_empty());
+        assert_eq!(projected.agents.len(), 1);
+        assert_eq!(projected.agents[0].name, "my-agent");
+
+        // perform_uninstall's bundle-target collection path (tested via
+        // iter_artifacts on a lock containing only agents):
+        let targets: Vec<(ArtifactKind, String)> = lock
+            .iter_artifacts()
+            .filter(|a| a.bundle.as_deref() == Some("r/bundles/ai-pack"))
+            .map(|a| (a.kind, a.name.clone()))
+            .collect();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0], (ArtifactKind::Agent, "my-agent".to_string()));
     }
 
     #[test]

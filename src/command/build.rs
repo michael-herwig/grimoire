@@ -18,9 +18,11 @@ use crate::api::build_report::BuildReport;
 use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
 use crate::oci::ArtifactKind;
-use crate::oci::annotations::{annotations_for_rule, annotations_for_skill};
+use crate::oci::annotations::{annotations_for_agent, annotations_for_rule, annotations_for_skill};
 use crate::skill::rule_frontmatter::RuleFrontmatter;
-use crate::skill::{pack_rule_file, pack_skill_dir, validate_rule_file, validate_skill_dir};
+use crate::skill::{
+    pack_agent_file, pack_rule_file, pack_skill_dir, validate_agent_file, validate_rule_file, validate_skill_dir,
+};
 
 /// `grim build` arguments.
 #[derive(Debug, Args)]
@@ -29,7 +31,7 @@ pub struct BuildArgs {
     pub path: std::path::PathBuf,
 
     /// Force the artifact kind instead of auto-detecting it.
-    #[arg(long, value_parser = ["skill", "rule", "bundle"])]
+    #[arg(long, value_parser = ["skill", "rule", "agent", "bundle"])]
     pub kind: Option<String>,
 }
 
@@ -49,11 +51,9 @@ pub struct PackedArtifact {
 /// Detect the artifact kind from `path` and an optional `--kind`.
 pub fn detect_kind(path: &Path, forced: Option<&str>) -> anyhow::Result<ArtifactKind> {
     if let Some(k) = forced {
-        return Ok(match k {
-            "skill" => ArtifactKind::Skill,
-            "bundle" => ArtifactKind::Bundle,
-            _ => ArtifactKind::Rule,
-        });
+        // The value_parser above constrains k to a known kind string;
+        // from_kind_str never returns None here.
+        return Ok(ArtifactKind::from_kind_str(k).unwrap_or(ArtifactKind::Rule));
     }
     if path.is_dir() && path.join("SKILL.md").is_file() {
         Ok(ArtifactKind::Skill)
@@ -117,6 +117,15 @@ pub fn validate_and_pack(
                 crate::error::Error::from(crate::skill::SkillError::new(path, crate::skill::SkillErrorKind::Io(e)))
             })?;
             let parsed = super::grim(RuleFrontmatter::parse_doc(&doc, path))?;
+            // Heuristic: if the extra frontmatter keys contain both "name" and
+            // "description", this file looks like an agent definition. Warn so
+            // the author knows to pass `--kind agent` to publish it correctly.
+            if parsed.frontmatter.extra.contains_key("name") && parsed.frontmatter.extra.contains_key("description") {
+                tracing::warn!(
+                    "'{}' looks like an agent definition; pass --kind agent to publish it as one",
+                    path.display()
+                );
+            }
             let name = path
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
@@ -126,6 +135,23 @@ pub fn validate_and_pack(
             Ok(PackedArtifact {
                 kind,
                 name,
+                tar,
+                annotations,
+            })
+        }
+        ArtifactKind::Agent => {
+            let fm = super::grim(validate_agent_file(path))?;
+            // Same gate for agents: a bad vendor literal fails the publish.
+            let warnings =
+                super::grim(crate::install::render::validate_agent_metadata(&fm).map_err(metadata_invalid(path)))?;
+            for warning in warnings {
+                tracing::warn!("{}: {warning}", path.display());
+            }
+            let tar = super::grim(pack_agent_file(path))?;
+            let annotations = annotations_for_agent(&fm, version, source);
+            Ok(PackedArtifact {
+                kind,
+                name: fm.name.to_string(),
                 tar,
                 annotations,
             })
@@ -302,5 +328,43 @@ mod tests {
         let err = validate_and_pack(&f, ArtifactKind::Rule, "1.0.0", None).unwrap_err();
         assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
         assert!(format!("{err:#}").contains("copilot.exclude-agent"), "{err:#}");
+    }
+
+    #[test]
+    fn validate_and_pack_agent_round_trips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("code-reviewer.md");
+        write(
+            &f,
+            "---\nname: code-reviewer\ndescription: Reviews diffs.\n---\nYou are a code reviewer.\n",
+        );
+        let packed = validate_and_pack(&f, ArtifactKind::Agent, "1.0.0", Some("acme/code-reviewer")).unwrap();
+        assert_eq!(packed.kind, ArtifactKind::Agent);
+        assert_eq!(packed.name, "code-reviewer");
+        assert!(!packed.tar.is_empty());
+        assert_eq!(packed.annotations["org.opencontainers.image.version"], "1.0.0");
+        assert_eq!(packed.annotations["org.opencontainers.image.title"], "code-reviewer");
+        assert_eq!(
+            packed.annotations["org.opencontainers.image.source"],
+            "acme/code-reviewer"
+        );
+    }
+
+    #[test]
+    fn agent_shaped_md_without_kind_flag_detects_as_rule() {
+        // An agent-shaped .md (has `name` + `description` in frontmatter) without
+        // `--kind agent` still auto-detects as a Rule (shape-based contract: any
+        // single .md file is a rule unless forced). The heuristic warning fires on
+        // the validate_and_pack Rule path but does not change the detected kind.
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("code-reviewer.md");
+        write(
+            &f,
+            "---\nname: code-reviewer\ndescription: Reviews diffs.\n---\nYou are a code reviewer.\n",
+        );
+        // auto-detect resolves to Rule for a plain .md
+        assert_eq!(detect_kind(&f, None).unwrap(), ArtifactKind::Rule);
+        // forced to agent => kind is agent
+        assert_eq!(detect_kind(&f, Some("agent")).unwrap(), ArtifactKind::Agent);
     }
 }

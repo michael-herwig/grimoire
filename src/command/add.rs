@@ -44,9 +44,9 @@ pub struct AddArgs {
     /// name is expanded against the effective default registry.
     pub reference: String,
 
-    /// The artifact kind (`skill`, `rule`, or `bundle`). Inferred from the
-    /// published manifest's OCI `artifactType` when omitted.
-    #[arg(long, short = 'k', value_parser = ["skill", "rule", "bundle"])]
+    /// The artifact kind (`skill`, `rule`, `agent`, or `bundle`). Inferred from
+    /// the published manifest's OCI `artifactType` when omitted.
+    #[arg(long, short = 'k', value_parser = ["skill", "rule", "agent", "bundle"])]
     pub kind: Option<String>,
 
     /// The config binding name. Defaults to the reference's last path
@@ -105,7 +105,8 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
 
     // The kind: an explicit --kind wins; otherwise infer it from the
     // published manifest's OCI `artifactType` (the kind is persisted in the
-    // OCI artifact type at release time).
+    // OCI artifact type at release time). The value_parser above constrains
+    // the string to a known kind, so from_kind_str never returns None here.
     let kind = match args.kind.as_deref() {
         Some(k) => ArtifactKind::from_kind_str(k).unwrap_or(ArtifactKind::Rule),
         None => infer_kind(&access, &id).await?,
@@ -126,14 +127,12 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     super::grim(lock_io::save(&scope.lock_path, &new_lock, previous.as_ref()))?;
 
     // A bundle has no single pinned member to report; surface the bundle
-    // reference itself. A skill/rule reports the digest it resolved to.
+    // reference itself. A skill/rule/agent reports the digest it resolved to.
     let pinned = if kind == ArtifactKind::Bundle {
         id.to_string()
     } else {
         new_lock
-            .skills
-            .iter()
-            .chain(new_lock.rules.iter())
+            .iter_artifacts()
             .find(|a| a.kind == kind && a.name == name)
             .map(|a| a.pinned.strip_advisory().to_string())
             .unwrap_or_else(|| id.to_string())
@@ -143,9 +142,10 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
 }
 
 /// Declare `name = id` in the kind's config table
-/// (`[skills]`/`[rules]`/`[bundles]`) and invalidate the declaration-hash
-/// cache. The kind-dispatch seam shared by `grim add` and the TUI install
-/// action so a bundle can never be coerced into a skill/rule table.
+/// (`[skills]`/`[rules]`/`[agents]`/`[bundles]`) and invalidate the
+/// declaration-hash cache. The kind-dispatch seam shared by `grim add`
+/// and the TUI install action so a bundle can never be coerced into a
+/// skill/rule/agent table.
 pub(crate) fn declare(
     set: &mut crate::config::declaration::DesiredSet,
     kind: ArtifactKind,
@@ -158,6 +158,9 @@ pub(crate) fn declare(
         }
         ArtifactKind::Rule => {
             set.rules.insert(name, id);
+        }
+        ArtifactKind::Agent => {
+            set.agents.insert(name, id);
         }
         ArtifactKind::Bundle => {
             set.bundles.insert(name, id);
@@ -313,6 +316,12 @@ pub(crate) fn write_config(
     out.push_str("\n[rules]\n");
     for (name, id) in &set.rules {
         let _ = writeln!(out, "{name} = \"{id}\"");
+    }
+    if !set.agents.is_empty() {
+        out.push_str("\n[agents]\n");
+        for (name, id) in &set.agents {
+            let _ = writeln!(out, "{name} = \"{id}\"");
+        }
     }
 
     crate::store::atomic_write::atomic_write(path, out.as_bytes()).map_err(|e| {
