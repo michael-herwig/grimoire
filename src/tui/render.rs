@@ -141,6 +141,10 @@ pub struct RenderModel {
     pub hint_tiers: Vec<String>,
     /// The one-line glyph legend (what each status symbol means).
     pub legend: String,
+    /// A short, unobtrusive hint shown when the browse window was truncated
+    /// at the cap (the row list / search may be incomplete); empty when the
+    /// window is exhaustive. Rendered as a quiet span on the legend line.
+    pub truncation_hint: String,
     /// Whether the detail pane is the focused element.
     pub detail_focused: bool,
     /// Whether the help overlay is showing.
@@ -314,6 +318,14 @@ pub fn frame(state: &TuiState) -> RenderModel {
         format!("clients: {}", state.clients.join(", "))
     };
 
+    // A truncated browse window gets a quiet hint so the list is not read as
+    // exhaustive; omitted entirely when the window is complete.
+    let truncation_hint = if state.truncated {
+        "(list truncated)".to_string()
+    } else {
+        String::new()
+    };
+
     RenderModel {
         title,
         search,
@@ -327,6 +339,7 @@ pub fn frame(state: &TuiState) -> RenderModel {
         hint,
         hint_tiers,
         legend: "✓ installed   ↑ outdated   ✱ modified   ✘ integrity-missing   · not-installed".to_string(),
+        truncation_hint,
         detail_focused: state.mode == Mode::Detail,
         show_help: state.mode == Mode::Help,
         picker,
@@ -532,7 +545,7 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
             .direction(Direction::Horizontal)
             .constraints([Constraint::Min(10), Constraint::Length(hint_w + 1)])
             .split(legend_chunk);
-        f.render_widget(Paragraph::new(legend_line()), legend_row[0]);
+        f.render_widget(Paragraph::new(legend_line(&model.truncation_hint)), legend_row[0]);
         f.render_widget(
             Paragraph::new(Span::styled(hint, Style::default().fg(Color::DarkGray))).alignment(Alignment::Right),
             legend_row[1],
@@ -613,8 +626,10 @@ fn draw_picker(f: &mut Frame, p: &PickerView) {
 }
 
 /// The status-glyph legend as colored spans (each glyph in its state
-/// color), so the legend itself demonstrates the palette.
-fn legend_line() -> Line<'static> {
+/// color), so the legend itself demonstrates the palette. A non-empty
+/// `truncation_hint` is appended as a quiet trailing span so a capped
+/// browse window is flagged without crowding the title-row status.
+fn legend_line(truncation_hint: &str) -> Line<'static> {
     let pairs = [
         ("✓ installed", ColorKey::Installed),
         ("  ↑ outdated", ColorKey::Outdated),
@@ -622,12 +637,17 @@ fn legend_line() -> Line<'static> {
         ("  ✘ integrity-missing", ColorKey::IntegrityMissing),
         ("  · not-installed", ColorKey::NotInstalled),
     ];
-    Line::from(
-        pairs
-            .into_iter()
-            .map(|(t, k)| Span::styled(t.to_string(), Style::default().fg(color_for(k))))
-            .collect::<Vec<_>>(),
-    )
+    let mut spans: Vec<Span<'static>> = pairs
+        .into_iter()
+        .map(|(t, k)| Span::styled(t.to_string(), Style::default().fg(color_for(k))))
+        .collect();
+    if !truncation_hint.is_empty() {
+        spans.push(Span::styled(
+            format!("   {truncation_hint}"),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    Line::from(spans)
 }
 
 /// A centered help overlay listing every keybinding.
@@ -907,6 +927,34 @@ mod tests {
         assert_eq!(frame(&s).clients, "");
         s.set_clients(vec!["claude".to_string(), "opencode".to_string()]);
         assert_eq!(frame(&s).clients, "clients: claude, opencode");
+    }
+
+    #[test]
+    fn frame_projects_truncation_hint_and_omits_when_complete() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![row("r/a", ArtifactState::Installed)]);
+        // An exhaustive window omits the hint entirely.
+        assert_eq!(frame(&s).truncation_hint, "");
+        // A capped window surfaces the quiet hint.
+        s.set_truncated(true);
+        assert_eq!(frame(&s).truncation_hint, "(list truncated)");
+        // The hint lives on the legend line, separate from the transient
+        // status (which stays its own, un-clobbered field).
+        assert_eq!(frame(&s).status, "", "truncation never touches the status line");
+    }
+
+    #[test]
+    fn legend_line_appends_truncation_hint_only_when_present() {
+        // No hint ⇒ the legend keeps exactly its five glyph spans.
+        let base = legend_line("");
+        assert_eq!(base.spans.len(), 5, "five status glyphs, no trailing hint");
+        // A non-empty hint adds one trailing span carrying the hint text.
+        let with_hint = legend_line("(list truncated)");
+        assert_eq!(with_hint.spans.len(), 6, "glyphs plus the truncation span");
+        assert!(
+            with_hint.spans.last().unwrap().content.contains("(list truncated)"),
+            "the trailing span carries the hint text"
+        );
     }
 
     #[test]

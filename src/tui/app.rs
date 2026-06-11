@@ -429,6 +429,10 @@ fn drain_catalog_ready(ctx: &TuiContext, state: &mut TuiState, catalog: &Catalog
     let (lock, install_state) = load_scope_for_badges(ctx);
     let fresh = rows_from_catalog(catalog, lock.as_ref(), &install_state);
     state.merge_catalog_rows(fresh);
+    // The background refresh re-walks the same browse window, so its
+    // truncation verdict supersedes the initial load's (the cap may now be
+    // hit or cleared as the registry grows/shrinks).
+    state.set_truncated(catalog.truncated());
 }
 
 /// Set a quiet tally breadcrumb ("N update(s) available") **only** when the
@@ -482,6 +486,10 @@ async fn reload_into(ctx: &TuiContext, state: &mut TuiState, force: bool) {
             let rows = rows_from_catalog(&catalog, lock.as_ref(), &install_state);
             let n = rows.len();
             state.set_rows(rows);
+            // Surface whether the browse window hit the cap so the row list
+            // is not read as exhaustive (CLI search warns on stderr; the TUI
+            // shows a quiet legend-line hint).
+            state.set_truncated(catalog.truncated());
             state.set_status(if ctx.offline {
                 format!("offline — {n} cached entr{} ", if n == 1 { "y" } else { "ies" })
             } else if n == 0 {

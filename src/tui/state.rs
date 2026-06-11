@@ -125,6 +125,10 @@ pub struct TuiState {
     pub loading: bool,
     /// Whether the catalog was served offline (cached / possibly stale).
     pub offline: bool,
+    /// Whether the loaded catalog window was truncated at the browse cap
+    /// (more repositories existed than were walked), so the row list /
+    /// search results may be silently incomplete. Surfaced as a quiet hint.
+    pub truncated: bool,
     /// A one-line status / hint shown at the bottom.
     pub status_line: String,
     /// Marked rows for batch actions, as indices into `rows` (stable
@@ -154,6 +158,7 @@ impl Default for TuiState {
             mode: Mode::List,
             loading: true,
             offline: false,
+            truncated: false,
             status_line: String::new(),
             marked: std::collections::BTreeSet::new(),
             scope_label: String::new(),
@@ -336,6 +341,12 @@ impl TuiState {
     /// Set the offline indicator.
     pub fn set_offline(&mut self, offline: bool) {
         self.offline = offline;
+    }
+
+    /// Set the catalog-truncated indicator (the browse window hit the cap,
+    /// so the row list / search may be incomplete).
+    pub fn set_truncated(&mut self, truncated: bool) {
+        self.truncated = truncated;
     }
 
     /// Set the active-scope label shown in the title.
@@ -603,6 +614,16 @@ mod tests {
         assert!(s.clients.is_empty(), "default is empty");
         s.set_clients(vec!["claude".to_string(), "opencode".to_string()]);
         assert_eq!(s.clients, vec!["claude".to_string(), "opencode".to_string()]);
+    }
+
+    #[test]
+    fn set_truncated_round_trips() {
+        let mut s = TuiState::new();
+        assert!(!s.truncated, "default is not truncated");
+        s.set_truncated(true);
+        assert!(s.truncated);
+        s.set_truncated(false);
+        assert!(!s.truncated, "setter is pure — flips both ways");
     }
 
     #[test]
