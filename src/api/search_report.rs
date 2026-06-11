@@ -10,10 +10,11 @@
 //! representative tag.
 //!
 //! JSON format: an array of
-//! `{kind, repo, summary, description, version, latest_tag, status}` objects
-//! (the report wraps a `Vec`, serialized to the bare array — no wrapper
-//! object, per subsystem-cli-api.md). The `description` stays full and
-//! untruncated; both `version` and the representative `latest_tag` are kept.
+//! `{kind, repo, summary, description, version, latest_tag, repository,
+//! status}` objects (the report wraps a `Vec`, serialized to the bare
+//! array — no wrapper object, per subsystem-cli-api.md). The `description`
+//! stays full and untruncated; both `version` and the representative
+//! `latest_tag` are kept; `repository` is the HTTPS source URL or `null`.
 
 use std::io::{self, Write};
 
@@ -34,6 +35,9 @@ pub struct SearchEntry {
     /// The short catalog summary, if any. Preferred over `description`
     /// for the plain-text column; the full `description` stays in JSON.
     pub summary: Option<String>,
+    /// The HTTPS source-repository URL from the catalog read-back guard,
+    /// if any. JSON-only — the plain table stays five columns.
+    pub repository: Option<String>,
     /// The representative tag the metadata was read from (may be the moving
     /// `latest` pointer). Kept in JSON for fidelity; the plain table shows
     /// `version` instead.
@@ -49,13 +53,14 @@ pub struct SearchEntry {
 impl Serialize for SearchEntry {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut s = serializer.serialize_struct("SearchEntry", 7)?;
+        let mut s = serializer.serialize_struct("SearchEntry", 8)?;
         s.serialize_field("kind", &self.kind)?;
         s.serialize_field("repo", &self.repo)?;
         s.serialize_field("summary", &self.summary)?;
         s.serialize_field("description", &self.description)?;
         s.serialize_field("version", &self.version)?;
         s.serialize_field("latest_tag", &self.latest_tag)?;
+        s.serialize_field("repository", &self.repository)?;
         s.serialize_field("status", &self.status.to_string())?;
         s.end()
     }
@@ -160,6 +165,7 @@ mod tests {
             kind: Some("skill".to_string()),
             repo: repo.to_string(),
             summary: None,
+            repository: None,
             description: Some("desc".to_string()),
             latest_tag: Some("latest".to_string()),
             version: None,
@@ -208,6 +214,7 @@ mod tests {
             kind: Some("skill".to_string()),
             repo: "localhost:5000/acme/x".to_string(),
             summary: Some("blurb".to_string()),
+            repository: None,
             description: None,
             latest_tag: Some("latest".to_string()),
             version: Some("2.1.0".to_string()),
@@ -228,6 +235,7 @@ mod tests {
             kind: Some("rule".to_string()),
             repo: "localhost:5000/acme/y".to_string(),
             summary: None,
+            repository: None,
             description: Some("d".to_string()),
             latest_tag: Some("stable".to_string()),
             version: None,
@@ -245,6 +253,7 @@ mod tests {
             kind: Some("skill".to_string()),
             repo: "localhost:5000/acme/x".to_string(),
             summary: Some("short blurb".to_string()),
+            repository: None,
             description: Some("a much longer description that should be hidden".to_string()),
             latest_tag: Some("latest".to_string()),
             version: None,
@@ -263,6 +272,7 @@ mod tests {
             kind: Some("skill".to_string()),
             repo: "localhost:5000/acme/x".to_string(),
             summary: None,
+            repository: None,
             description: Some("the description text".to_string()),
             latest_tag: Some("latest".to_string()),
             version: None,
@@ -283,6 +293,7 @@ mod tests {
             kind: Some("skill".to_string()),
             repo: "localhost:5000/acme/x".to_string(),
             summary: Some(long.clone()),
+            repository: None,
             description: None,
             latest_tag: Some("latest".to_string()),
             version: None,
@@ -301,6 +312,7 @@ mod tests {
             kind: Some("skill".to_string()),
             repo: "localhost:5000/acme/x".to_string(),
             summary: Some("short".to_string()),
+            repository: None,
             description: Some("the full long description".to_string()),
             latest_tag: Some("latest".to_string()),
             version: Some("1.2.0".to_string()),
@@ -314,6 +326,28 @@ mod tests {
         // Both the concrete version and the representative tag round-trip.
         assert_eq!(v[0]["version"], "1.2.0");
         assert_eq!(v[0]["latest_tag"], "latest");
+    }
+
+    #[test]
+    fn json_carries_repository_url_plain_table_does_not() {
+        let mut e = entry("localhost:5000/acme/x", StatusBadge::Installed);
+        e.repository = Some("https://github.com/acme/x".to_string());
+        let mut buf = Vec::new();
+        SearchReport::new(vec![e.clone()]).print_json(&mut buf).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v[0]["repository"], "https://github.com/acme/x");
+        // Absent ⇒ explicit null, key always present for stable consumers.
+        let mut buf = Vec::new();
+        SearchReport::new(vec![entry("localhost:5000/acme/y", StatusBadge::Installed)])
+            .print_json(&mut buf)
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert!(v[0]["repository"].is_null());
+        // The plain table stays five columns — no URL leaks into it.
+        let mut buf = Vec::new();
+        SearchReport::new(vec![e]).print_plain(&mut buf).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(!out.contains("github.com"), "plain table unchanged");
     }
 
     #[test]

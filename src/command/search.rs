@@ -122,6 +122,7 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
             repo: e.repo(),
             summary: e.summary.clone(),
             description: e.description.clone(),
+            repository: e.repository_url.clone(),
             latest_tag: e.latest_tag.clone(),
             version: e.version.clone(),
             status: derive_badge(&e.registry, &e.repository, lock.as_ref(), &state),

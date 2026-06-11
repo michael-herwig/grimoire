@@ -81,6 +81,11 @@ pub struct CatalogEntry {
     /// `com.grimoire.keywords` split on commas (trimmed, empties dropped).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keywords: Vec<String>,
+    /// `org.opencontainers.image.source`, kept only when it is an HTTPS
+    /// repository URL (older artifacts carry a non-URL release ref there;
+    /// the prefix guard drops those instead of surfacing garbage).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_url: Option<String>,
     /// The representative tag the metadata was read from (may be the
     /// moving `latest` pointer).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -393,6 +398,7 @@ impl Catalog {
             description: None,
             summary: None,
             keywords: Vec::new(),
+            repository_url: None,
             latest_tag,
             version,
             fetched_at: fetched_at.clone(),
@@ -433,7 +439,7 @@ impl Catalog {
             Ok(m) => m,
             Err(_) => return bare(Some(tag), version.clone()),
         };
-        let (kind, description, summary, keywords) = manifest
+        let (kind, description, summary, keywords, repository_url) = manifest
             .map(|m| {
                 let kind = crate::oci::annotations::kind_from_manifest(&m).map(|k| k.to_string());
                 let description = m.annotations.get("org.opencontainers.image.description").cloned();
@@ -449,9 +455,16 @@ impl Catalog {
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
-                (kind, description, summary, keywords)
+                // Pre-repository artifacts carry the release ref here —
+                // the prefix guard keeps only real HTTPS repo URLs.
+                let repository_url = m
+                    .annotations
+                    .get("org.opencontainers.image.source")
+                    .filter(|s| s.starts_with("https://"))
+                    .cloned();
+                (kind, description, summary, keywords, repository_url)
             })
-            .unwrap_or((None, None, None, Vec::new()));
+            .unwrap_or((None, None, None, Vec::new(), None));
 
         CatalogEntry {
             registry: registry.to_string(),
@@ -460,6 +473,7 @@ impl Catalog {
             description,
             summary,
             keywords,
+            repository_url,
             latest_tag: Some(tag),
             version,
             fetched_at,
@@ -661,6 +675,7 @@ mod tests {
                 description: Some("Review code.".to_string()),
                 summary: Some("review skill".to_string()),
                 keywords: vec!["review".to_string(), "quality".to_string()],
+                repository_url: Some("https://github.com/acme/code-review".to_string()),
                 latest_tag: Some("latest".to_string()),
                 version: Some("1.2.0".to_string()),
                 fetched_at: ts(10),
@@ -714,6 +729,10 @@ mod tests {
         annotations.insert("com.grimoire.keywords".to_string(), kw.to_string());
         annotations.insert("org.opencontainers.image.description".to_string(), desc.to_string());
         annotations.insert("com.grimoire.summary".to_string(), "short summary".to_string());
+        annotations.insert(
+            "org.opencontainers.image.source".to_string(),
+            "https://github.com/acme/code-review".to_string(),
+        );
         OciManifest {
             media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
             artifact_type: Some(crate::oci::ArtifactKind::Skill.artifact_type().to_string()),
@@ -836,10 +855,54 @@ mod tests {
         assert_eq!(e.description.as_deref(), Some("Review code."));
         assert_eq!(e.summary.as_deref(), Some("short summary"));
         assert_eq!(e.keywords, vec!["review", "quality"]);
+        assert_eq!(
+            e.repository_url.as_deref(),
+            Some("https://github.com/acme/code-review"),
+            "HTTPS source annotation is kept as the repository URL"
+        );
         assert_eq!(e.latest_tag.as_deref(), Some("latest"));
         assert!(!*blob_flag.lock().unwrap(), "catalog must not pull a blob");
         // Persisted for reuse.
         assert!(path.exists());
+    }
+
+    #[tokio::test]
+    async fn build_drops_non_https_source_annotation() {
+        // Pre-repository artifacts carry the tagless release ref in the
+        // source annotation — the https:// guard must drop it, not surface
+        // it as a clickable repository URL.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let inner = MemoryRegistry::new();
+        let reg = "localhost:5000";
+        let id = Identifier::new_registry("acme/legacy".to_string(), reg.to_string());
+        let mut manifest = skill_manifest("k", "d");
+        manifest.annotations.insert(
+            "org.opencontainers.image.source".to_string(),
+            "localhost:5000/acme/legacy".to_string(),
+        );
+        let mdigest = inner.push_manifest(&id, &manifest).await.unwrap();
+        inner.put_tag(&id, "latest", &mdigest).await.unwrap();
+        let access: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(CatalogRegistry {
+            inner,
+            repos: vec!["acme/legacy".to_string()],
+            registry: reg.to_string(),
+            blob_pulled: std::sync::Arc::new(Mutex::new(false)),
+        });
+        let cat = Catalog::load_or_refresh(&path, reg, "", &access, false, true)
+            .await
+            .unwrap();
+        let e = cat.entries().next().expect("one entry");
+        assert_eq!(e.repository_url, None, "legacy release-ref source is not a URL");
+    }
+
+    #[test]
+    fn v1_entry_without_repository_url_deserializes() {
+        // Backward compat: a cache written before the field existed parses
+        // with `None` (serde default), no version bump required.
+        let json = r#"{"registry":"localhost:5000","repository":"acme/x","fetched_at":"2026-01-01T00:00:00Z"}"#;
+        let e: CatalogEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(e.repository_url, None);
     }
 
     #[tokio::test]
@@ -1053,6 +1116,7 @@ mod tests {
             description: Some("Review code quality".to_string()),
             summary: Some("terse blurb".to_string()),
             keywords: vec!["lint".to_string()],
+            repository_url: None,
             latest_tag: Some("latest".to_string()),
             version: None,
             fetched_at: ts(1),
