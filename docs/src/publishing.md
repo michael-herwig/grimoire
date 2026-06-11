@@ -50,13 +50,14 @@ transformed. A rule with no support directory packs to exactly the single
 
 [`grim search`](./commands.md#search) and the [TUI](./commands.md#tui) list
 every match in a table. To make a result legible and findable, an artifact
-carries three pieces of catalog metadata, all optional:
+carries four pieces of catalog metadata, all optional:
 
 | Field | Annotation | Purpose |
 |-------|-----------|---------|
 | `summary` | `com.grimoire.summary` | One-line blurb shown in the catalog (preferred over the description). |
 | `keywords` | `com.grimoire.keywords` | Comma-separated terms that search matches. |
 | `description` | `org.opencontainers.image.description` | The full description. |
+| `repository` | `org.opencontainers.image.source` | HTTPS URL of the artifact's source repository ([details](#metadata-repository)). |
 
 `grim search` shows the `summary` in place of the `description`, truncated to
 fit the terminal; the full description stays in `--format json` and in piped
@@ -82,6 +83,7 @@ description: A thorough multi-pass reviewer that checks correctness, security, a
 metadata:
   summary: Multi-pass code reviewer
   keywords: review,quality
+  repository: https://github.com/acme/code-review
 ---
 ```
 
@@ -97,6 +99,7 @@ frontmatter:
 paths: ["**/*.rs"]
 summary: Idiomatic Rust style rules
 keywords: rust,lint
+repository: https://github.com/acme/rust-style
 ---
 # Rust Style
 …
@@ -115,6 +118,7 @@ description: Reviews diffs for correctness, security, and style.
 metadata:
   summary: Multi-pass diff reviewer
   keywords: review,quality
+  repository: https://github.com/acme/code-reviewer
 ---
 ```
 
@@ -129,6 +133,7 @@ the member tables. Here `description` overrides the otherwise-automatic
 summary = "Python dev stack"
 keywords = "python,lint,test"
 description = "Skills and rules for Python work"
+repository = "https://github.com/acme/python-stack"
 
 [skills]
 code-review = "ghcr.io/acme/code-review:1"
@@ -141,6 +146,21 @@ rust-style = "ghcr.io/acme/rust-style:2"
 `keywords` is always a single comma-separated string — in every kind — because
 an OCI annotation value is itself a string. A YAML or TOML list is **not**
 accepted; write `keywords: rust,lint`, not `keywords: [rust, lint]`.
+
+### Repository URL {#metadata-repository}
+
+`repository` links a published artifact back to the source repository it
+came from. The value must be an `https://` URL (GitHub, GitLab, or any
+forge) — a `git@…` or `http://` value fails the release with exit 65, the
+same hard gate that guards [vendor metadata](./vendor-metadata.md#publish-validation).
+
+On the wire it travels as the standard `org.opencontainers.image.source`
+annotation, so registries that honor the key link the package to its
+repository. When no `repository` is authored, grim keeps its previous
+behavior and stamps the tagless release reference there instead. The
+[TUI](./commands.md#tui) shows the URL in the detail pane and opens it
+with the `o` key; `grim search --format json` exposes it as the
+`repository` field.
 
 ## Validate before you push
 

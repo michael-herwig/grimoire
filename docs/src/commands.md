@@ -159,7 +159,10 @@ query lists the whole catalog. `--refresh` forces a catalog rebuild;
 The plain table shows each entry's short summary (`com.grimoire.summary`),
 falling back to the description when no summary is set. On an interactive
 terminal that column is truncated to fit the width; piped output and
-`--format json` keep the full description.
+`--format json` keep the full description. The JSON output also carries a
+`repository` field — the artifact's authored
+[repository URL](./publishing.md#metadata-repository), or `null` when the
+artifact has none.
 
 ```sh
 grim search review
@@ -168,11 +171,20 @@ grim search --refresh --registry ghcr.io/acme
 
 ## grim tui {#tui}
 
-`grim tui` opens an interactive browser over a registry's catalog. It groups
-entries into a collapsible tree by registry and path, shows live install state
-in colour, and supports multi-select with batch install, update, and delete.
-Press `?` in the TUI for the full key map; highlights are `t` to toggle the
-tree, `v` to pick a version, `g` to switch scope, and `space` to mark rows.
+`grim tui` opens an interactive browser over a registry's catalog. It shows
+a flat, kind-grouped list with live install state in colour, and supports
+multi-select with batch install, update, and delete. Press `?` in the TUI
+for the full key map; highlights are `v` to pick a version, `o` to open
+the selected entry's repository URL in the browser, `g` to switch scope,
+and `space` to mark rows.
+
+`enter` opens the detail pane for the selected row: the centered artifact
+reference, its `Summary:` and `Description:` sections, and a `Metadata:`
+block with the keywords and the
+[repository URL](./publishing.md#metadata-repository) (version and install
+status stay on the catalog row). While the pane is open, `↑`/`↓` (or
+`j`/`k`) scroll it instead of moving the selection; `esc` returns to the
+list.
 
 A TUI install or update goes through the same seams as the commands: it
 declares the entry in the active scope's `grimoire.toml` and relocks it (like

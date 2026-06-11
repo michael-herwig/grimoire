@@ -354,8 +354,15 @@ Grimoire-specific ones, sourced per kind as follows:
 | `org.opencontainers.image.description` | `description` field, or derived from the rule body | always |
 | `org.opencontainers.image.version` | release version | always |
 | `org.opencontainers.image.licenses` | skill `license` field | when present |
+| `org.opencontainers.image.source` | authored `repository` HTTPS URL (skill/agent `metadata.repository`; rule top-level `repository`; bundle `repository`); falls back to the tagless release ref | always on release |
 | `com.grimoire.summary` | skill/agent `metadata.summary`; rule top-level `summary`; bundle `summary` | when present |
 | `com.grimoire.keywords` | skill/agent `metadata.keywords`; rule top-level `keywords`; bundle `keywords` | when present |
+
+An authored `repository` must be an `https://` URL — anything else fails
+the publish (exit 65). Readers distinguish a real repository URL from the
+legacy release-ref fallback by that `https://` prefix; on registries that
+honor the key (e.g. [ghcr.io][ghcr-source-label]) the source annotation
+also links the package back to its repository.
 
 `org.opencontainers.image.created` is deliberately omitted so re-releasing
 identical content stays byte-identical (idempotent re-release).
@@ -363,3 +370,4 @@ identical content stays byte-identical (idempotent re-release).
 <!-- external -->
 [agentskills-spec]: https://agentskills.io/specification
 [oci-annotations]: https://github.com/opencontainers/image-spec/blob/main/annotations.md
+[ghcr-source-label]: https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#labelling-container-images
