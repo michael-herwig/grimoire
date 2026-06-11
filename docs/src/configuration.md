@@ -86,6 +86,29 @@ stays locked until the last contributing bundle is removed. The same
 compatibility holds for agents: an agent-free lock carries no `[[agent]]`
 array at all and is byte-identical to one written before agents existed.
 
+A lock with declared bundles also caches each bundle's expansion result in a
+`[[bundle]]` section — binding name, `repo`, `tag`, the resolved manifest
+digest, and the member list as `[[bundle.member]]` rows:
+
+```toml
+[[bundle]]
+name = "starter-pack"
+repo = "ghcr.io/acme/bundles/starter-pack"
+tag = "1"
+pinned = "ghcr.io/acme/bundles/starter-pack@sha256:…"
+
+[[bundle.member]]
+kind = "skill"
+name = "code-reviewer"
+id = "ghcr.io/acme/code-reviewer:1"
+```
+
+This cache is what lets `grim remove` and `grim uninstall` work **offline**
+on the *effective* declaration: before applying an edit they compute the set
+of artifacts the declaration implies before and after, drop only what no
+remaining declaration holds, and keep everything else. A bundle-free lock
+carries no `[[bundle]]` section at all.
+
 ## Scopes on disk
 
 A **project** config is the `grimoire.toml` discovered from the working

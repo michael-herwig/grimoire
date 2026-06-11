@@ -129,11 +129,25 @@ with `--format json` to drive automation.
 lock. It leaves already-installed files on disk — use
 [`grim uninstall`](#uninstall) to remove those too.
 
+Removal acts on the **effective** declaration, fully offline: the lock entry
+is dropped only when no remaining declaration holds the artifact. Removing a
+direct declaration while a declared bundle still names the artifact at the
+*same* identifier keeps the entry — its provenance flips to the bundle. If
+the bundle names it at a *different* identifier, the correct pin cannot be
+derived offline: the entry is dropped, the lock is left stale, and grim tells
+you to run [`grim lock`](#lock) — never a silently incomplete fresh lock.
+
 ## grim uninstall {#uninstall}
 
 `grim uninstall <kind> <name>` is the full inverse of install: it deletes the
 materialized files, drops the install record, and undeclares the artifact from
 the config and lock. The interactive TUI's delete action reuses the same seam.
+
+The lock follows the same effective-declaration rule as
+[`grim remove`](#remove): when a declared bundle still names the artifact at
+the same identifier, the files are deleted (that is what you asked for) but
+the lock entry survives via the bundle — the next `grim install`
+rematerializes it.
 
 ## grim search {#search}
 
