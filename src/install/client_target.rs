@@ -26,7 +26,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::oci::ArtifactKind;
-use crate::skill::RuleFrontmatter;
+use crate::skill::{AgentFrontmatter, RuleFrontmatter};
 
 use super::install_error::{InstallError, InstallErrorKind};
 
@@ -110,6 +110,7 @@ impl ClientTarget {
         match kind {
             ArtifactKind::Skill => self.vendor().skills_root(workspace, scope).join(name),
             ArtifactKind::Rule => self.vendor().rule_path(workspace, scope, name),
+            ArtifactKind::Agent => self.vendor().agent_path(workspace, scope, name),
             // Bundles never materialize; they expand into members.
             ArtifactKind::Bundle => unreachable!("bundles are never materialized; they expand into members"),
         }
@@ -146,6 +147,7 @@ impl ClientTarget {
         match kind {
             ArtifactKind::Skill => self.materialize_skill(artifact_root, dest),
             ArtifactKind::Rule => self.materialize_rule(name, artifact_root, dest, pinned, support_dir),
+            ArtifactKind::Agent => self.materialize_agent(artifact_root, dest, pinned),
             // Bundles never materialize; they expand into members.
             ArtifactKind::Bundle => unreachable!("bundles are never materialized; they expand into members"),
         }
@@ -242,6 +244,51 @@ impl ClientTarget {
         }
 
         out.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(out)
+    }
+
+    /// Materialize an agent: the single file goes through the vendor's
+    /// [`Vendor::agent_index`] transform (`None` ⇒ verbatim copy). Agents
+    /// have no support directory. An unparseable agent document is a
+    /// materialize failure — unlike a rule, the frontmatter is required.
+    fn materialize_agent(
+        self,
+        artifact_root: &Path,
+        dest: &Path,
+        pinned: &str,
+    ) -> Result<Vec<MaterializedFile>, InstallError> {
+        let bytes = std::fs::read(artifact_root).map_err(|e| target_io(artifact_root, e))?;
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| target_io(parent, e))?;
+        }
+
+        let doc = String::from_utf8_lossy(&bytes);
+        let parsed = AgentFrontmatter::parse_doc(&doc, artifact_root).map_err(|e| materialize_failed(e.to_string()))?;
+        let rendered = self
+            .vendor()
+            .agent_index(&parsed, pinned)
+            .map_err(|e| materialize_failed(e.to_string()))?;
+
+        let out = match rendered {
+            // Canonical bytes are what this vendor reads — verbatim copy.
+            None => {
+                std::fs::write(dest, &bytes).map_err(|e| target_io(dest, e))?;
+                vec![MaterializedFile {
+                    path: dest.to_path_buf(),
+                    generated: false,
+                }]
+            }
+            Some(rendered) => {
+                for warning in &rendered.warnings {
+                    tracing::warn!("{warning}");
+                }
+                std::fs::write(dest, rendered.document.as_bytes()).map_err(|e| target_io(dest, e))?;
+                vec![MaterializedFile {
+                    path: dest.to_path_buf(),
+                    generated: true,
+                }]
+            }
+        };
         Ok(out)
     }
 }

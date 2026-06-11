@@ -30,6 +30,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::config::scope::ConfigScope;
+use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::ParsedRule;
 
 use super::install_state::InstallState;
@@ -44,6 +45,13 @@ pub enum FieldType {
     String,
     /// Passthrough string validated against a closed set of literals.
     Enum(&'static [&'static str]),
+    /// Base-10 integer literal → native YAML number; anything else errors.
+    Integer,
+    /// Finite float literal → native YAML number; anything else errors.
+    Float,
+    /// Comma-separated string → native YAML sequence (segments trimmed,
+    /// empties dropped, input order kept). Never fails.
+    CommaList,
 }
 
 /// One row of a vendor registry: the namespaced field name (the part
@@ -80,6 +88,14 @@ pub trait Vendor {
         &[]
     }
 
+    /// Known `<vendor>.*` agent metadata fields. Same semantics as
+    /// [`Self::skill_fields`], for agent frontmatter `metadata`. A lifted
+    /// key whose native name collides with a projected common field
+    /// (`model`, `tools`) **overrides** it — the documented escape hatch.
+    fn agent_fields(&self) -> &'static [KnownField] {
+        &[]
+    }
+
     /// Whether this client is *detected* for `scope` — its vendor
     /// directory / config marker is present — so a default install (no
     /// `--client`, no `[options].clients`) should target it. Pure existence
@@ -103,6 +119,11 @@ pub trait Vendor {
     /// The install path of the rule index `<name>` for `scope`.
     fn rule_path(&self, workspace: &Path, scope: ConfigScope, name: &str) -> PathBuf;
 
+    /// The install path of the agent file `<name>` for `scope`. Every
+    /// vendor has a native agents directory (project and user level), so
+    /// there is no default — each vendor owns its layout.
+    fn agent_path(&self, workspace: &Path, scope: ConfigScope, name: &str) -> PathBuf;
+
     /// Render the `SKILL.md` index for this vendor, or `None` when the
     /// canonical bytes should install verbatim (no tool-namespaced
     /// metadata, or not parseable as a skill).
@@ -123,6 +144,18 @@ pub trait Vendor {
     /// [`RenderError`] when a known `<vendor>.<field>` metadata key
     /// carries an unconvertible literal.
     fn rule_index(&self, parsed: &ParsedRule, pinned: &str) -> Result<Option<RenderedDoc>, RenderError>;
+
+    /// Render the agent document for this vendor, or `None` when the
+    /// canonical bytes should install verbatim. Same `generated`/
+    /// determinism contract as [`Self::rule_index`]. The projected common
+    /// fields (`name`/`description`/`model`/`tools`) follow the per-vendor
+    /// emit matrix; a lifted `<vendor>.*` key overrides its common field.
+    ///
+    /// # Errors
+    ///
+    /// [`RenderError`] when a known `<vendor>.<field>` metadata key
+    /// carries an unconvertible literal.
+    fn agent_index(&self, parsed: &ParsedAgent, pinned: &str) -> Result<Option<RenderedDoc>, RenderError>;
 
     /// Converge vendor-owned configuration on the current install state —
     /// the reversible config-registration seam (hooks ADR pattern).

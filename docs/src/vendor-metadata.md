@@ -151,6 +151,80 @@ the `CLAUDE_SKILL_FIELDS` constant in `src/install/vendor_claude.rs`.
 cannot be expressed as a single string metadata value; a separate ADR
 governs that surface.
 
+## Agent common fields and override precedence {#agent-overrides}
+
+Agents follow the same common-vs-unique rule with one addition. The
+canonical agent frontmatter models four common fields — `name`,
+`description`, `model`, `tools` — which grim projects per vendor (see
+[Agent Artifacts][agents-doc] for the full emit matrix). Everything else
+is a `<vendor>.<field>` metadata key.
+
+Two of those vendor keys deliberately shadow a common field: when a
+vendor's registry lifts a key to the same native name a projected common
+field uses, the vendor key **overrides** the common value for that vendor
+— silently, with no warning, because the collision is the documented
+escape hatch. Example: `model: sonnet` plus `claude.model: opus` installs
+`model: opus` for [Claude Code][claude-subagents-docs] while
+[OpenCode][opencode-agents-docs] still receives the common `sonnet`.
+
+## The claude.* agent registry {#claude-agent-registry}
+
+The table below is the authoritative list of agent fields grim recognizes
+for [Claude Code][claude-subagents-docs] subagents. Every row is a direct
+mapping from the `CLAUDE_AGENT_FIELDS` constant in
+`src/install/vendor_claude.rs`.
+
+| Key | Native field | Type | Notes |
+|---|---|---|---|
+| `claude.model` | `model` | string | **Overrides** the common `model` field for Claude |
+| `claude.tools` | `tools` | string | **Overrides** the common `tools` field for Claude (comma-separated string, Claude's native shape) |
+| `claude.disallowed-tools` | `disallowedTools` | string | |
+| `claude.permission-mode` | `permissionMode` | enum | Accepted values: `default`, `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`, `plan` |
+| `claude.max-turns` | `maxTurns` | integer | |
+| `claude.skills` | `skills` | comma list | Comma-separated string → YAML list |
+| `claude.memory` | `memory` | enum | Accepted values: `user`, `project`, `local` |
+| `claude.background` | `background` | bool | `"true"` or `"false"` |
+| `claude.effort` | `effort` | enum | Accepted values: `low`, `medium`, `high`, `xhigh`, `max` |
+| `claude.isolation` | `isolation` | enum | Accepted values: `worktree` |
+| `claude.color` | `color` | enum | Accepted values: `red`, `blue`, `green`, `yellow`, `purple`, `orange`, `pink`, `cyan` |
+| `claude.initial-prompt` | `initialPrompt` | string | |
+
+`mcpServers` and `hooks` are not in this registry — both are object-valued
+fields that cannot be expressed as a single string metadata value.
+
+## The opencode.* agent registry {#opencode-agent-registry}
+
+Unlike its empty skill registry, [OpenCode][opencode-agents-docs] has a
+rich native agent frontmatter. Every row maps from the
+`OPENCODE_AGENT_FIELDS` constant in `src/install/vendor_opencode.rs`.
+
+| Key | Native field | Type | Notes |
+|---|---|---|---|
+| `opencode.model` | `model` | string | **Overrides** the common `model` field for OpenCode — the escape hatch when the common value is not `provider/model-id`-shaped |
+| `opencode.mode` | `mode` | enum | Accepted values: `primary`, `subagent`, `all` |
+| `opencode.temperature` | `temperature` | float | |
+| `opencode.top-p` | `top_p` | float | Note: the native key uses an underscore |
+| `opencode.steps` | `steps` | integer | Maximum agentic iterations |
+| `opencode.prompt` | `prompt` | string | Custom system prompt reference |
+| `opencode.disable` | `disable` | bool | |
+| `opencode.hidden` | `hidden` | bool | |
+| `opencode.color` | `color` | string | Hex color or theme name |
+
+`permission` (an object) and the deprecated object-valued `tools` map are
+not in this registry.
+
+## The copilot.* agent registry {#copilot-agent-registry}
+
+[GitHub Copilot CLI][copilot-agents-docs] custom agents recognize one
+projectable vendor key, mapped from `COPILOT_AGENT_FIELDS` in
+`src/install/vendor_copilot.rs`.
+
+| Key | Native field | Type | Notes |
+|---|---|---|---|
+| `copilot.tools` | `tools` | comma list | **Overrides** the common `tools` field for Copilot; comma-separated string → YAML list |
+
+`mcp-servers` (an object) is not in this registry.
+
 ## Empty registries for OpenCode and Copilot skills {#empty-registries}
 
 The skill registries for [OpenCode][opencode-skills-docs] and [GitHub
@@ -330,6 +404,9 @@ claude namespace to silence it and gain proper type conversion.
 
 <!-- external -->
 [agentskills-spec]: https://agentskills.io/specification
+[claude-subagents-docs]: https://code.claude.com/docs/en/sub-agents
+[opencode-agents-docs]: https://opencode.ai/docs/agents/
+[copilot-agents-docs]: https://docs.github.com/en/copilot/concepts/agents/copilot-cli/about-custom-agents
 [claude-code-docs]: https://code.claude.com
 [claude-skills-docs]: https://code.claude.com/docs/en/skills
 [claude-memory-docs]: https://code.claude.com/docs/en/memory
@@ -345,3 +422,4 @@ claude namespace to silence it and gain proper type conversion.
 <!-- internal -->
 [publishing-metadata]: ./publishing.md#metadata
 [concepts-clients]: ./concepts.md#clients
+[agents-doc]: ./agents.md

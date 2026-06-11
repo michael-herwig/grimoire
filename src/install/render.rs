@@ -29,8 +29,9 @@ use std::fmt::Write as _;
 
 use serde_yaml::Value;
 
+use crate::skill::agent_frontmatter::ParsedAgent;
 use crate::skill::rule_frontmatter::ParsedRule;
-use crate::skill::{RuleFrontmatter, SkillFrontmatter};
+use crate::skill::{AgentFrontmatter, RuleFrontmatter, SkillFrontmatter};
 
 use super::client_target::ClientTarget;
 use super::vendor::{FieldType, KnownField, Vendor};
@@ -128,7 +129,39 @@ fn convert(key: &str, value: &str, ty: FieldType) -> Result<Value, RenderError> 
                 })
             }
         }
+        FieldType::Integer => {
+            value
+                .parse::<i64>()
+                .map(|n| Value::Number(n.into()))
+                .map_err(|_| RenderError::InvalidValue {
+                    key: key.to_string(),
+                    value: value.to_string(),
+                    expected: "an integer".to_string(),
+                })
+        }
+        FieldType::Float => match value.parse::<f64>() {
+            Ok(f) if f.is_finite() => Ok(Value::Number(serde_yaml::Number::from(f))),
+            _ => Err(RenderError::InvalidValue {
+                key: key.to_string(),
+                value: value.to_string(),
+                expected: "a finite number".to_string(),
+            }),
+        },
+        FieldType::CommaList => Ok(comma_list_value(value)),
     }
+}
+
+/// A comma-separated string as a native YAML sequence: segments trimmed,
+/// empty segments dropped, input order kept. Deterministic, never fails.
+pub fn comma_list_value(value: &str) -> Value {
+    Value::Sequence(
+        value
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| Value::String(s.to_string()))
+            .collect(),
+    )
 }
 
 /// Partition a metadata map for one vendor: plain keys into `plain`,
@@ -207,7 +240,7 @@ pub fn project_skill(fm: &SkillFrontmatter, vendor: &dyn Vendor) -> Result<Rende
     // is: struct fields (declaration order), `extra` keys (BTreeMap
     // order), lifted keys (registry order) — fully deterministic.
     let mut mapping = to_mapping(&plain);
-    append_lifted(&mut mapping, lifted, vendor.name(), &mut warnings);
+    append_lifted(&mut mapping, lifted, vendor.name(), &[], &mut warnings);
 
     Ok(RenderedSkill {
         frontmatter_yaml: serialize_mapping(&mapping),
@@ -234,6 +267,110 @@ pub fn project_rule(fm: &RuleFrontmatter, vendor: &dyn Vendor) -> Result<RulePro
     })
 }
 
+/// The generic projection of an agent's metadata map for one vendor.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentProjection {
+    /// The vendor's lifted `(native key, value)` pairs, registry order.
+    pub lifted: Vec<(&'static str, Value)>,
+    /// The frontmatter with every tool-namespaced metadata key removed
+    /// (common fields, plain metadata, and forward-compat extras kept).
+    pub cleaned: AgentFrontmatter,
+    /// Typo-guard warnings (unknown own-namespace keys).
+    pub warnings: Vec<String>,
+    /// Whether any tool-namespaced key was present at all — `false` means
+    /// a canonical-style vendor can install the source bytes verbatim.
+    pub had_tool_keys: bool,
+}
+
+/// Project an agent's `metadata` map for `vendor`. Pure partition — the
+/// vendor decides which common fields to emit and how (the per-vendor
+/// emit matrix lives in the `agent_index` impls).
+///
+/// # Errors
+///
+/// [`RenderError::InvalidValue`] for a known key with a bad literal.
+pub fn project_agent(fm: &AgentFrontmatter, vendor: &dyn Vendor) -> Result<AgentProjection, RenderError> {
+    let (plain_metadata, lifted, warnings, had_tool_keys) =
+        partition_metadata(&fm.metadata, vendor.agent_fields(), vendor.name())?;
+    let mut cleaned = fm.clone();
+    cleaned.metadata = plain_metadata;
+    Ok(AgentProjection {
+        lifted,
+        cleaned,
+        warnings,
+        had_tool_keys,
+    })
+}
+
+/// Render an agent document in **canonical style** for a vendor whose
+/// native format equals the canonical one (Claude): `None` when the agent
+/// carries no tool-namespaced metadata (verbatim install), else the
+/// cleaned full frontmatter (own keys lifted — a collision on a native in
+/// `expected_overrides` replaces the projected common field silently —
+/// foreign keys dropped, plain metadata kept) re-serialized over the
+/// verbatim body.
+///
+/// # Errors
+///
+/// [`RenderError::InvalidValue`] for a known key with a bad literal.
+pub fn render_agent_canonical(
+    parsed: &ParsedAgent,
+    vendor: &dyn Vendor,
+    expected_overrides: &[&str],
+) -> Result<Option<RenderedDoc>, RenderError> {
+    let projection = project_agent(&parsed.frontmatter, vendor)?;
+    if !projection.had_tool_keys {
+        return Ok(None);
+    }
+
+    let mut warnings = projection.warnings;
+    let mut mapping = to_mapping(&projection.cleaned);
+    append_lifted(
+        &mut mapping,
+        projection.lifted,
+        vendor.name(),
+        expected_overrides,
+        &mut warnings,
+    );
+
+    let mut document = String::new();
+    if !mapping.is_empty() {
+        document.push_str("---\n");
+        document.push_str(&serialize_mapping(&mapping));
+        document.push_str("---\n");
+    }
+    document.push_str(&parsed.body);
+    Ok(Some(RenderedDoc { document, warnings }))
+}
+
+/// Build an agent frontmatter block (`---\n…---\n`, or empty when nothing
+/// is emitted) from explicit native `(key, value)` pairs plus the vendor's
+/// lifted keys — the shared mechanics behind the transforming vendors'
+/// `agent_index` impls (OpenCode, Copilot). Override-aware: a lifted key
+/// whose native name is in `expected_overrides` replaces the projected
+/// common pair silently; any other collision warns.
+pub fn agent_frontmatter_block(
+    natives: Vec<(&'static str, Value)>,
+    lifted: Vec<(&'static str, Value)>,
+    vendor_name: &str,
+    expected_overrides: &[&str],
+    warnings: &mut Vec<String>,
+) -> String {
+    let mut mapping = serde_yaml::Mapping::new();
+    for (key, value) in natives {
+        mapping.insert(Value::String(key.to_string()), value);
+    }
+    append_lifted(&mut mapping, lifted, vendor_name, expected_overrides, warnings);
+
+    if mapping.is_empty() {
+        return String::new();
+    }
+    let mut block = String::from("---\n");
+    block.push_str(&serialize_mapping(&mapping));
+    block.push_str("---\n");
+    block
+}
+
 /// Render a rule index in **canonical style** for a vendor that reads the
 /// canonical frontmatter natively (Claude): `None` when the rule carries
 /// no tool-namespaced metadata (verbatim install), else the cleaned
@@ -251,7 +388,7 @@ pub fn render_rule_canonical(parsed: &ParsedRule, vendor: &dyn Vendor) -> Result
 
     let mut warnings = projection.warnings;
     let mut mapping = to_mapping(&projection.cleaned);
-    append_lifted(&mut mapping, projection.lifted, vendor.name(), &mut warnings);
+    append_lifted(&mut mapping, projection.lifted, vendor.name(), &[], &mut warnings);
 
     let mut document = String::new();
     if !mapping.is_empty() {
@@ -309,16 +446,20 @@ fn to_mapping<T: serde::Serialize>(value: &T) -> serde_yaml::Mapping {
 
 /// Append lifted native keys to `mapping`, warning when a lifted key
 /// overrides an existing (legacy top-level) key. The namespaced metadata
-/// value wins.
+/// value always wins. A collision on a native named in
+/// `expected_overrides` is **documented precedence** (a vendor key
+/// overriding a projected common field, e.g. `claude.model` over `model`)
+/// and replaces silently — no warning.
 fn append_lifted(
     mapping: &mut serde_yaml::Mapping,
     lifted: Vec<(&'static str, Value)>,
     vendor_name: &str,
+    expected_overrides: &[&str],
     warnings: &mut Vec<String>,
 ) {
     for (native, value) in lifted {
         let native_key = Value::String(native.to_string());
-        if mapping.contains_key(&native_key) {
+        if mapping.contains_key(&native_key) && !expected_overrides.contains(&native) {
             warnings.push(format!(
                 "metadata key '{vendor_name}.{native}' overrides the top-level '{native}' frontmatter key"
             ));
@@ -374,6 +515,38 @@ pub fn validate_namespaced_metadata(fm: &SkillFrontmatter) -> Result<Vec<String>
             warnings.push(format!(
                 "top-level frontmatter key '{key}' is not an agentskills field; author it as metadata 'claude.{}' instead",
                 f.field
+            ));
+        }
+    }
+    Ok(warnings)
+}
+
+/// Validate an agent's tool-namespaced `metadata` keys against every
+/// supported target: a publish-time gate. Returns the union of per-target
+/// typo-guard warnings plus a migration nudge for vendor-namespaced keys
+/// authored top-level (in `extra` — the modeled common fields `model` /
+/// `tools` are legitimate top-level keys and never nudged).
+///
+/// # Errors
+///
+/// The first [`RenderError`] from any target — a known key with a bad
+/// literal must fail the publish before the artifact reaches a registry.
+pub fn validate_agent_metadata(fm: &AgentFrontmatter) -> Result<Vec<String>, RenderError> {
+    let mut warnings = Vec::new();
+    for target in ClientTarget::ALL {
+        let projection = project_agent(fm, target.vendor())?;
+        for w in projection.warnings {
+            if !warnings.contains(&w) {
+                warnings.push(w);
+            }
+        }
+    }
+    // Migration nudge: a tool-namespaced key authored top-level in the
+    // agent frontmatter is never projected — it belongs inside `metadata`.
+    for key in fm.extra.keys() {
+        if split_namespaced(key).is_some() {
+            warnings.push(format!(
+                "top-level agent frontmatter key '{key}' is not projected; author it inside 'metadata' instead"
             ));
         }
     }
@@ -591,6 +764,132 @@ metadata:
         let warnings = validate_namespaced_metadata(&legacy).expect("valid");
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("claude.when-to-use"), "{:?}", warnings);
+    }
+
+    // ── Agent projection ─────────────────────────────────────────────────
+
+    fn agent(doc: &str) -> ParsedAgent {
+        crate::skill::AgentFrontmatter::parse_doc(doc, Path::new("rev.md")).expect("parse")
+    }
+
+    #[test]
+    fn comma_list_trims_and_drops_empties_in_input_order() {
+        let v = comma_list_value(" b , a ,, c,");
+        let Value::Sequence(items) = v else { panic!("sequence") };
+        let strs: Vec<&str> = items.iter().filter_map(|i| i.as_str()).collect();
+        assert_eq!(strs, vec!["b", "a", "c"], "input order kept, empties dropped");
+        assert_eq!(comma_list_value(""), Value::Sequence(vec![]));
+    }
+
+    #[test]
+    fn integer_and_float_conversion_and_errors() {
+        assert_eq!(
+            convert("k", "12", FieldType::Integer).unwrap(),
+            Value::Number(12.into())
+        );
+        assert!(convert("k", "12.5", FieldType::Integer).is_err());
+        assert!(convert("k", "0.25", FieldType::Float).is_ok());
+        assert!(convert("k", "NaN", FieldType::Float).is_err(), "non-finite rejected");
+        assert!(convert("k", "inf", FieldType::Float).is_err());
+        assert!(convert("k", "warm", FieldType::Float).is_err());
+    }
+
+    #[test]
+    fn project_agent_partitions_and_detects_tool_keys() {
+        let p = agent(
+            "---\nname: rev\ndescription: d\nmodel: sonnet\nmetadata:\n  keywords: a,b\n  claude.memory: project\n  copilot.tools: \"x\"\n---\nbody\n",
+        );
+        let claude = project_agent(&p.frontmatter, ClientTarget::Claude.vendor()).expect("project");
+        assert!(claude.had_tool_keys);
+        assert_eq!(claude.lifted.len(), 1, "only the claude key lifts for claude");
+        assert_eq!(claude.lifted[0].0, "memory");
+        assert_eq!(
+            claude.cleaned.metadata.get("keywords").map(String::as_str),
+            Some("a,b"),
+            "plain metadata survives the clean"
+        );
+        assert!(!claude.cleaned.metadata.contains_key("claude.memory"));
+
+        let plain = agent("---\nname: rev\ndescription: d\n---\nbody\n");
+        let proj = project_agent(&plain.frontmatter, ClientTarget::Claude.vendor()).expect("project");
+        assert!(!proj.had_tool_keys, "no tool keys ⇒ verbatim-capable");
+    }
+
+    #[test]
+    fn render_agent_canonical_verbatim_and_override_paths() {
+        // No tool keys ⇒ None (verbatim).
+        let plain = agent("---\nname: rev\ndescription: d\nmodel: sonnet\n---\nbody\n");
+        assert!(
+            render_agent_canonical(&plain, ClientTarget::Claude.vendor(), &["model", "tools"])
+                .expect("render")
+                .is_none()
+        );
+
+        // claude.model overrides the common model — silently (expected).
+        let over = agent("---\nname: rev\ndescription: d\nmodel: sonnet\nmetadata:\n  claude.model: opus\n---\nbody\n");
+        let out = render_agent_canonical(&over, ClientTarget::Claude.vendor(), &["model", "tools"])
+            .expect("render")
+            .expect("tool keys present");
+        assert!(out.document.contains("model: opus"));
+        assert!(!out.document.contains("sonnet"));
+        assert!(
+            out.warnings.is_empty(),
+            "expected override is silent: {:?}",
+            out.warnings
+        );
+
+        // A collision NOT in expected_overrides still warns (extra key).
+        let legacy =
+            agent("---\nname: rev\ndescription: d\nmemory: user\nmetadata:\n  claude.memory: project\n---\nbody\n");
+        let out = render_agent_canonical(&legacy, ClientTarget::Claude.vendor(), &["model", "tools"])
+            .expect("render")
+            .expect("rendered");
+        assert!(out.document.contains("memory: project"), "namespaced wins");
+        assert_eq!(out.warnings.len(), 1);
+        assert!(out.warnings[0].contains("overrides"));
+    }
+
+    #[test]
+    fn agent_frontmatter_block_is_deterministic_and_override_aware() {
+        let natives = vec![
+            ("description", Value::String("d".to_string())),
+            ("model", Value::String("sonnet".to_string())),
+        ];
+        let lifted = vec![("model", Value::String("anthropic/claude-sonnet-4-5".to_string()))];
+        let mut warnings = Vec::new();
+        let a = agent_frontmatter_block(natives.clone(), lifted.clone(), "opencode", &["model"], &mut warnings);
+        assert!(a.starts_with("---\n") && a.ends_with("---\n"));
+        assert!(a.contains("model: anthropic/claude-sonnet-4-5"));
+        assert!(!a.contains("sonnet\n"), "common value replaced");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let b = agent_frontmatter_block(natives, lifted, "opencode", &["model"], &mut warnings);
+        assert_eq!(a, b, "re-render byte-identical");
+        // Empty mapping ⇒ no block at all.
+        assert_eq!(
+            agent_frontmatter_block(vec![], vec![], "opencode", &[], &mut warnings),
+            ""
+        );
+    }
+
+    #[test]
+    fn validate_agent_metadata_unions_and_nudges() {
+        // Unknown own-namespace key warns; common top-level fields never nudge.
+        let ok = agent(
+            "---\nname: rev\ndescription: d\nmodel: sonnet\ntools: Read\nmetadata:\n  opencode.future: \"x\"\n---\nbody\n",
+        );
+        let warnings = validate_agent_metadata(&ok.frontmatter).expect("valid");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("opencode.future"));
+
+        // Bad literal fails the gate.
+        let bad = agent("---\nname: rev\ndescription: d\nmetadata:\n  claude.effort: warp\n---\nbody\n");
+        assert!(validate_agent_metadata(&bad.frontmatter).is_err());
+
+        // Vendor key authored top-level: migration nudge.
+        let legacy = agent("---\nname: rev\ndescription: d\nclaude.memory: project\n---\nbody\n");
+        let warnings = validate_agent_metadata(&legacy.frontmatter).expect("valid");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("author it inside 'metadata'"));
     }
 
     // ── Rule projection ──────────────────────────────────────────────────

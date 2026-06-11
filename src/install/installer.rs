@@ -63,7 +63,7 @@ pub struct ArtifactInstall {
     pub result: Result<InstallOutcome, crate::error::Error>,
 }
 
-/// Install every locked artifact, in skills-then-rules order.
+/// Install every locked artifact, in skills-then-rules-then-agents order.
 ///
 /// `force` overrides the integrity gate (a locally modified artifact is
 /// overwritten instead of refused). The first hard error for an artifact
@@ -78,12 +78,7 @@ pub async fn install_all<M: ArtifactMaterializer>(
     state: &mut InstallState,
     force: bool,
 ) -> Vec<ArtifactInstall> {
-    let work: Vec<(&LockedArtifact, ArtifactKind)> = lock
-        .skills
-        .iter()
-        .map(|a| (a, ArtifactKind::Skill))
-        .chain(lock.rules.iter().map(|a| (a, ArtifactKind::Rule)))
-        .collect();
+    let work: Vec<(&LockedArtifact, ArtifactKind)> = lock.iter_artifacts().map(|a| (a, a.kind)).collect();
 
     let mut results = Vec::with_capacity(work.len());
     for (artifact, kind) in work {
@@ -208,7 +203,7 @@ async fn install_one<M: ArtifactMaterializer>(
 
     let canonical = match kind {
         ArtifactKind::Skill => materialized_root.join(&artifact.name),
-        ArtifactKind::Rule => materialized_root.join(format!("{}.md", artifact.name)),
+        ArtifactKind::Rule | ArtifactKind::Agent => materialized_root.join(format!("{}.md", artifact.name)),
         // Bundles expand into members at resolve time and never enter the
         // lock, so the installer never sees one.
         ArtifactKind::Bundle => unreachable!("bundles are never materialized; they expand into members"),
@@ -226,7 +221,8 @@ async fn install_one<M: ArtifactMaterializer>(
 
     // A rule may carry a sibling support directory staged beside the index
     // file (`<root>/<name>/…`); a plain single-file rule has none. Skills
-    // are a single directory tree, never a support dir.
+    // are a single directory tree, never a support dir; agents are a
+    // single file with no support-directory contract.
     let staged_support: Option<std::path::PathBuf> = match kind {
         ArtifactKind::Rule => {
             let dir = materialized_root.join(&artifact.name);
@@ -547,6 +543,7 @@ mod tests {
             },
             skills: vec![],
             rules,
+            agents: vec![],
         }
     }
 

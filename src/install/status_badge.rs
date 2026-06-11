@@ -122,6 +122,7 @@ mod tests {
                 pinned(repo, byte),
             )],
             rules: vec![],
+            agents: vec![],
         }
     }
 
