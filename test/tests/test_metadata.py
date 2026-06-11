@@ -9,12 +9,18 @@ exercises the full publish path (`annotations_for_*`) that the Rust unit tests
 cover in isolation, for every artifact kind.
 
 Authoring conventions under test:
-- skill: `metadata.summary` / `metadata.keywords` (the SKILL.md spec map),
-  `description` is its own frontmatter field.
-- rule:  top-level `summary` / `keywords`; description derived from the body.
-- bundle: top-level `summary` / `keywords` / `description` in the TOML.
+- skill: `metadata.summary` / `metadata.keywords` / `metadata.repository`
+  (the SKILL.md spec map), `description` is its own frontmatter field.
+- rule:  top-level `summary` / `keywords` / `repository`; description
+  derived from the body.
+- bundle: top-level `summary` / `keywords` / `description` / `repository`
+  in the TOML.
+- agent: `metadata.repository` (like skills).
 Keywords are a comma-separated string in every format (the OCI annotation is a
 string); description on a bundle overrides the auto `bundle of N members`.
+An authored `repository` HTTPS URL becomes `org.opencontainers.image.source`
+(spec-correct), winning over the tagless release-ref fallback; a non-HTTPS
+value hard-fails the release (exit 65).
 """
 from __future__ import annotations
 
@@ -115,6 +121,119 @@ def test_bundle_metadata_becomes_annotations(
     assert (
         ann["org.opencontainers.image.description"] == "Skills and rules for Python work"
     )
+
+
+def test_skill_repository_becomes_source_annotation(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    skill = project_dir / "code-review"
+    _write(
+        skill / "SKILL.md",
+        "---\nname: code-review\ndescription: d\n"
+        "metadata:\n  repository: https://github.com/acme/code-review\n"
+        "---\n# CR\n",
+    )
+    repo_path = f"{unique_repo}/code-review"
+    runner = grim_at(project_dir)
+    runner.json("release", str(skill), f"{registry}/{repo_path}:1.0.0")
+
+    ann = fetch_manifest(repo_path, "1.0.0")["annotations"]
+    assert (
+        ann["org.opencontainers.image.source"] == "https://github.com/acme/code-review"
+    ), "authored repository must win the source annotation"
+
+
+def test_rule_repository_becomes_source_annotation(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    rule = project_dir / "rust-style.md"
+    _write(
+        rule,
+        "---\npaths: ['**/*.rs']\n"
+        "repository: https://gitlab.com/acme/rust-style\n"
+        "---\n# Rust Style\nbody\n",
+    )
+    repo_path = f"{unique_repo}/rust-style"
+    runner = grim_at(project_dir)
+    runner.json("release", str(rule), f"{registry}/{repo_path}:1.0.0")
+
+    ann = fetch_manifest(repo_path, "1.0.0")["annotations"]
+    assert (
+        ann["org.opencontainers.image.source"] == "https://gitlab.com/acme/rust-style"
+    )
+
+
+def test_agent_repository_becomes_source_annotation(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    agent = project_dir / "reviewer.md"
+    _write(
+        agent,
+        "---\nname: reviewer\ndescription: d\n"
+        "metadata:\n  repository: https://github.com/acme/reviewer\n"
+        "---\nbody\n",
+    )
+    repo_path = f"{unique_repo}/reviewer"
+    runner = grim_at(project_dir)
+    runner.json("release", "--kind", "agent", str(agent), f"{registry}/{repo_path}:1.0.0")
+
+    ann = fetch_manifest(repo_path, "1.0.0")["annotations"]
+    assert ann["org.opencontainers.image.source"] == "https://github.com/acme/reviewer"
+
+
+def test_bundle_repository_becomes_source_annotation(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    bundle = project_dir / "python-stack.toml"
+    _write(
+        bundle,
+        'repository = "https://github.com/acme/python-stack"\n\n'
+        "[skills]\n"
+        'code-review = "ghcr.io/acme/code-review:1"\n',
+    )
+    repo_path = f"{unique_repo}/python-stack"
+    runner = grim_at(project_dir)
+    runner.json("release", str(bundle), f"{registry}/{repo_path}:1.0.0")
+
+    ann = fetch_manifest(repo_path, "1.0.0")["annotations"]
+    assert (
+        ann["org.opencontainers.image.source"] == "https://github.com/acme/python-stack"
+    )
+
+
+def test_source_annotation_falls_back_to_release_ref(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """No authored repository ⇒ the tagless release ref is kept in the
+    source annotation (pre-repository continuity behavior, pinned)."""
+    skill = project_dir / "plain"
+    _write(skill / "SKILL.md", "---\nname: plain\ndescription: d\n---\n# P\n")
+    repo_path = f"{unique_repo}/plain"
+    runner = grim_at(project_dir)
+    runner.json("release", str(skill), f"{registry}/{repo_path}:1.0.0")
+
+    ann = fetch_manifest(repo_path, "1.0.0")["annotations"]
+    assert ann["org.opencontainers.image.source"] == f"{registry}/{repo_path}"
+
+
+def test_release_rejects_non_https_repository(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    skill = project_dir / "bad-repo"
+    _write(
+        skill / "SKILL.md",
+        "---\nname: bad-repo\ndescription: d\n"
+        "metadata:\n  repository: git@github.com:acme/bad-repo.git\n"
+        "---\n# B\n",
+    )
+    runner = grim_at(project_dir)
+    result = runner.run(
+        "release", str(skill), f"{registry}/{unique_repo}/bad-repo:1.0.0", check=False
+    )
+    assert result.returncode == 65, (
+        f"non-HTTPS repository must exit 65, got {result.returncode}; {result.stderr}"
+    )
+    assert "repository" in result.stderr, result.stderr
 
 
 def test_bundle_without_metadata_uses_default_description(

@@ -62,6 +62,22 @@ def test_build_rejects_missing_skill_md(grim_at, project_dir: Path) -> None:
     )
 
 
+def test_build_rejects_non_https_repository(grim_at, project_dir: Path) -> None:
+    """The repository publish gate fires at build time too (local
+    pre-flight), for the rule's top-level authoring surface."""
+    rule = project_dir / "bad-repo.md"
+    _write(
+        rule,
+        "---\npaths: ['**/*.rs']\nrepository: http://github.com/acme/x\n---\n# R\nbody\n",
+    )
+    runner = grim_at(project_dir)
+    result = runner.run("build", str(rule), check=False)
+    assert result.returncode == 65, (
+        f"non-HTTPS repository must exit 65, got {result.returncode}; {result.stderr}"
+    )
+    assert "repository" in result.stderr, result.stderr
+
+
 def test_build_rejects_missing_description(grim_at, project_dir: Path) -> None:
     skill = project_dir / "code-review"
     _write(skill / "SKILL.md", "---\nname: code-review\n---\n# Body\n")

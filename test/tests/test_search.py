@@ -110,6 +110,46 @@ def test_search_exposes_summary_and_full_description(
     assert no_summary["description"] == "only a description"
 
 
+def test_search_exposes_repository_url_with_https_guard(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """An HTTPS `org.opencontainers.image.source` annotation surfaces as the
+    JSON `repository` field; a legacy release-ref value (pre-repository
+    artifacts) is dropped by the guard and serializes as null."""
+    make_artifact(
+        f"{unique_repo}/with-repo",
+        "skill",
+        {"with-repo/SKILL.md": "---\nname: with-repo\n---\n# WR\n"},
+        tag="latest",
+        annotations={
+            "org.opencontainers.image.source": "https://github.com/acme/with-repo",
+        },
+    )
+    make_artifact(
+        f"{unique_repo}/legacy-ref",
+        "skill",
+        {"legacy-ref/SKILL.md": "---\nname: legacy-ref\n---\n# LR\n"},
+        tag="latest",
+        annotations={
+            "org.opencontainers.image.source": f"{registry}/{unique_repo}/legacy-ref",
+        },
+    )
+    runner = grim_at(project_dir)
+
+    rows = runner.json(
+        "search", unique_repo, "--registry", REGISTRY_HOST, "--refresh"
+    )
+    by_repo = {r["repo"]: r for r in rows}
+    with_repo = next(
+        v for k, v in by_repo.items() if k.endswith(f"{unique_repo}/with-repo")
+    )
+    legacy = next(
+        v for k, v in by_repo.items() if k.endswith(f"{unique_repo}/legacy-ref")
+    )
+    assert with_repo["repository"] == "https://github.com/acme/with-repo"
+    assert legacy["repository"] is None, "non-URL source ref must be dropped"
+
+
 def test_search_query_miss_is_empty_array_exit_0(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
