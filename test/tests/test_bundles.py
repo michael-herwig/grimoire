@@ -390,6 +390,39 @@ def test_release_bundle_pin_freezes_members(
     assert member_v1_digest in lock, "pinned member stays frozen despite the tag move"
 
 
+def test_release_bundle_with_agent_member(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    # An AUTHORED bundle (.toml with an [agents] table) released through
+    # `grim release` must carry the agent member onto the wire — the
+    # wire-level make_bundle helper bypasses the authoring path and would
+    # not catch a dropped table.
+    sk = _member_skill(unique_repo, "code-review")
+    agent = make_artifact(
+        f"{unique_repo}/reviewer",
+        "agent",
+        {"reviewer.md": "---\nname: reviewer\ndescription: Reviews diffs.\n---\n# r\n"},
+        tag="stable",
+    )
+    bundle_src = project_dir / "stack.toml"
+    bundle_src.write_text(
+        f'[skills]\ncode-review = "{sk.fq}"\n\n[agents]\nreviewer = "{agent.fq}"\n'
+    )
+    runner = grim_at(project_dir)
+    runner.run("release", str(bundle_src), f"{registry}/{unique_repo}/stack:1.0.0")
+
+    consumer = project_dir / "consumer"
+    consumer.mkdir()
+    write_config(consumer, bundles={"stack": f"{REGISTRY_HOST}/{unique_repo}/stack:1.0.0"})
+    crunner = grim_at(consumer)
+    crunner.run("lock")
+
+    rows = crunner.json("status")
+    agent_row = next((r for r in rows if r["kind"] == "agent" and r["name"] == "reviewer"), None)
+    assert agent_row is not None, "the authored [agents] member must expand into the lock"
+    assert agent_row["source"].startswith("bundle:")
+
+
 def test_update_prunes_dropped_bundle_member(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:

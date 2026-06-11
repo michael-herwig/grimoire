@@ -202,6 +202,13 @@ pub fn read_bundle_members(
             id: id.to_string(),
         });
     }
+    for (name, id) in &source.agents {
+        members.push(BundleMember {
+            kind: ArtifactKind::Agent,
+            name: name.clone(),
+            id: id.to_string(),
+        });
+    }
 
     let name = path
         .file_stem()
@@ -261,6 +268,31 @@ mod tests {
         write(&dir.join("SKILL.md"), "---\nname: code-review\ndescription: d\n---\n");
         assert_eq!(detect_kind(&dir, None).unwrap(), ArtifactKind::Skill);
         assert_eq!(detect_kind(&dir, Some("rule")).unwrap(), ArtifactKind::Rule);
+    }
+
+    #[test]
+    fn read_bundle_members_covers_every_member_table() {
+        // Regression: the [agents] table was parsed by BundleSource but
+        // silently dropped here — an authored bundle published without its
+        // agent members.
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("stack.toml");
+        write(
+            &f,
+            "[skills]\ncr = \"ghcr.io/acme/cr:1\"\n\n[rules]\nrs = \"ghcr.io/acme/rs:1\"\n\n[agents]\nrv = \"ghcr.io/acme/rv:1\"\n",
+        );
+        let (name, members, _meta) = read_bundle_members(&f).unwrap();
+        assert_eq!(name, "stack");
+        let kinds: Vec<(ArtifactKind, &str)> = members.iter().map(|m| (m.kind, m.name.as_str())).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (ArtifactKind::Skill, "cr"),
+                (ArtifactKind::Rule, "rs"),
+                (ArtifactKind::Agent, "rv"),
+            ],
+            "every member table maps onto the wire, agents included"
+        );
     }
 
     #[test]
