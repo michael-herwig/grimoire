@@ -122,9 +122,10 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
 /// operation is the full inverse either way. Returns whether the config
 /// had declared it. Shared by `grim uninstall` and the TUI delete action.
 ///
-/// Bundles never reach this seam: `uninstall`'s `--kind` parser excludes
-/// `"bundle"` and the TUI does not operate on bundles — fail loud rather
-/// than silently skip if a caller ever passes one.
+/// A bundle undeclares from `[bundles]` and evicts exactly the lock
+/// members it contributed (matched by provenance repo + tag, via
+/// [`super::remove::drop_from_lock`]); the CLI `uninstall` never passes
+/// one (`--kind` excludes `"bundle"`), but the TUI delete action does.
 ///
 /// # Errors
 ///
@@ -138,23 +139,26 @@ pub(crate) fn undeclare_and_unlock(
     kind: ArtifactKind,
     name: &str,
 ) -> anyhow::Result<bool> {
+    // For a bundle, capture its declared (repo, tag) BEFORE removal so the
+    // lock eviction can match exactly the members this bundle contributed.
+    let bundle = match kind {
+        ArtifactKind::Bundle => set
+            .bundles
+            .get(name)
+            .map(|id| (id.registry_repository(), id.tag_or_latest().to_string())),
+        _ => None,
+    };
     let declared = match kind {
         ArtifactKind::Skill => set.skills.remove(name).is_some(),
         ArtifactKind::Rule => set.rules.remove(name).is_some(),
-        ArtifactKind::Bundle => unreachable!("uninstall does not accept bundles; use `grim remove bundle <name>`"),
+        ArtifactKind::Bundle => set.bundles.remove(name).is_some(),
     };
     if declared {
         set.invalidate_declaration_hash_cache();
         super::grim(write_config(config_path, options, set))?;
     }
     if let Ok(previous) = lock_io::load(lock_path) {
-        let mut new_lock = previous.clone();
-        match kind {
-            ArtifactKind::Skill => new_lock.skills.retain(|a| a.name != name),
-            ArtifactKind::Rule => new_lock.rules.retain(|a| a.name != name),
-            ArtifactKind::Bundle => unreachable!("uninstall does not accept bundles"),
-        }
-        new_lock.metadata.declaration_hash = set.declaration_hash_cached().to_string();
+        let new_lock = super::remove::drop_from_lock(&previous, kind, name, bundle.as_ref(), set);
         super::grim(lock_io::save(lock_path, &new_lock, Some(&previous)))?;
     }
     Ok(declared)
@@ -257,6 +261,57 @@ mod tests {
             "lock must drop the entry"
         );
         assert_eq!(saved.skills.len(), 1);
+        assert_eq!(
+            saved.metadata.declaration_hash,
+            set.declaration_hash_cached(),
+            "lock hash must match the post-removal declaration"
+        );
+    }
+
+    #[test]
+    fn undeclare_bundle_drops_declaration_and_provenance_members() {
+        // Regression: the TUI delete action funnels bundle rows through
+        // this seam too — a bundle must undeclare from `[bundles]` and
+        // evict exactly the lock members it contributed (matched by
+        // provenance repo + tag), not panic as unreachable.
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("grimoire.toml");
+        let lock_path = tmp.path().join("grimoire.lock");
+
+        let mut set = declared_set(&["alpha"]);
+        set.bundles.insert(
+            "starter-pack".to_string(),
+            Identifier::parse("localhost:5000/acme/bundles/starter-pack:latest").unwrap(),
+        );
+        set.invalidate_declaration_hash_cache();
+        write_config(&config_path, &ConfigOptions::default(), &set).unwrap();
+
+        let mut lock = lock_with_skills(set.declaration_hash_cached(), &[("alpha", 'a')]);
+        let mut member = LockedArtifact::direct("member".to_string(), ArtifactKind::Skill, pinned("acme/member", 'b'));
+        member.bundle = Some("localhost:5000/acme/bundles/starter-pack".to_string());
+        member.bundle_tag = Some("latest".to_string());
+        lock.skills.push(member);
+        lock_io::save(&lock_path, &lock, None).unwrap();
+
+        let declared = undeclare_and_unlock(
+            &config_path,
+            &lock_path,
+            &ConfigOptions::default(),
+            &mut set,
+            ArtifactKind::Bundle,
+            "starter-pack",
+        )
+        .expect("bundle undeclare succeeds");
+
+        assert!(declared, "starter-pack was declared");
+        let body = std::fs::read_to_string(&config_path).unwrap();
+        assert!(!body.contains("starter-pack"), "config must drop the bundle");
+        let saved = lock_io::load(&lock_path).unwrap();
+        assert!(
+            saved.skills.iter().all(|a| a.name != "member"),
+            "the bundle's lock members must be evicted"
+        );
+        assert!(saved.skills.iter().any(|a| a.name == "alpha"), "direct entries survive");
         assert_eq!(
             saved.metadata.declaration_hash,
             set.declaration_hash_cached(),

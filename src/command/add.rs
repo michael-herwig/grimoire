@@ -112,18 +112,7 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     };
 
     let mut set = scope.set.clone();
-    match kind {
-        ArtifactKind::Skill => {
-            set.skills.insert(name.clone(), id.clone());
-        }
-        ArtifactKind::Rule => {
-            set.rules.insert(name.clone(), id.clone());
-        }
-        ArtifactKind::Bundle => {
-            set.bundles.insert(name.clone(), id.clone());
-        }
-    }
-    set.invalidate_declaration_hash_cache();
+    declare(&mut set, kind, name.clone(), id.clone());
 
     // Persist the edited config (re-serialize the parsed declaration).
     super::grim(write_config(&scope.config_path, &scope.options, &set))?;
@@ -133,14 +122,7 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     // partial stale guard fires — caught and retried as a full resolve so
     // `add` always leaves a consistent lock).
     let previous = lock_io::load(&scope.lock_path).ok();
-    // A bundle declaration expands into members whose names differ from the
-    // bundle's binding name, so a partial relock keyed on the bundle name
-    // cannot work — always do a full resolve for bundles.
-    let new_lock = if kind == ArtifactKind::Bundle {
-        super::grim(resolve_lock(&set, &access, scope.scope, &ResolveOptions::default()).await)?
-    } else {
-        super::grim(relock_entry(&set, previous.as_ref(), &name, &access, scope.scope).await)?
-    };
+    let new_lock = super::grim(relock_declared(&set, previous.as_ref(), kind, &name, &access, scope.scope).await)?;
     super::grim(lock_io::save(&scope.lock_path, &new_lock, previous.as_ref()))?;
 
     // A bundle has no single pinned member to report; surface the bundle
@@ -160,12 +142,61 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     Ok((AddReport::new(kind, name, pinned), ExitCode::Success))
 }
 
+/// Declare `name = id` in the kind's config table
+/// (`[skills]`/`[rules]`/`[bundles]`) and invalidate the declaration-hash
+/// cache. The kind-dispatch seam shared by `grim add` and the TUI install
+/// action so a bundle can never be coerced into a skill/rule table.
+pub(crate) fn declare(
+    set: &mut crate::config::declaration::DesiredSet,
+    kind: ArtifactKind,
+    name: String,
+    id: Identifier,
+) {
+    match kind {
+        ArtifactKind::Skill => {
+            set.skills.insert(name, id);
+        }
+        ArtifactKind::Rule => {
+            set.rules.insert(name, id);
+        }
+        ArtifactKind::Bundle => {
+            set.bundles.insert(name, id);
+        }
+    }
+    set.invalidate_declaration_hash_cache();
+}
+
+/// Re-lock after declaring `(kind, name)`: a bundle always full-resolves
+/// (its members' names differ from the bundle's binding name, so a partial
+/// relock keyed on the bundle name cannot work); a skill/rule goes through
+/// [`relock_entry`]. Shared by `grim add` and the TUI install/update
+/// action so both declare-and-lock through one seam.
+///
+/// # Errors
+///
+/// Any [`ResolveError`](crate::resolve::resolve_error::ResolveError) from
+/// the underlying resolve (tag-not-found, auth, registry-unreachable,
+/// timeout, bundle expansion failures).
+pub(crate) async fn relock_declared(
+    set: &crate::config::declaration::DesiredSet,
+    previous: Option<&crate::lock::grimoire_lock::GrimoireLock>,
+    kind: ArtifactKind,
+    name: &str,
+    access: &Arc<dyn OciAccess>,
+    scope: crate::config::scope::ConfigScope,
+) -> Result<crate::lock::grimoire_lock::GrimoireLock, crate::resolve::resolve_error::ResolveError> {
+    if kind == ArtifactKind::Bundle {
+        resolve_lock(set, access, scope, &ResolveOptions::default()).await
+    } else {
+        relock_entry(set, previous, name, access, scope).await
+    }
+}
+
 /// Re-lock a single declared skill/rule entry: a partial relock of just
 /// `name` when a previous lock exists, a full resolve otherwise — or when
 /// the partial stale guard fires, in which case the full resolve is the
 /// correct recovery (every entry is declared, so the result is
-/// consistent). Shared by `grim add` and the TUI install/update action so
-/// both declare-and-lock through one seam.
+/// consistent). Bundle declarations go through [`relock_declared`].
 ///
 /// # Errors
 ///

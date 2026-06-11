@@ -103,8 +103,11 @@ pub async fn run(ctx: &Context, args: &RemoveArgs) -> anyhow::Result<(RemoveRepo
 }
 
 /// Return `previous` with `(kind, name)` dropped and the declaration hash
-/// re-stamped from the edited set so the lock stays consistent.
-fn drop_from_lock(
+/// re-stamped from the edited set so the lock stays consistent. For a
+/// bundle, `bundle` carries the declared `(registry/repo, tag)` so exactly
+/// the members *this* bundle contributed are evicted. Shared with the
+/// `uninstall` seam ([`super::uninstall::undeclare_and_unlock`]).
+pub(crate) fn drop_from_lock(
     previous: &GrimoireLock,
     kind: ArtifactKind,
     name: &str,

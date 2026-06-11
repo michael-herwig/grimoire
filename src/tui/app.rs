@@ -25,7 +25,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
 use crate::catalog::registry_catalog::Catalog;
-use crate::command::add::{relock_entry, write_config};
+use crate::command::add::{declare, relock_declared, write_config};
 use crate::command::grim;
 use crate::command::uninstall::undeclare_and_unlock;
 use crate::config::declaration::{ConfigOptions, DesiredSet};
@@ -39,6 +39,7 @@ use crate::install::target::InstallTarget;
 use crate::lock::file_lock::ConfigFileLock;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
+use crate::lock::locked_artifact::LockedArtifact;
 use crate::oci::access::OciAccess;
 use crate::oci::{ArtifactKind, Identifier};
 
@@ -579,20 +580,69 @@ async fn reload_into(ctx: &TuiContext, state: &mut TuiState, force: bool) {
 fn rows_from_catalog(catalog: &Catalog, lock: Option<&GrimoireLock>, state: &InstallState) -> Vec<TuiRow> {
     catalog
         .entries()
-        .map(|e| TuiRow {
-            kind: e.kind.clone().unwrap_or_else(|| "-".to_string()),
-            repo: e.repo(),
-            description: e.description.clone().unwrap_or_default(),
-            summary: e.summary.clone().unwrap_or_default(),
-            keywords: e.keywords.clone(),
-            latest_tag: e.latest_tag.clone().unwrap_or_default(),
-            // Show the explicit highest version; fall back to the
-            // representative tag when no semver tag exists.
-            version: e.version.clone().or_else(|| e.latest_tag.clone()).unwrap_or_default(),
-            pinned_version: None,
-            state: derive_artifact_state(&e.registry, &e.repository, lock, state),
+        .map(|e| {
+            let kind = e.kind.clone().unwrap_or_else(|| "-".to_string());
+            let row_state = derive_row_state(&kind, &e.registry, &e.repository, lock, state);
+            TuiRow {
+                kind,
+                repo: e.repo(),
+                description: e.description.clone().unwrap_or_default(),
+                summary: e.summary.clone().unwrap_or_default(),
+                keywords: e.keywords.clone(),
+                latest_tag: e.latest_tag.clone().unwrap_or_default(),
+                // Show the explicit highest version; fall back to the
+                // representative tag when no semver tag exists.
+                version: e.version.clone().or_else(|| e.latest_tag.clone()).unwrap_or_default(),
+                pinned_version: None,
+                state: row_state,
+            }
         })
         .collect()
+}
+
+/// Kind-aware row state: a bundle row aggregates the states of the
+/// members its lock provenance names; everything else derives directly
+/// from its own lock entry + install record.
+fn derive_row_state(
+    kind: &str,
+    registry: &str,
+    repository: &str,
+    lock: Option<&GrimoireLock>,
+    state: &InstallState,
+) -> ArtifactState {
+    if row_kind(kind) == ArtifactKind::Bundle {
+        derive_bundle_state(&format!("{registry}/{repository}"), lock, state)
+    } else {
+        derive_artifact_state(registry, repository, lock, state)
+    }
+}
+
+/// Derive a bundle row's state from the members it contributed to the
+/// lock (matched by provenance repo): worst-of aggregation so one broken
+/// member surfaces on the bundle row. No members in the lock ⇒ the bundle
+/// is not installed.
+fn derive_bundle_state(bundle_repo: &str, lock: Option<&GrimoireLock>, state: &InstallState) -> ArtifactState {
+    let Some(lock) = lock else {
+        return ArtifactState::NotInstalled;
+    };
+    /// Severity rank for worst-of aggregation: a healthier state never
+    /// masks a degraded member.
+    fn rank(s: ArtifactState) -> u8 {
+        match s {
+            ArtifactState::Installed => 0,
+            ArtifactState::Outdated => 1,
+            ArtifactState::NotInstalled => 2,
+            ArtifactState::Modified => 3,
+            ArtifactState::IntegrityMissing => 4,
+        }
+    }
+    lock.skills
+        .iter()
+        .chain(lock.rules.iter())
+        .filter(|a| a.bundle.as_deref() == Some(bundle_repo))
+        .map(|m| derive_artifact_state(m.pinned.registry(), m.pinned.repository(), Some(lock), state))
+        .max_by_key(|s| rank(*s))
+        .unwrap_or(ArtifactState::NotInstalled)
 }
 
 /// Derive the richer TUI [`ArtifactState`] for `registry/repository`.
@@ -650,7 +700,7 @@ fn recompute_states(ctx: &TuiContext, state: &mut TuiState) {
     let (lock, install_state) = load_scope_for_badges(ctx);
     for r in &mut state.rows {
         if let Some((registry, repository)) = split_repo(&r.repo) {
-            r.state = derive_artifact_state(&registry, &repository, lock.as_ref(), &install_state);
+            r.state = derive_row_state(&r.kind, &registry, &repository, lock.as_ref(), &install_state);
         }
     }
 }
@@ -751,7 +801,7 @@ async fn run_batch(ctx: &TuiContext, state: &mut TuiState, rows: &[usize], op: B
                 if let Some((registry, repository)) = split_repo(&row.repo)
                     && let Some(r) = state.rows.get_mut(i)
                 {
-                    r.state = derive_artifact_state(&registry, &repository, lock.as_ref(), &install_state);
+                    r.state = derive_row_state(&r.kind, &registry, &repository, lock.as_ref(), &install_state);
                 }
             }
             Err(e) => {
@@ -776,30 +826,57 @@ async fn run_batch(ctx: &TuiContext, state: &mut TuiState, rows: &[usize], op: B
 /// ([`crate::install::uninstall`]), then undeclare the entry from the
 /// config + lock ([`undeclare_and_unlock`]) — the full inverse of the
 /// install action, which declares like `grim add`. Lock entries written
-/// by the TUI before it declared installs are dropped the same way.
+/// by the TUI before it declared installs are dropped the same way. A
+/// bundle row expands into the member records its lock provenance names;
+/// the undeclare seam then drops the `[bundles]` entry and evicts the
+/// members from the lock.
 fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
     let (_registry, repository) =
         split_repo(&row.repo).ok_or_else(|| anyhow::anyhow!("malformed catalog repo: {}", row.repo))?;
-    let kind = match row.kind.as_str() {
-        "rule" => ArtifactKind::Rule,
-        _ => ArtifactKind::Skill,
-    };
+    let kind = row_kind(&row.kind);
     let name = repository.rsplit('/').next().unwrap_or(&repository).to_string();
+
+    // The install-state records this row owns: itself for a skill/rule;
+    // for a bundle, every lock member stamped with this repo's provenance
+    // (computed BEFORE the undeclare below evicts them from the lock).
+    let targets: Vec<(ArtifactKind, String)> = match kind {
+        ArtifactKind::Bundle => lock_io::load(&ctx.lock_path)
+            .map(|lock| {
+                lock.skills
+                    .iter()
+                    .chain(lock.rules.iter())
+                    .filter(|a| a.bundle.as_deref() == Some(row.repo.as_str()))
+                    .map(|a| (a.kind, a.name.clone()))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => vec![(kind, name.clone())],
+    };
 
     let mut install_state =
         InstallState::load(&ctx.state_path).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
-    let involved_clients: Vec<crate::install::client_target::ClientTarget> = install_state
-        .get(kind, &name)
-        .map(|r| {
-            r.client_outputs()
-                .iter()
-                .filter_map(|c| c.client.parse().ok())
-                .collect()
-        })
-        .unwrap_or_default();
-    let result = crate::install::uninstall::uninstall(&mut install_state, kind, &name)
-        .map_err(|e| anyhow::anyhow!("uninstall failed: {e}"))?;
-    if result.outcome == crate::install::uninstall::UninstallOutcome::Removed {
+    let mut involved_clients: Vec<crate::install::client_target::ClientTarget> = Vec::new();
+    let mut any_removed = false;
+    for (target_kind, target_name) in &targets {
+        for client in install_state
+            .get(*target_kind, target_name)
+            .map(|r| {
+                r.client_outputs()
+                    .iter()
+                    .filter_map(|c| c.client.parse().ok())
+                    .collect::<Vec<crate::install::client_target::ClientTarget>>()
+            })
+            .unwrap_or_default()
+        {
+            if !involved_clients.contains(&client) {
+                involved_clients.push(client);
+            }
+        }
+        let result = crate::install::uninstall::uninstall(&mut install_state, *target_kind, target_name)
+            .map_err(|e| anyhow::anyhow!("uninstall failed: {e}"))?;
+        any_removed |= result.outcome == crate::install::uninstall::UninstallOutcome::Removed;
+    }
+    if any_removed {
         install_state
             .save()
             .map_err(|e| anyhow::anyhow!("install-state save failed: {e}"))?;
@@ -850,12 +927,7 @@ async fn perform(ctx: &TuiContext, row: &TuiRow, is_update: bool) -> anyhow::Res
     let (registry, repository) =
         split_repo(&row.repo).ok_or_else(|| anyhow::anyhow!("malformed catalog repo: {}", row.repo))?;
 
-    let kind = match row.kind.as_str() {
-        "rule" => ArtifactKind::Rule,
-        // Default unknown/"-" to skill (a directory artifact); the
-        // materializer validates the actual payload shape.
-        _ => ArtifactKind::Skill,
-    };
+    let kind = row_kind(&row.kind);
     let name = repository.rsplit('/').next().unwrap_or(&repository).to_string();
     // A user-pinned version (chosen in the picker) wins; otherwise the
     // representative tag, otherwise the conventional `latest`.
@@ -865,37 +937,35 @@ async fn perform(ctx: &TuiContext, row: &TuiRow, is_update: bool) -> anyhow::Res
         .filter(|t| !t.is_empty())
         .or_else(|| Some(row.latest_tag.clone()).filter(|t| !t.is_empty()))
         .unwrap_or_else(|| "latest".to_string());
-    let id = Identifier::new_registry(repository.clone(), registry).clone_with_tag(tag);
+    let id = Identifier::new_registry(repository.clone(), registry).clone_with_tag(tag.clone());
 
     // Declare + relock under the config flock, exactly like `grim add`
     // (the declaration is re-read fresh — the config can change while the
     // TUI runs). A repeated install of the same entry is an idempotent
-    // overwrite.
+    // overwrite. The shared `declare` seam routes a bundle into
+    // `[bundles]`, and `relock_declared` full-resolves it so its members
+    // expand into the lock.
     let _guard = match ctx.config_path.exists() {
         true => Some(grim(ConfigFileLock::try_acquire(&ctx.config_path))?),
         false => None,
     };
     let (options, mut set) = load_scope_declaration(ctx)?;
-    match kind {
-        ArtifactKind::Skill => {
-            set.skills.insert(name.clone(), id);
-        }
-        ArtifactKind::Rule => {
-            set.rules.insert(name.clone(), id);
-        }
-        ArtifactKind::Bundle => unreachable!("the TUI never operates on bundles"),
-    }
-    set.invalidate_declaration_hash_cache();
+    declare(&mut set, kind, name.clone(), id);
     grim(write_config(&ctx.config_path, &options, &set))?;
 
     let previous = lock_io::load(&ctx.lock_path).ok();
-    let new_lock = grim(relock_entry(&set, previous.as_ref(), &name, &ctx.access, ctx.scope).await)?;
+    let new_lock = grim(relock_declared(&set, previous.as_ref(), kind, &name, &ctx.access, ctx.scope).await)?;
     grim(lock_io::save(&ctx.lock_path, &new_lock, previous.as_ref()))?;
 
     // Materialize only the acted-on artifact — the rest of the (now
     // complete) lock belongs to `grim install`, not a single-row action.
-    let single = single_entry_lock(&new_lock, kind, &name)
-        .ok_or_else(|| anyhow::anyhow!("resolved lock is missing '{name}'"))?;
+    // A bundle materializes exactly the members it contributed (matched by
+    // lock provenance), never a blob of its own.
+    let single = match kind {
+        ArtifactKind::Bundle => bundle_members_lock(&new_lock, &row.repo, &tag),
+        _ => single_entry_lock(&new_lock, kind, &name)
+            .ok_or_else(|| anyhow::anyhow!("resolved lock is missing '{name}'"))?,
+    };
 
     let target = InstallTarget::parse(&ctx.workspace, ctx.scope, &[], &ctx.clients_default)
         .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
@@ -956,10 +1026,35 @@ fn load_scope_declaration(ctx: &TuiContext) -> anyhow::Result<(ConfigOptions, De
     }
 }
 
+/// Map a catalog row's kind string (`skill`/`rule`/`bundle`) onto the
+/// typed artifact kind. Unknown / `-` defaults to skill (a directory
+/// artifact); the materializer validates the actual payload shape.
+fn row_kind(kind: &str) -> ArtifactKind {
+    ArtifactKind::from_kind_str(kind).unwrap_or(ArtifactKind::Skill)
+}
+
+/// Project the members the bundle `bundle_repo:bundle_tag` contributed out
+/// of `lock` as a members-only lock (same metadata), so the shared
+/// `install_all` path materializes exactly the acted-on bundle's members.
+/// Members are matched by the provenance the resolver stamps
+/// ([`LockedArtifact::bundle`] / [`LockedArtifact::bundle_tag`]); an empty
+/// projection means the bundle resolved to zero members (or every member
+/// was overridden by a direct declaration).
+fn bundle_members_lock(lock: &GrimoireLock, bundle_repo: &str, bundle_tag: &str) -> GrimoireLock {
+    let is_member =
+        |a: &LockedArtifact| a.bundle.as_deref() == Some(bundle_repo) && a.bundle_tag.as_deref() == Some(bundle_tag);
+    GrimoireLock {
+        metadata: lock.metadata.clone(),
+        skills: lock.skills.iter().filter(|a| is_member(a)).cloned().collect(),
+        rules: lock.rules.iter().filter(|a| is_member(a)).cloned().collect(),
+    }
+}
+
 /// Project the single `kind`/`name` entry out of `lock` as a one-artifact
 /// lock (same metadata), so the shared `install_all` path materializes
 /// exactly the acted-on row and nothing else. `None` when the entry is
-/// absent from the resolved lock (defensive — not expected).
+/// absent from the resolved lock (defensive — not expected). Bundle rows
+/// go through [`bundle_members_lock`] instead.
 fn single_entry_lock(lock: &GrimoireLock, kind: ArtifactKind, name: &str) -> Option<GrimoireLock> {
     let entry = lock
         .skills
@@ -1146,6 +1241,227 @@ mod tests {
             single_entry_lock(&lock, ArtifactKind::Skill, "missing").is_none(),
             "an absent entry projects to None"
         );
+    }
+
+    /// Publish a member skill (tar layer) and a bundle whose members-layer
+    /// references it into a [`MemoryRegistry`], mirroring what
+    /// `grim release` produces.
+    async fn registry_with_bundle() -> Arc<dyn OciAccess> {
+        use crate::oci::Algorithm;
+        use crate::oci::access::memory_registry::MemoryRegistry;
+        use crate::oci::bundle::{BUNDLE_LAYER_MEDIA_TYPE, BundleManifest, BundleMember};
+        use crate::oci::manifest::{Descriptor, OciManifest};
+
+        let reg = MemoryRegistry::new();
+
+        // The member skill: a tar tree rooted at `demo/`.
+        let body: &[u8] = b"---\nname: demo\ndescription: d\n---\n";
+        let mut header = tar::Header::new_gnu();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        let mut builder = tar::Builder::new(Vec::new());
+        builder.append_data(&mut header, "demo/SKILL.md", body).unwrap();
+        let tar_blob = builder.into_inner().unwrap();
+
+        let skill_repo = Identifier::new_registry("grimoire/skills/demo", "localhost:5050");
+        let skill_layer = reg.push_blob(&skill_repo, &tar_blob).await.unwrap();
+        let skill_manifest = OciManifest {
+            media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
+            artifact_type: Some(ArtifactKind::Skill.artifact_type().to_string()),
+            config_media_type: Some(ArtifactKind::Skill.config_media_type().to_string()),
+            layers: vec![Descriptor {
+                digest: skill_layer,
+                media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),
+                size: tar_blob.len() as u64,
+            }],
+            annotations: Default::default(),
+        };
+        let skill_digest = reg.push_manifest(&skill_repo, &skill_manifest).await.unwrap();
+        reg.put_tag(&skill_repo, "1.0.0", &skill_digest).await.unwrap();
+
+        // The bundle: a single members-layer naming the skill.
+        let members = BundleManifest::new(vec![BundleMember {
+            kind: ArtifactKind::Skill,
+            name: "demo".to_string(),
+            id: "localhost:5050/grimoire/skills/demo:1.0.0".to_string(),
+        }]);
+        let members_blob = members.to_layer_bytes().unwrap();
+        let bundle_repo = Identifier::new_registry("grimoire/bundles/starter-pack", "localhost:5050");
+        let members_layer = reg.push_blob(&bundle_repo, &members_blob).await.unwrap();
+        assert_eq!(members_layer, Algorithm::Sha256.hash(&members_blob));
+        let bundle_manifest = OciManifest {
+            media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
+            artifact_type: Some(ArtifactKind::Bundle.artifact_type().to_string()),
+            config_media_type: Some(ArtifactKind::Bundle.config_media_type().to_string()),
+            layers: vec![Descriptor {
+                digest: members_layer,
+                media_type: BUNDLE_LAYER_MEDIA_TYPE.to_string(),
+                size: members_blob.len() as u64,
+            }],
+            annotations: Default::default(),
+        };
+        let bundle_digest = reg.push_manifest(&bundle_repo, &bundle_manifest).await.unwrap();
+        reg.put_tag(&bundle_repo, "latest", &bundle_digest).await.unwrap();
+
+        Arc::new(reg)
+    }
+
+    /// A project-scope [`TuiContext`] rooted at `workspace`, wired to
+    /// `access` and targeting the claude client.
+    fn test_ctx(workspace: &std::path::Path, access: Arc<dyn OciAccess>) -> TuiContext {
+        TuiContext {
+            registry: "localhost:5050".to_string(),
+            catalog_path: workspace.join("catalog.json"),
+            access,
+            offline: false,
+            force_refresh: false,
+            scope: ConfigScope::Project,
+            workspace: workspace.to_path_buf(),
+            lock_path: workspace.join("grimoire.lock"),
+            state_path: workspace.join("install-state.json"),
+            config_path: workspace.join("grimoire.toml"),
+            clients_default: vec!["claude".to_string()],
+            clients_selected: Vec::new(),
+            scope_label: "project".to_string(),
+            alt: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn perform_installs_bundle_members_not_the_bundle_blob() {
+        // Regression: a catalog bundle row must install like `grim add`
+        // (declared under `[bundles]`, expanded into provenance-stamped
+        // members, members materialized) — NOT be coerced to a skill,
+        // which declared the bundle under `[skills]` and fed the bundle's
+        // JSON members-layer to the tar materializer ("cannot read tar
+        // entry: failed to read entire block").
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path();
+        std::fs::write(workspace.join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+        let ctx = test_ctx(workspace, registry_with_bundle().await);
+
+        let mut row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
+        row.kind = "bundle".to_string();
+        row.state = ArtifactState::NotInstalled;
+
+        let label = perform(&ctx, &row, false).await.expect("bundle install succeeds");
+        assert_eq!(label, "installed");
+
+        // Declared under [bundles], never [skills].
+        let body = std::fs::read_to_string(&ctx.config_path).unwrap();
+        let cfg = ProjectConfig::from_toml_str(&body).expect("config parses");
+        assert!(
+            cfg.set.bundles.contains_key("starter-pack"),
+            "bundle declared in [bundles]: {body}"
+        );
+        assert!(cfg.set.skills.is_empty(), "bundle must not land in [skills]: {body}");
+
+        // The lock carries the provenance-stamped member, not the bundle.
+        let lock = lock_io::load(&ctx.lock_path).expect("lock saved");
+        assert_eq!(lock.skills.len(), 1);
+        assert_eq!(lock.skills[0].name, "demo");
+        assert_eq!(
+            lock.skills[0].bundle.as_deref(),
+            Some("localhost:5050/grimoire/bundles/starter-pack")
+        );
+        assert_eq!(lock.skills[0].bundle_tag.as_deref(), Some("latest"));
+
+        // The member skill materialized into the claude target.
+        assert!(
+            workspace.join(".claude/skills/demo/SKILL.md").is_file(),
+            "member skill files must exist"
+        );
+
+        // The bundle row badge derives `installed` from its members.
+        let (lock, install_state) = load_scope_for_badges(&ctx);
+        assert_eq!(
+            derive_row_state(
+                "bundle",
+                "localhost:5050",
+                "grimoire/bundles/starter-pack",
+                lock.as_ref(),
+                &install_state
+            ),
+            ArtifactState::Installed
+        );
+    }
+
+    #[tokio::test]
+    async fn perform_uninstall_removes_bundle_members_and_declaration() {
+        // The full inverse: deleting an installed bundle row removes the
+        // member files + records, drops the `[bundles]` declaration, and
+        // evicts the provenance-stamped members from the lock.
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path();
+        std::fs::write(workspace.join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+        let ctx = test_ctx(workspace, registry_with_bundle().await);
+
+        let mut row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
+        row.kind = "bundle".to_string();
+        row.state = ArtifactState::NotInstalled;
+        perform(&ctx, &row, false).await.expect("bundle install succeeds");
+        assert!(workspace.join(".claude/skills/demo/SKILL.md").is_file());
+
+        perform_uninstall(&ctx, &row).expect("bundle uninstall succeeds");
+
+        assert!(
+            !workspace.join(".claude/skills/demo").exists(),
+            "member files must be deleted"
+        );
+        let body = std::fs::read_to_string(&ctx.config_path).unwrap();
+        let cfg = ProjectConfig::from_toml_str(&body).expect("config parses");
+        assert!(cfg.set.bundles.is_empty(), "bundle must be undeclared: {body}");
+        let lock = lock_io::load(&ctx.lock_path).expect("lock saved");
+        assert!(lock.skills.is_empty(), "members must be evicted from the lock");
+
+        let (lock, install_state) = load_scope_for_badges(&ctx);
+        assert_eq!(
+            derive_row_state(
+                "bundle",
+                "localhost:5050",
+                "grimoire/bundles/starter-pack",
+                lock.as_ref(),
+                &install_state
+            ),
+            ArtifactState::NotInstalled
+        );
+    }
+
+    #[test]
+    fn row_kind_maps_every_catalog_kind() {
+        assert_eq!(row_kind("skill"), ArtifactKind::Skill);
+        assert_eq!(row_kind("rule"), ArtifactKind::Rule);
+        assert_eq!(row_kind("bundle"), ArtifactKind::Bundle);
+        // Unknown / absent kind defaults to skill; the materializer
+        // validates the actual payload shape.
+        assert_eq!(row_kind("-"), ArtifactKind::Skill);
+    }
+
+    #[test]
+    fn bundle_members_lock_projects_by_provenance_repo_and_tag() {
+        let mut member = locked("member", ArtifactKind::Skill, '4');
+        member.bundle = Some("r/bundles/pack".to_string());
+        member.bundle_tag = Some("latest".to_string());
+        let mut other_tag = locked("other", ArtifactKind::Skill, '5');
+        other_tag.bundle = Some("r/bundles/pack".to_string());
+        other_tag.bundle_tag = Some("v2".to_string());
+        let mut rule_member = locked("rmember", ArtifactKind::Rule, '6');
+        rule_member.bundle = Some("r/bundles/pack".to_string());
+        rule_member.bundle_tag = Some("latest".to_string());
+        let direct = locked("direct", ArtifactKind::Skill, '7');
+
+        let lock = lock_fixture(vec![member, other_tag, direct], vec![rule_member]);
+        let projected = bundle_members_lock(&lock, "r/bundles/pack", "latest");
+
+        assert_eq!(projected.skills.len(), 1, "only the latest-tag member projects");
+        assert_eq!(projected.skills[0].name, "member");
+        assert_eq!(projected.rules.len(), 1);
+        assert_eq!(projected.rules[0].name, "rmember");
+        assert_eq!(projected.metadata, lock.metadata, "metadata carries over unchanged");
+
+        let empty = bundle_members_lock(&lock, "r/bundles/unknown", "latest");
+        assert!(empty.skills.is_empty() && empty.rules.is_empty());
     }
 
     #[test]

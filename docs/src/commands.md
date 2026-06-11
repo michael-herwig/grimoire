@@ -166,6 +166,12 @@ declares the entry in the active scope's `grimoire.toml` and relocks it (like
 registry's latest flips the row to `outdated` right after the install
 completes.
 
+A bundle row works the same way at the bundle level. Install declares it
+under `[bundles]`, expands it into its members (like
+`grim add --kind bundle`), and materializes exactly those members; the row's
+state aggregates the member states. Delete removes the member files and
+records, evicts the members from the lock, and undeclares the bundle.
+
 ```sh
 grim tui --registry ghcr.io/acme
 ```
