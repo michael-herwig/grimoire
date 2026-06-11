@@ -10,21 +10,10 @@ All items from the 2026-06-11 sweep are addressed (see
 The documentation should have a bit more expamples of valid artifacts.
 Further, there should be a reference of all supported artifact types and their attributes, including vendor-specific extensions.
 
-### Support for Agents
+### Bundles inconistency
 
-A new kind of artifacts 'agent'.
-See:
-
-Claude:
- - https://code.claude.com/docs/en/sub-agents
-OpenCode:
- - https://opencode.ai/docs/en/agents/
-Copilot:
- - https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/create-custom-agents-for-cli
- - https://docs.github.com/en/copilot/concepts/agents/copilot-cli/about-custom-agents
-
-Similar to others. We should support metadata extensions for vendor specific providers, but also have common attributes in the top-tier configuration.
-The configuration should be fully documented, incl. reference.
+In TUI bundle operations the status of included members is not re-checked.
+Ie. deleting a bundle, deletes a contained member, but the TUI says its still installed, until refresh (r) is pressed.
 
 ### Manual tests and documentation regression
 

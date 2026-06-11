@@ -25,7 +25,7 @@ These apply to every subcommand:
 | Command | Purpose |
 |---------|---------|
 | [`grim init`](#init) | Create a fresh `grimoire.toml`. |
-| [`grim add`](#add) | Declare a skill/rule and lock it. |
+| [`grim add`](#add) | Declare a skill/rule/agent and lock it. |
 | [`grim lock`](#lock) | Resolve declared floating tags to pinned digests. |
 | [`grim install`](#install) | Materialize the locked artifacts into your AI client(s). |
 | [`grim update`](#update) | Re-resolve floating tags and re-materialize changes. |
@@ -51,9 +51,10 @@ grim init --registry ghcr.io/acme
 
 ## grim add {#add}
 
-`grim add [--kind <skill|rule|bundle>] [--name <name>] <reference>` declares a
-skill, rule, or bundle and immediately pins it in the lock. `<reference>` is the
-only required argument — `registry/repo:tag` or `registry/repo@sha256:…`.
+`grim add [--kind <skill|rule|agent|bundle>] [--name <name>] <reference>`
+declares a skill, rule, [agent](./agents.md), or bundle and immediately pins it
+in the lock. `<reference>` is the only required argument —
+`registry/repo:tag` or `registry/repo@sha256:…`.
 
 When `--kind` is omitted, the kind is inferred from the artifact's OCI
 `artifactType` (`application/vnd.grimoire.<kind>.v1`) set at release time. When
@@ -179,9 +180,10 @@ grim tui --registry ghcr.io/acme
 ## grim build {#build}
 
 `grim build <path>` validates and packs a local skill directory, rule `.md`
-file, or bundle `.toml` file without pushing it — a dry run for authors.
-`--kind <skill|rule|bundle>` forces the artifact kind instead of auto-detecting
-it from the path.
+file, [agent](./agents.md) `.md` file, or bundle `.toml` file without pushing
+it — a dry run for authors. `--kind <skill|rule|agent|bundle>` forces the
+artifact kind instead of auto-detecting it from the path. An agent always
+needs `--kind agent` — a bare `.md` packs as a rule.
 
 ## grim release {#release}
 

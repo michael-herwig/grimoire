@@ -7,7 +7,7 @@ hand — but it helps to know their shape.
 ## `grimoire.toml`
 
 The declaration file. An `[options]` table holds defaults, and `[skills]` /
-`[rules]` map each binding name to a reference:
+`[rules]` / `[agents]` map each binding name to a reference:
 
 ```toml
 [options]
@@ -20,6 +20,9 @@ commit-helper = "ghcr.io/acme/commit-helper:1"
 
 [rules]
 rust-style = "ghcr.io/acme/rust-style:2"
+
+[agents]
+code-reviewer = "ghcr.io/acme/code-reviewer:1"
 ```
 
 `default_registry` lets you write short references; `clients` selects which
@@ -30,7 +33,7 @@ typo surfaces immediately rather than silently doing nothing.
 
 An optional `[bundles]` table declares [bundles](./concepts.md#bundles), each
 mapping a binding name to a bundle reference. A bundle expands into its member
-skills and rules at lock time:
+skills, rules, and [agents](./agents.md) at lock time:
 
 ```toml
 [bundles]
@@ -66,12 +69,18 @@ pinned = "ghcr.io/acme/code-review@sha256:…"
 [[rule]]
 name = "rust-style"
 pinned = "ghcr.io/acme/rust-style@sha256:…"
+
+[[agent]]
+name = "code-reviewer"
+pinned = "ghcr.io/acme/code-reviewer@sha256:…"
 ```
 
 A member that came from a [bundle](./concepts.md#bundles) additionally carries
 `bundle` and `bundle_tag` fields recording its origin; a directly-declared entry
 omits them, so a bundle-free lock is byte-identical to one written before
-bundles existed.
+bundles existed. The same compatibility holds for agents: an agent-free lock
+carries no `[[agent]]` array at all and is byte-identical to one written
+before agents existed.
 
 ## Scopes on disk
 

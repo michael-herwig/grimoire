@@ -8,11 +8,14 @@ others can [`grim add`](./commands.md#add).
 
 A **skill** is a directory containing a `SKILL.md` and any supporting files; a
 **rule** is a Markdown file, optionally with a
-[sibling support directory](#rule-support-dir); a
-[**bundle**](./concepts.md#bundles) is a `.toml` file listing members. Grimoire
-detects which one you mean from the path — a directory packs as a skill, a `.md`
-file as a rule, a `.toml` file as a bundle — and `--kind` overrides the guess
-when you need to.
+[sibling support directory](#rule-support-dir); an
+[**agent**](./agents.md) is a Markdown file defining a delegatable assistant;
+a [**bundle**](./concepts.md#bundles) is a `.toml` file listing members.
+Grimoire detects which one you mean from the path — a directory packs as a
+skill, a `.md` file as a rule, a `.toml` file as a bundle — and `--kind`
+overrides the guess when you need to. An agent **requires** `--kind agent`:
+its `.md` shape is indistinguishable from a rule, and grim never guesses from
+content (see [Agent Artifacts](./agents.md#publishing)).
 
 ### Rules with a support directory {#rule-support-dir}
 
@@ -99,6 +102,22 @@ keywords: rust,lint
 …
 ```
 
+### In an agent {#metadata-agent}
+
+An agent authors catalog metadata in its `metadata` map, like a skill; the
+required `description` doubles as the full catalog description:
+
+```yaml
+# code-reviewer.md
+---
+name: code-reviewer
+description: Reviews diffs for correctness, security, and style.
+metadata:
+  summary: Multi-pass diff reviewer
+  keywords: review,quality
+---
+```
+
 ### In a bundle {#metadata-bundle}
 
 A [bundle](#bundles) sets the same keys at the top level of its `.toml`, above
@@ -132,6 +151,7 @@ else sees it:
 ```sh
 grim build ./code-review
 grim build ./rust-style.md --kind rule
+grim build ./code-reviewer.md --kind agent
 ```
 
 ## Release
@@ -165,10 +185,10 @@ Pass `--force` only when you deliberately mean to move it.
 
 ## Publishing bundles {#bundles}
 
-A [bundle](./concepts.md#bundles) groups skills and rules so consumers declare
-one reference instead of a dozen. You author it as a small TOML file whose
-`[skills]`/`[rules]` tables list the members — the same shape as a
-`grimoire.toml`:
+A [bundle](./concepts.md#bundles) groups skills, rules, and
+[agents](./agents.md) so consumers declare one reference instead of a dozen.
+You author it as a small TOML file whose `[skills]`/`[rules]`/`[agents]`
+tables list the members — the same shape as a `grimoire.toml`:
 
 ```toml
 # python-stack.toml
@@ -177,6 +197,9 @@ code-review = "ghcr.io/acme/code-review:1"
 
 [rules]
 rust-style = "ghcr.io/acme/rust-style:2"
+
+[agents]
+code-reviewer = "ghcr.io/acme/code-reviewer:1"
 ```
 
 [`grim build`](./commands.md#build) validates it (a `.toml` path packs as a

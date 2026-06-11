@@ -4,16 +4,19 @@ Grimoire borrows its mental model from package managers you already use, then
 swaps the transport for an [OCI registry][oci]. This page covers the handful of
 ideas that make the [commands](./commands.md) feel obvious.
 
-## Skills and rules
+## Skills, rules, and agents
 
-Grimoire distributes two kinds of artifact. A **skill** is a directory — a
-`SKILL.md` plus any supporting scripts or references — that teaches an agent a
-capability. A **rule** is a Markdown file that states a standard or constraint
-the agent should always follow.
+Grimoire distributes three kinds of installable artifact. A **skill** is a
+directory — a `SKILL.md` plus any supporting scripts or references — that
+teaches an agent a capability. A **rule** is a Markdown file that states a
+standard or constraint the agent should always follow. An **agent** is a
+Markdown file that defines a delegatable assistant — a system prompt with a
+name, description, and tool access; see [Agent Artifacts](./agents.md).
 
-Both are declared the same way and travel through the same pipeline; the only
-difference is shape on disk (a folder versus a file) and the `kind` argument
-(`skill` or `rule`) you pass to commands like [`grim add`](./commands.md#add).
+All three are declared the same way and travel through the same pipeline; the
+differences are shape on disk (a folder versus a file) and the `kind` argument
+(`skill`, `rule`, or `agent`) you pass to commands like
+[`grim add`](./commands.md#add).
 
 ### Rules with a support directory {#rule-support-dir}
 
@@ -40,13 +43,14 @@ the directory is packed.
 
 ## Artifacts as OCI content
 
-Under the hood every skill or rule is packed into an OCI artifact and addressed
-by content digest, exactly like a container image layer. Identical content is
-stored once and is immutable: a `sha256:…` digest always names the same bytes.
+Under the hood every skill, rule, or agent is packed into an OCI artifact and
+addressed by content digest, exactly like a container image layer. Identical
+content is stored once and is immutable: a `sha256:…` digest always names the
+same bytes.
 
 Each artifact declares its kind through its OCI `artifactType` —
-`application/vnd.grimoire.skill.v1`, `…rule.v1`, or `…bundle.v1` — rather than a
-custom annotation. A registry, `grim`, or any OCI-aware tool can therefore tell
+`application/vnd.grimoire.skill.v1`, `…rule.v1`, `…agent.v1`, or `…bundle.v1` —
+rather than a custom annotation. A registry, `grim`, or any OCI-aware tool can therefore tell
 a Grimoire artifact apart from an ordinary container image without unpacking it.
 
 This is why Grimoire needs no server of its own. Any registry that speaks the
@@ -80,8 +84,9 @@ Declaring the same dozen skills and rules in every repository does not scale.
 Teams end up copying a block of `grimoire.toml` between projects, and when the
 approved set changes someone has to chase down every copy.
 
-A **bundle** is a curated set of members — skills and rules — published as its
-own OCI artifact. You declare the bundle once in `[bundles]`, and on
+A **bundle** is a curated set of members — skills, rules, and agents —
+published as its own OCI artifact. You declare the bundle once in `[bundles]`,
+and on
 [`grim lock`](./commands.md#lock) it **expands** into its members, which are
 pinned into the lock exactly like a direct declaration. Update the published
 bundle, re-lock, and every project that declares it moves together.
@@ -106,8 +111,8 @@ receives; bundles just make it routine.
 Because a member is keyed by `(kind, name)`, two sources can name the same slot.
 Grimoire resolves that deterministically:
 
-- a **direct** `[skills]`/`[rules]` declaration always wins over any bundle —
-  this is how you override a single member without forking the bundle;
+- a **direct** `[skills]`/`[rules]`/`[agents]` declaration always wins over any
+  bundle — this is how you override a single member without forking the bundle;
 - two bundles that name a member at the **same** identifier coalesce to one
   entry;
 - two bundles that **disagree** fail closed: `grim lock` stops with a conflict
