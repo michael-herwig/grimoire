@@ -139,35 +139,7 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     let new_lock = if kind == ArtifactKind::Bundle {
         super::grim(resolve_lock(&set, &access, scope.scope, &ResolveOptions::default()).await)?
     } else {
-        match &previous {
-            Some(prev) => {
-                match resolve_lock_partial(
-                    &set,
-                    prev,
-                    &access,
-                    std::slice::from_ref(&name),
-                    scope.scope,
-                    &ResolveOptions::default(),
-                )
-                .await
-                {
-                    Ok(lock) => lock,
-                    Err(e)
-                        if matches!(
-                            e.kind,
-                            crate::resolve::resolve_error::ResolveErrorKind::StaleLock { .. }
-                        ) =>
-                    {
-                        // The added entry made the predecessor stale; a full
-                        // resolve is the correct recovery (every entry is
-                        // declared, so this is consistent).
-                        super::grim(resolve_lock(&set, &access, scope.scope, &ResolveOptions::default()).await)?
-                    }
-                    Err(e) => return Err(crate::error::Error::from(e).into()),
-                }
-            }
-            None => super::grim(resolve_lock(&set, &access, scope.scope, &ResolveOptions::default()).await)?,
-        }
+        super::grim(relock_entry(&set, previous.as_ref(), &name, &access, scope.scope).await)?
     };
     super::grim(lock_io::save(&scope.lock_path, &new_lock, previous.as_ref()))?;
 
@@ -186,6 +158,46 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     };
 
     Ok((AddReport::new(kind, name, pinned), ExitCode::Success))
+}
+
+/// Re-lock a single declared skill/rule entry: a partial relock of just
+/// `name` when a previous lock exists, a full resolve otherwise — or when
+/// the partial stale guard fires, in which case the full resolve is the
+/// correct recovery (every entry is declared, so the result is
+/// consistent). Shared by `grim add` and the TUI install/update action so
+/// both declare-and-lock through one seam.
+///
+/// # Errors
+///
+/// Any [`ResolveError`] other than the recovered stale-lock guard
+/// (tag-not-found, auth, registry-unreachable, timeout).
+pub(crate) async fn relock_entry(
+    set: &crate::config::declaration::DesiredSet,
+    previous: Option<&crate::lock::grimoire_lock::GrimoireLock>,
+    name: &str,
+    access: &Arc<dyn OciAccess>,
+    scope: crate::config::scope::ConfigScope,
+) -> Result<crate::lock::grimoire_lock::GrimoireLock, crate::resolve::resolve_error::ResolveError> {
+    let names = [name.to_string()];
+    match previous {
+        Some(prev) => {
+            match resolve_lock_partial(set, prev, access, &names, scope, &ResolveOptions::default()).await {
+                Ok(lock) => Ok(lock),
+                Err(e)
+                    if matches!(
+                        e.kind,
+                        crate::resolve::resolve_error::ResolveErrorKind::StaleLock { .. }
+                    ) =>
+                {
+                    // The edited entry made the predecessor stale; resolve
+                    // everything fresh.
+                    resolve_lock(set, access, scope, &ResolveOptions::default()).await
+                }
+                Err(e) => Err(e),
+            }
+        }
+        None => resolve_lock(set, access, scope, &ResolveOptions::default()).await,
+    }
 }
 
 /// Parse `<ref>`, expanding a short identifier against `default_registry`
