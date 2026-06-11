@@ -2,7 +2,7 @@
 // Copyright 2026 The Grimoire Authors
 
 //! The `grimoire.lock` document: `[metadata]` header plus `[[skill]]` /
-//! `[[rule]]` arrays.
+//! `[[rule]]` / `[[agent]]` arrays.
 //!
 //! In memory the artifacts are one `Vec<LockedArtifact>` per kind so
 //! consumers iterate uniformly; on the wire they split into kind-named
@@ -51,6 +51,8 @@ pub struct GrimoireLock {
     pub skills: Vec<LockedArtifact>,
     /// Locked rules.
     pub rules: Vec<LockedArtifact>,
+    /// Locked agents.
+    pub agents: Vec<LockedArtifact>,
 }
 
 /// Raw on-disk shape used for deserialization.
@@ -62,6 +64,8 @@ struct RawLock {
     skills: Vec<LockedArtifact>,
     #[serde(default, rename = "rule")]
     rules: Vec<LockedArtifact>,
+    #[serde(default, rename = "agent")]
+    agents: Vec<LockedArtifact>,
 }
 
 impl GrimoireLock {
@@ -106,12 +110,31 @@ impl GrimoireLock {
                 a
             })
             .collect();
+        let agents = raw
+            .agents
+            .into_iter()
+            .map(|mut a| {
+                a.kind = ArtifactKind::Agent;
+                a
+            })
+            .collect();
 
         Ok(Self {
             metadata: raw.metadata,
             skills,
             rules,
+            agents,
         })
+    }
+
+    /// Iterate every locked artifact across all kind lists (skills, then
+    /// rules, then agents), each entry carrying its re-stamped `kind`.
+    ///
+    /// The single chaining seam: consumers that walk "all locked
+    /// artifacts" go through here so a future kind cannot be forgotten at
+    /// individual call sites.
+    pub fn iter_artifacts(&self) -> impl Iterator<Item = &LockedArtifact> {
+        self.skills.iter().chain(self.rules.iter()).chain(self.agents.iter())
     }
 
     /// Serialize to deterministic, byte-stable TOML.
@@ -127,11 +150,14 @@ impl GrimoireLock {
         skills.sort_by(|a, b| a.name.cmp(&b.name));
         let mut rules: Vec<&LockedArtifact> = self.rules.iter().collect();
         rules.sort_by(|a, b| a.name.cmp(&b.name));
+        let mut agents: Vec<&LockedArtifact> = self.agents.iter().collect();
+        agents.sort_by(|a, b| a.name.cmp(&b.name));
 
         let view = SerializableView {
             metadata: &self.metadata,
             skill: &skills,
             rule: &rules,
+            agent: &agents,
         };
         toml::to_string_pretty(&view)
             .map_err(|e| LockError::new(std::path::PathBuf::new(), LockErrorKind::TomlSerialize(e)))
@@ -139,9 +165,9 @@ impl GrimoireLock {
 }
 
 /// Borrowed serialize view: emits `[metadata]` + sorted `[[skill]]` /
-/// `[[rule]]` arrays without cloning the document. Each entry projects
-/// through [`LockedArtifactView`] so the on-wire `pinned` is the
-/// stripped-advisory `registry/repo@digest`.
+/// `[[rule]]` / `[[agent]]` arrays without cloning the document. Each
+/// entry projects through [`LockedArtifactView`] so the on-wire `pinned`
+/// is the stripped-advisory `registry/repo@digest`.
 #[derive(Serialize)]
 struct SerializableView<'a> {
     metadata: &'a LockMetadata,
@@ -149,6 +175,8 @@ struct SerializableView<'a> {
     skill: &'a [&'a LockedArtifact],
     #[serde(rename = "rule", serialize_with = "serialize_artifact_views")]
     rule: &'a [&'a LockedArtifact],
+    #[serde(rename = "agent", serialize_with = "serialize_artifact_views")]
+    agent: &'a [&'a LockedArtifact],
 }
 
 /// On-wire projection of a [`LockedArtifact`]: borrows `name`, emits a
@@ -320,6 +348,7 @@ generated_at = "2099-01-01T00:00:00Z"
                 artifact("alpha", ArtifactKind::Skill, pinned("acme/alpha", Some("v1"), '1')),
             ],
             rules: vec![],
+            agents: vec![],
         };
         let out = lock.to_toml_string().expect("serialize");
         let alpha = out.find("name = \"alpha\"").expect("alpha present");
@@ -343,11 +372,68 @@ generated_at = "2099-01-01T00:00:00Z"
                 ArtifactKind::Rule,
                 pinned("acme/rust-style", None, 'b'),
             )],
+            agents: vec![artifact(
+                "code-reviewer",
+                ArtifactKind::Agent,
+                pinned("acme/code-reviewer", None, 'c'),
+            )],
         };
         let first = lock.to_toml_string().expect("first");
         let reparsed = GrimoireLock::from_toml_str(&first).expect("reparse");
         let second = reparsed.to_toml_string().expect("second");
         assert_eq!(first, second, "second pass must be byte-identical");
+    }
+
+    #[test]
+    fn parse_agent_array_and_restamp_kind() {
+        let toml = format!(
+            r#"[metadata]
+lock_version = 1
+declaration_hash_version = 1
+declaration_hash = "sha256:{c}"
+generated_by = "grim 0.1.0"
+generated_at = "2026-04-19T00:00:00Z"
+
+[[agent]]
+name = "code-reviewer"
+pinned = "ghcr.io/acme/code-reviewer@sha256:{a}"
+"#,
+            c = sha('c'),
+            a = sha('a'),
+        );
+        let lock = GrimoireLock::from_toml_str(&toml).expect("agent array parses");
+        assert_eq!(lock.agents.len(), 1);
+        assert_eq!(lock.agents[0].kind, ArtifactKind::Agent);
+        assert!(lock.skills.is_empty());
+    }
+
+    #[test]
+    fn agent_free_lock_serializes_without_agent_array() {
+        // No `[[agent]]` noise for agent-free locks — byte-identical to a
+        // pre-agents lock document.
+        let lock = GrimoireLock {
+            metadata: metadata(),
+            skills: vec![artifact("s", ArtifactKind::Skill, pinned("acme/s", None, 'a'))],
+            rules: vec![],
+            agents: vec![],
+        };
+        let out = lock.to_toml_string().expect("serialize");
+        assert!(!out.contains("[[agent]]"), "no empty agent array on the wire");
+    }
+
+    #[test]
+    fn iter_artifacts_chains_all_kinds_in_order() {
+        let lock = GrimoireLock {
+            metadata: metadata(),
+            skills: vec![artifact("s", ArtifactKind::Skill, pinned("acme/s", None, 'a'))],
+            rules: vec![artifact("r", ArtifactKind::Rule, pinned("acme/r", None, 'b'))],
+            agents: vec![artifact("a", ArtifactKind::Agent, pinned("acme/a", None, 'c'))],
+        };
+        let kinds: Vec<ArtifactKind> = lock.iter_artifacts().map(|a| a.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![ArtifactKind::Skill, ArtifactKind::Rule, ArtifactKind::Agent]
+        );
     }
 
     #[test]
@@ -362,6 +448,7 @@ generated_at = "2099-01-01T00:00:00Z"
                 bundle_tag: Some("1.0.0".to_string()),
             }],
             rules: vec![],
+            agents: vec![],
         };
         let out = lock.to_toml_string().expect("serialize");
         assert!(out.contains("bundle = \"ghcr.io/acme/stack\""));

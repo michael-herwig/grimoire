@@ -34,7 +34,7 @@ use crate::oci::access::{OciAccess, Operation};
 use crate::oci::reference::ArtifactRef;
 use crate::oci::{ArtifactKind, Identifier, PinnedIdentifier};
 
-/// Resolve every declared skill and rule and assemble a fresh lock.
+/// Resolve every declared skill, rule, and agent and assemble a fresh lock.
 ///
 /// `scope` is currently informational (recorded by the caller); the lock
 /// document itself is scope-agnostic. Fully transactional — either every
@@ -126,9 +126,7 @@ pub async fn resolve_lock_partial(
         resolved.iter().map(|a| (a.kind, a.name.clone())).collect();
 
     let mut merged: Vec<LockedArtifact> = previous
-        .skills
-        .iter()
-        .chain(previous.rules.iter())
+        .iter_artifacts()
         .filter(|a| !new_keys.contains(&(a.kind, a.name.clone())))
         .cloned()
         .collect();
@@ -140,9 +138,10 @@ pub async fn resolve_lock_partial(
 
 /// Collect the artifacts to resolve in deterministic `BTreeMap` order:
 /// every declared skill (kind Skill), then every declared rule (kind
-/// Rule). The final `(kind, name)` sort happens after resolution.
+/// Rule), then every declared agent (kind Agent). The final `(kind, name)`
+/// sort happens after resolution.
 fn collect_work(set: &DesiredSet) -> Vec<ArtifactRef> {
-    let mut work = Vec::with_capacity(set.skills.len() + set.rules.len());
+    let mut work = Vec::with_capacity(set.skills.len() + set.rules.len() + set.agents.len());
     for (name, id) in &set.skills {
         work.push(ArtifactRef {
             kind: ArtifactKind::Skill,
@@ -153,6 +152,13 @@ fn collect_work(set: &DesiredSet) -> Vec<ArtifactRef> {
     for (name, id) in &set.rules {
         work.push(ArtifactRef {
             kind: ArtifactKind::Rule,
+            name: name.clone(),
+            id: id.clone(),
+        });
+    }
+    for (name, id) in &set.agents {
+        work.push(ArtifactRef {
+            kind: ArtifactKind::Agent,
             name: name.clone(),
             id: id.clone(),
         });
@@ -586,7 +592,18 @@ fn sort_locked(items: &mut [LockedArtifact]) {
 
 /// Build a [`GrimoireLock`] from resolved entries and the source set.
 fn build_lock(resolved: Vec<LockedArtifact>, set: &DesiredSet) -> GrimoireLock {
-    let (skills, rules): (Vec<_>, Vec<_>) = resolved.into_iter().partition(|a| a.kind == ArtifactKind::Skill);
+    let mut skills = Vec::new();
+    let mut rules = Vec::new();
+    let mut agents = Vec::new();
+    for artifact in resolved {
+        match artifact.kind {
+            ArtifactKind::Skill => skills.push(artifact),
+            ArtifactKind::Rule => rules.push(artifact),
+            ArtifactKind::Agent => agents.push(artifact),
+            // Bundles never produce lock entries — only their members do.
+            ArtifactKind::Bundle => {}
+        }
+    }
 
     GrimoireLock {
         metadata: LockMetadata {
@@ -600,6 +617,7 @@ fn build_lock(resolved: Vec<LockedArtifact>, set: &DesiredSet) -> GrimoireLock {
         },
         skills,
         rules,
+        agents,
     }
 }
 
@@ -873,6 +891,27 @@ mod tests {
         assert_eq!(lock.rules[0].name, "rho");
     }
 
+    #[tokio::test]
+    async fn agents_resolve_into_the_agent_list() {
+        let mut agents = BTreeMap::new();
+        agents.insert(
+            "code-reviewer".to_string(),
+            Identifier::parse("ghcr.io/acme/code-reviewer:1").unwrap(),
+        );
+        let set = DesiredSet::from_maps(BTreeMap::new(), BTreeMap::new(), agents, BTreeMap::new());
+        let mock = MockAccess::new(vec![Scripted::Ok(Some(digest()))]);
+        let access = arc(mock.clone());
+        let lock = resolve_lock(&set, &access, ConfigScope::Project, &fast_options())
+            .await
+            .expect("agent resolves");
+        assert!(lock.skills.is_empty());
+        assert!(lock.rules.is_empty());
+        assert_eq!(lock.agents.len(), 1);
+        assert_eq!(lock.agents[0].name, "code-reviewer");
+        assert_eq!(lock.agents[0].kind, ArtifactKind::Agent);
+        assert_eq!(lock.agents[0].pinned.digest(), digest());
+    }
+
     // ── Partial ──────────────────────────────────────────────────────────
 
     #[tokio::test]
@@ -888,6 +927,7 @@ mod tests {
             },
             skills: vec![],
             rules: vec![],
+            agents: vec![],
         };
         let mock = MockAccess::new(vec![Scripted::Ok(Some(digest()))]);
         let access = arc(mock.clone());
@@ -942,6 +982,7 @@ mod tests {
             },
             skills: vec![prev_a, prev_b],
             rules: vec![],
+            agents: vec![],
         };
 
         let new_a_digest = Algorithm::Sha256.hash(b"new-a");
@@ -979,6 +1020,7 @@ mod tests {
             },
             skills: vec![],
             rules: vec![],
+            agents: vec![],
         };
         let mock = MockAccess::new(vec![]);
         let access = arc(mock);
@@ -1087,6 +1129,26 @@ mod tests {
         let err = merge_bundle_members(&no_direct(), members).expect_err("disagreement must fail closed");
         assert!(matches!(err.kind, ResolveErrorKind::BundleConflict { .. }));
         assert_eq!(err.reference.name, "code-review");
+    }
+
+    #[test]
+    fn merge_agent_member_becomes_work_with_provenance() {
+        // Bundle expansion is kind-generic: an agent member flows through
+        // the same merge with its provenance stamped.
+        let members = vec![member(
+            ArtifactKind::Agent,
+            "code-reviewer",
+            "ghcr.io/acme/code-reviewer:1",
+            "ghcr.io/acme/stack",
+            "1.0.0",
+        )];
+        let work = merge_bundle_members(&no_direct(), members).expect("merge ok");
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].reference.kind, ArtifactKind::Agent);
+        assert_eq!(
+            work[0].bundle,
+            Some(("ghcr.io/acme/stack".to_string(), "1.0.0".to_string()))
+        );
     }
 
     #[test]

@@ -7,7 +7,7 @@
 //! a plain CWD walk-up ceiling'd at `$HOME` / filesystem root with an
 //! explicit `--config` override (no env-var precedence, no home-tier
 //! fallback — project and global scopes are independent). The schema is
-//! `[options]` + `[skills]` + `[rules]`.
+//! `[options]` + `[skills]` + `[rules]` + `[agents]` + `[bundles]`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -25,7 +25,7 @@ use crate::oci::identifier::error::IdentifierErrorKind;
 pub struct ProjectConfig {
     /// Options table (`[options]`).
     pub options: ConfigOptions,
-    /// The declared skills and rules.
+    /// The declared skills, rules, agents, and bundles.
     pub set: DesiredSet,
 }
 
@@ -74,6 +74,8 @@ struct RawConfig {
     skills: BTreeMap<String, String>,
     #[serde(default)]
     rules: BTreeMap<String, String>,
+    #[serde(default)]
+    agents: BTreeMap<String, String>,
     #[serde(default)]
     bundles: BTreeMap<String, String>,
 }
@@ -137,18 +139,20 @@ fn load_from_path(path: &Path) -> Result<ProjectConfig, ConfigError> {
     parse_config(&content, path.to_path_buf())
 }
 
-/// Parse the shared `[options]`/`[skills]`/`[rules]` schema.
+/// Parse the shared `[options]`/`[skills]`/`[rules]`/`[agents]`/`[bundles]`
+/// schema.
 fn parse_config(s: &str, path: PathBuf) -> Result<ProjectConfig, ConfigError> {
     let raw: RawConfig =
         toml::from_str(s).map_err(|e| ConfigError::new(path.clone(), ConfigErrorKind::TomlParse(e)))?;
     let skills = parse_artifact_map(&raw.skills, &path)?;
     let rules = parse_artifact_map(&raw.rules, &path)?;
-    // Bundle references validate exactly like skills/rules: a
+    // Agent and bundle references validate exactly like skills/rules: a
     // fully-qualified identifier, bare entries defaulting to `:latest`.
+    let agents = parse_artifact_map(&raw.agents, &path)?;
     let bundles = parse_artifact_map(&raw.bundles, &path)?;
     Ok(ProjectConfig {
         options: raw.options,
-        set: DesiredSet::from_parts_with_bundles(skills, rules, bundles),
+        set: DesiredSet::from_maps(skills, rules, agents, bundles),
     })
 }
 
@@ -166,14 +170,17 @@ pub struct BundleMetadata {
 
 /// A parsed bundle source: validated members plus catalog metadata.
 ///
-/// The source is `grimoire.toml`-shaped — its `[skills]`/`[rules]` tables are
-/// the members — with optional top-level `summary`/`keywords`/`description`.
+/// The source is `grimoire.toml`-shaped — its `[skills]`/`[rules]`/`[agents]`
+/// tables are the members — with optional top-level
+/// `summary`/`keywords`/`description`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BundleSource {
     /// Skill members, name → validated identifier.
     pub skills: BTreeMap<String, Identifier>,
     /// Rule members, name → validated identifier.
     pub rules: BTreeMap<String, Identifier>,
+    /// Agent members, name → validated identifier.
+    pub agents: BTreeMap<String, Identifier>,
     /// Catalog metadata for the bundle artifact.
     pub metadata: BundleMetadata,
 }
@@ -200,6 +207,8 @@ struct RawBundleSource {
     #[serde(default)]
     rules: BTreeMap<String, String>,
     #[serde(default)]
+    agents: BTreeMap<String, String>,
+    #[serde(default)]
     summary: Option<String>,
     #[serde(default)]
     keywords: Option<String>,
@@ -214,9 +223,11 @@ fn parse_bundle_source(s: &str, path: PathBuf) -> Result<BundleSource, ConfigErr
         toml::from_str(s).map_err(|e| ConfigError::new(path.clone(), ConfigErrorKind::TomlParse(e)))?;
     let skills = parse_artifact_map(&raw.skills, &path)?;
     let rules = parse_artifact_map(&raw.rules, &path)?;
+    let agents = parse_artifact_map(&raw.agents, &path)?;
     Ok(BundleSource {
         skills,
         rules,
+        agents,
         metadata: BundleMetadata {
             summary: raw.summary,
             keywords: raw.keywords,
@@ -340,6 +351,38 @@ code-review = "ghcr.io/acme/skills/code-review:stable"
             "ghcr.io/acme/bundles/python-stack:1.0.0"
         );
         assert_eq!(cfg.set.skills.len(), 1);
+    }
+
+    #[test]
+    fn parse_agents_table_ok() {
+        let cfg = ProjectConfig::from_toml_str(
+            r#"
+[agents]
+code-reviewer = "ghcr.io/acme/agents/code-reviewer:1.0.0"
+
+[skills]
+code-review = "ghcr.io/acme/skills/code-review:stable"
+"#,
+        )
+        .expect("parse");
+        assert_eq!(cfg.set.agents.len(), 1);
+        assert_eq!(
+            cfg.set.agents.get("code-reviewer").unwrap().to_string(),
+            "ghcr.io/acme/agents/code-reviewer:1.0.0"
+        );
+        assert_eq!(cfg.set.skills.len(), 1);
+    }
+
+    #[test]
+    fn bare_agent_defaults_to_latest() {
+        let cfg = ProjectConfig::from_toml_str(
+            r#"
+[agents]
+rev = "ghcr.io/acme/agents/rev"
+"#,
+        )
+        .expect("parse");
+        assert_eq!(cfg.set.agents.get("rev").unwrap().tag(), Some("latest"));
     }
 
     #[test]
@@ -506,6 +549,25 @@ rust-style = "ghcr.io/acme/rust-style:2"
         assert_eq!(
             src.metadata.description.as_deref(),
             Some("Skills and rules for Python work")
+        );
+    }
+
+    #[test]
+    fn bundle_source_reads_agent_members() {
+        let src = BundleSource::from_toml_str(
+            r#"
+[agents]
+code-reviewer = "ghcr.io/acme/agents/code-reviewer:1"
+
+[skills]
+code-review = "ghcr.io/acme/code-review:1"
+"#,
+        )
+        .expect("parse");
+        assert_eq!(src.agents.len(), 1);
+        assert_eq!(
+            src.agents.get("code-reviewer").unwrap().to_string(),
+            "ghcr.io/acme/agents/code-reviewer:1"
         );
     }
 

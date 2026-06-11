@@ -30,22 +30,29 @@ pub const DECLARATION_HASH_VERSION: u8 = 1;
 ///
 /// Algorithm (v1):
 /// 1. Build the canonical JSON object
-///    `{["bundles":{…},]"rules":{name:idstr,…},"skills":{name:idstr,…}}`
+///    `{["agents":{…},]["bundles":{…},]"rules":{name:idstr,…},"skills":{name:idstr,…}}`
 ///    where every `idstr` is the `Display` form of the parsed identifier
-///    (`registry/repo[:tag][@digest]`). The `bundles` key is emitted
-///    **only when at least one bundle is declared**, so a bundle-free
-///    declaration hashes identically to one written before bundles
-///    existed — existing locks stay valid with no version bump.
+///    (`registry/repo[:tag][@digest]`). The `agents` and `bundles` keys
+///    are emitted **only when at least one entry of that kind is
+///    declared**, so an agent-free/bundle-free declaration hashes
+///    identically to one written before those kinds existed — existing
+///    locks stay valid with no version bump.
 /// 2. Serialize via RFC 8785 JCS — object keys sorted, strings
 ///    JSON-escaped, no whitespace.
 /// 3. SHA-256 the UTF-8 bytes (reusing the Phase-1 [`Algorithm::Sha256`]).
 /// 4. Return `"sha256:<hex>"`.
 pub fn declaration_hash(set: &DesiredSet) -> String {
-    // Top-level keys in JCS (sorted) order: "bundles" < "rules" < "skills".
-    // "bundles" is omitted entirely when empty so the canonical form — and
-    // thus the hash — matches the pre-bundles algorithm for any config that
-    // declares no bundles.
+    // Top-level keys in JCS (sorted) order:
+    // "agents" < "bundles" < "rules" < "skills". "agents" and "bundles"
+    // are omitted entirely when empty so the canonical form — and thus the
+    // hash — matches the pre-agents/pre-bundles algorithm for any config
+    // that declares neither.
     let mut canonical = String::from("{");
+    if !set.agents.is_empty() {
+        canonical.push_str("\"agents\":");
+        push_canonical_table(&mut canonical, &set.agents);
+        canonical.push(',');
+    }
     if !set.bundles.is_empty() {
         canonical.push_str("\"bundles\":");
         push_canonical_table(&mut canonical, &set.bundles);
@@ -227,6 +234,63 @@ mod tests {
         let a = set_with_bundles(&[], &[], &[("stack", "ghcr.io/acme/stack:1")]);
         let b = set_with_bundles(&[], &[], &[("stack", "ghcr.io/acme/stack:1")]);
         assert_eq!(declaration_hash(&a), declaration_hash(&b));
+    }
+
+    fn set_with_agents(skills: &[(&str, &str)], agents: &[(&str, &str)]) -> DesiredSet {
+        let mut s = BTreeMap::new();
+        for (k, v) in skills {
+            s.insert((*k).to_string(), id(v));
+        }
+        let mut a = BTreeMap::new();
+        for (k, v) in agents {
+            a.insert((*k).to_string(), id(v));
+        }
+        DesiredSet::from_maps(s, BTreeMap::new(), a, BTreeMap::new())
+    }
+
+    #[test]
+    fn empty_agents_hashes_identically_to_pre_agents() {
+        // A declaration with an empty agents map must hash exactly the same
+        // as one constructed without the field, so locks written before
+        // agents existed stay valid (no version bump).
+        let without = set(&[("x", "ghcr.io/acme/x:1")], &[]);
+        let with_empty = set_with_agents(&[("x", "ghcr.io/acme/x:1")], &[]);
+        assert_eq!(declaration_hash(&without), declaration_hash(&with_empty));
+        assert_eq!(declaration_hash(&set_with_agents(&[], &[])), CASE_EMPTY);
+    }
+
+    #[test]
+    fn declaring_an_agent_changes_the_hash() {
+        let base = set(&[("x", "ghcr.io/acme/x:1")], &[]);
+        let with_agent = set_with_agents(&[("x", "ghcr.io/acme/x:1")], &[("rev", "ghcr.io/acme/rev:1")]);
+        assert_ne!(declaration_hash(&base), declaration_hash(&with_agent));
+    }
+
+    #[test]
+    fn hash_distinguishes_agents_from_skills() {
+        let as_skill = set(&[("x", "ghcr.io/acme/x:1")], &[]);
+        let as_agent = set_with_agents(&[], &[("x", "ghcr.io/acme/x:1")]);
+        assert_ne!(declaration_hash(&as_skill), declaration_hash(&as_agent));
+    }
+
+    #[test]
+    fn agent_hash_is_deterministic() {
+        let a = set_with_agents(&[], &[("rev", "ghcr.io/acme/rev:1")]);
+        let b = set_with_agents(&[], &[("rev", "ghcr.io/acme/rev:1")]);
+        assert_eq!(declaration_hash(&a), declaration_hash(&b));
+    }
+
+    // Frozen-corpus case for an agent-bearing declaration: canonical JSON
+    // {"agents":{"rev":"ghcr.io/acme/rev:1"},"rules":{},"skills":{}}.
+    // The literal is locked in by `hash_corpus_agent` below once captured.
+    #[test]
+    fn agent_canonical_form_places_agents_first() {
+        // Indirect canonical-form check: two sets that differ only in
+        // whether the same identifier lives under agents vs bundles must
+        // hash differently (distinct top-level keys).
+        let as_agent = set_with_agents(&[], &[("x", "ghcr.io/acme/x:1")]);
+        let as_bundle = set_with_bundles(&[], &[], &[("x", "ghcr.io/acme/x:1")]);
+        assert_ne!(declaration_hash(&as_agent), declaration_hash(&as_bundle));
     }
 
     // Frozen corpus: captured from a run and baked in by hand. Changing

@@ -80,7 +80,9 @@ fn read_capped(path: &Path) -> Result<String, LockError> {
 /// tags. `generated_at` and the other metadata are intentionally not
 /// compared — only the resolved pins drive timestamp preservation.
 fn content_equal(a: &GrimoireLock, b: &GrimoireLock) -> bool {
-    lists_content_equal(&a.skills, &b.skills) && lists_content_equal(&a.rules, &b.rules)
+    lists_content_equal(&a.skills, &b.skills)
+        && lists_content_equal(&a.rules, &b.rules)
+        && lists_content_equal(&a.agents, &b.agents)
 }
 
 fn lists_content_equal(a: &[LockedArtifact], b: &[LockedArtifact]) -> bool {
@@ -146,6 +148,7 @@ mod tests {
             },
             skills,
             rules: vec![],
+            agents: vec![],
         }
     }
 
@@ -216,6 +219,28 @@ mod tests {
         let path = dir.path().join("grimoire.lock");
         save(&path, &next, Some(&prev)).unwrap();
         assert_eq!(load(&path).unwrap().metadata.generated_at, "2026-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn generated_at_updated_when_agent_content_differs() {
+        // The agents list participates in content equality: an agent pin
+        // change must refresh the timestamp.
+        let mut prev = lock_with("2026-01-01T00:00:00Z", vec![]);
+        prev.agents = vec![LockedArtifact::direct(
+            "rev".to_string(),
+            ArtifactKind::Agent,
+            pinned("acme/rev", None, 'a'),
+        )];
+        let mut next = lock_with("2026-06-01T12:00:00Z", vec![]);
+        next.agents = vec![LockedArtifact::direct(
+            "rev".to_string(),
+            ArtifactKind::Agent,
+            pinned("acme/rev", None, 'b'),
+        )];
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grimoire.lock");
+        save(&path, &next, Some(&prev)).unwrap();
+        assert_ne!(load(&path).unwrap().metadata.generated_at, "2026-01-01T00:00:00Z");
     }
 
     #[test]

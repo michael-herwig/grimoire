@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Grimoire Authors
 
-//! The declared set of skills and rules, with a lazily-cached canonical
-//! declaration hash.
+//! The declared set of skills, rules, agents, and bundles, with a
+//! lazily-cached canonical declaration hash.
 //!
 //! Adapted from the OCX `ProjectConfig` cache pattern: the
 //! declaration-hash cache is excluded from `Clone`/`PartialEq` (it speaks
@@ -37,11 +37,11 @@ pub struct ConfigOptions {
     pub clients: Vec<String>,
 }
 
-/// The declared skills and rules.
+/// The declared skills, rules, and agents.
 ///
-/// `skills` / `rules` are `(name → fully-qualified identifier)` maps. The
-/// declaration hash (RFC 8785 JCS + SHA-256) is cached on first access via
-/// [`Self::declaration_hash_cached`]; in-place mutators must call
+/// `skills` / `rules` / `agents` are `(name → fully-qualified identifier)`
+/// maps. The declaration hash (RFC 8785 JCS + SHA-256) is cached on first
+/// access via [`Self::declaration_hash_cached`]; in-place mutators must call
 /// [`Self::invalidate_declaration_hash_cache`] to keep the cache coherent.
 #[derive(Debug, Default)]
 pub struct DesiredSet {
@@ -49,9 +49,11 @@ pub struct DesiredSet {
     pub skills: BTreeMap<String, Identifier>,
     /// Declared rules, keyed by config name.
     pub rules: BTreeMap<String, Identifier>,
+    /// Declared agents, keyed by config name.
+    pub agents: BTreeMap<String, Identifier>,
     /// Declared bundles, keyed by config name. A bundle expands into its
-    /// member skills/rules at resolve time; the identifier is the bundle
-    /// artifact reference (floating tag or pinned digest).
+    /// member skills/rules/agents at resolve time; the identifier is the
+    /// bundle artifact reference (floating tag or pinned digest).
     pub bundles: BTreeMap<String, Identifier>,
 
     /// Lazily-computed canonical declaration hash.
@@ -71,6 +73,7 @@ impl Clone for DesiredSet {
         Self {
             skills: self.skills.clone(),
             rules: self.rules.clone(),
+            agents: self.agents.clone(),
             bundles: self.bundles.clone(),
             declaration_hash_cache: OnceLock::new(),
         }
@@ -80,7 +83,10 @@ impl Clone for DesiredSet {
 impl PartialEq for DesiredSet {
     fn eq(&self, other: &Self) -> bool {
         // The cache is derived; equality speaks to declared content only.
-        self.skills == other.skills && self.rules == other.rules && self.bundles == other.bundles
+        self.skills == other.skills
+            && self.rules == other.rules
+            && self.agents == other.agents
+            && self.bundles == other.bundles
     }
 }
 
@@ -93,15 +99,26 @@ impl DesiredSet {
         Self::from_parts_with_bundles(skills, rules, BTreeMap::new())
     }
 
-    /// Construct from explicit skill, rule, and bundle maps.
+    /// Construct from explicit skill, rule, and bundle maps with no agents.
     pub fn from_parts_with_bundles(
         skills: BTreeMap<String, Identifier>,
         rules: BTreeMap<String, Identifier>,
         bundles: BTreeMap<String, Identifier>,
     ) -> Self {
+        Self::from_maps(skills, rules, BTreeMap::new(), bundles)
+    }
+
+    /// Construct from explicit skill, rule, agent, and bundle maps.
+    pub fn from_maps(
+        skills: BTreeMap<String, Identifier>,
+        rules: BTreeMap<String, Identifier>,
+        agents: BTreeMap<String, Identifier>,
+        bundles: BTreeMap<String, Identifier>,
+    ) -> Self {
         Self {
             skills,
             rules,
+            agents,
             bundles,
             declaration_hash_cache: OnceLock::new(),
         }
@@ -117,8 +134,8 @@ impl DesiredSet {
 
     /// Drop any cached hash so the next [`Self::declaration_hash_cached`]
     /// recomputes from current state. In-place mutators that change
-    /// `skills` / `rules` MUST call this or the staleness gate compares
-    /// against a pre-mutation hash.
+    /// `skills` / `rules` / `agents` MUST call this or the staleness gate
+    /// compares against a pre-mutation hash.
     pub fn invalidate_declaration_hash_cache(&mut self) {
         self.declaration_hash_cache.take();
     }
