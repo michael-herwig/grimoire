@@ -259,13 +259,17 @@ fn parse_reference(
 /// centralized precedence helper. Precedence (highest first): the
 /// `--registry` flag, then `GRIM_DEFAULT_REGISTRY`, then the discovered
 /// project config `[options].default_registry` (best-effort — a publish run
-/// from outside a project tree simply has none). Owned so the transient
+/// from outside a project tree simply has none), then the global config
+/// `[options].default_registry` as the lowest-priority fallback. A release
+/// is never a global-scope operation, so the global config is always
+/// consulted as a fallback (project scope). Owned so the transient
 /// discovered config can drop.
 fn release_default_registry(ctx: &Context) -> Option<String> {
     let project_default = crate::config::project_config::ProjectConfig::discover(None)
         .ok()
         .and_then(|d| d.config.options.default_registry);
-    super::resolve_default_registry(ctx, project_default.as_deref(), None)
+    let global_default = super::global_config_default(ctx, crate::config::scope::ConfigScope::Project);
+    super::resolve_default_registry(ctx, project_default.as_deref(), global_default.as_deref())
 }
 
 /// Move every cascade tag onto `digest`. The exact version (`version`) is
@@ -351,6 +355,41 @@ fn preview_manifest_digest(manifest: &OciManifest) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::options::{GlobalOptions, OutputFormat};
+
+    fn opts(registry: Option<&str>) -> GlobalOptions {
+        GlobalOptions {
+            format: OutputFormat::Plain,
+            offline: false,
+            log_level: None,
+            config: None,
+            global: false,
+            registry: registry.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn release_default_registry_honors_flag_tier() {
+        // The `--registry` flag is the top tier and must win through the
+        // composed `release_default_registry` chain — the refactor that
+        // wired the global-config fallback in must not disturb it.
+        let ctx = Context::new(&opts(Some("flag.example")));
+        assert_eq!(release_default_registry(&ctx), Some("flag.example".to_string()));
+    }
+
+    #[test]
+    fn release_default_registry_consults_global_tier_not_none() {
+        // Regression for the skipped global-config tier: the publish path now
+        // routes through the centralized `global_config_default` (project
+        // scope, so the global config is a live fallback) instead of passing
+        // a hard-coded `None`. With no flag / env / project-or-global config
+        // present in the test environment the result is `None`, but the call
+        // chain — not a literal `None` argument — produced it. The flag tier
+        // above proves the chain still orders correctly; the global-tier disk
+        // read is exercised end-to-end by `test_default_registry.py`.
+        let ctx = Context::new(&opts(None));
+        assert_eq!(release_default_registry(&ctx), None);
+    }
 
     #[test]
     fn preview_digest_is_stable() {

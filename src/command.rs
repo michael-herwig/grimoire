@@ -79,6 +79,26 @@ pub fn effective_default_registry(config_default: Option<&str>, ctx: &crate::con
     resolve_default_registry(ctx, config_default, None)
 }
 
+/// The global config's `[options].default_registry`, loaded best-effort as
+/// the lowest-priority registry fallback. Returns `None` for a global-scope
+/// run — the global config is already that run's active scope, so consulting
+/// it here would double-count the same tier. Load failures degrade to `None`
+/// (the global config is advisory at this tier, never fatal).
+///
+/// Single-sourced for every registry-resolving command (`add` / `search` /
+/// `tui` / `release`) so the precedence chain stays identical across them.
+pub fn global_config_default(
+    ctx: &crate::context::Context,
+    scope: crate::config::scope::ConfigScope,
+) -> Option<String> {
+    if scope == crate::config::scope::ConfigScope::Global {
+        return None;
+    }
+    crate::config::global_config::GlobalConfig::load(&ctx.paths().global_config())
+        .ok()
+        .and_then(|cfg| cfg.options.default_registry)
+}
+
 /// Build a classifiable usage error (exit 64) for a missing `login`
 /// credential input, routed through the top-level error so
 /// [`crate::error::classify_error`] sees it.
@@ -181,5 +201,27 @@ mod tests {
     fn no_registry_anywhere_is_none() {
         let ctx = Context::new(&opts(None));
         assert_eq!(resolve_default_registry(&ctx, None, None), None);
+    }
+
+    #[test]
+    fn global_config_default_is_none_for_global_scope() {
+        // A global-scope run already has the global config as its active
+        // scope; the helper must not re-consult it as a fallback tier.
+        let ctx = Context::new(&opts(None));
+        assert_eq!(
+            global_config_default(&ctx, crate::config::scope::ConfigScope::Global),
+            None
+        );
+    }
+
+    #[test]
+    fn global_config_default_degrades_to_none_when_absent() {
+        // No global config on disk in the test environment ⇒ the
+        // best-effort load degrades to `None` rather than failing.
+        let ctx = Context::new(&opts(None));
+        assert_eq!(
+            global_config_default(&ctx, crate::config::scope::ConfigScope::Project),
+            None
+        );
     }
 }

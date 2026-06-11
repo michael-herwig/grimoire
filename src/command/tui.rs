@@ -123,38 +123,33 @@ fn resolve_registry(ctx: &Context, args: &TuiArgs) -> anyhow::Result<String> {
     let project_default = scope_resolution::resolve(ctx, args.global, args.config.as_deref())
         .ok()
         .and_then(|scope| scope.options.default_registry);
-    let global_default = global_config_default(ctx, args.global);
+    // `--global` maps to the global scope; the centralized helper gates the
+    // global-config fallback on it (same mapping `scope_resolution` applies).
+    let scope = if args.global {
+        ConfigScope::Global
+    } else {
+        ConfigScope::Project
+    };
+    let global_default = crate::command::global_config_default(ctx, scope);
     crate::command::resolve_default_registry(ctx, project_default.as_deref(), global_default.as_deref())
         .ok_or_else(|| crate::error::Error::from(crate::command::command_error::CommandError::NoRegistry).into())
 }
 
-/// The global config's `[options].default_registry`, loaded best-effort as
-/// the lowest-priority registry fallback for a non-global run. Load failures
-/// degrade to `None`.
-fn global_config_default(ctx: &Context, global: bool) -> Option<String> {
-    if global {
-        return None;
-    }
-    crate::config::global_config::GlobalConfig::load(&ctx.paths().global_config())
-        .ok()
-        .and_then(|cfg| cfg.options.default_registry)
-}
-
-/// The effective selected clients for a scope's TUI display: the config
-/// `[options].clients` (parsed via [`ClientTarget`]) when non-empty, else
-/// the **detected** clients for the scope (the same logic install / update
-/// use). Unknown client names in the config are skipped (the install path
-/// surfaces the hard error; the display is best-effort).
+/// The effective selected clients for a scope's TUI display, derived from
+/// the **same** resolution the install / update path uses:
+/// [`InstallTarget::parse`] with no `--client` flag and the config
+/// `[options].clients` as the default. That folds in detection (empty
+/// config ⇒ detected clients for the scope, falling back to `[claude]`),
+/// so the status line never shows a target set that diverges from what an
+/// install would actually write to.
+///
+/// The display is best-effort: an unparseable config `clients` entry makes
+/// `parse` error (the install path surfaces that hard error to the user),
+/// so here it degrades to the detected set rather than failing the TUI.
 fn selected_clients(workspace: &std::path::Path, scope: ConfigScope, config_clients: &[String]) -> Vec<ClientTarget> {
-    let configured: Vec<ClientTarget> = config_clients
-        .iter()
-        .flat_map(|v| v.split(','))
-        .filter_map(|name| name.trim().parse().ok())
-        .collect();
-    if configured.is_empty() {
-        crate::install::target::detect_clients(workspace, scope)
-    } else {
-        configured
+    match crate::install::target::InstallTarget::parse(workspace, scope, &[], config_clients) {
+        Ok(target) => target.clients().to_vec(),
+        Err(_) => crate::install::target::detect_clients(workspace, scope),
     }
 }
 
@@ -197,5 +192,49 @@ mod tests {
         };
         let err = resolve_registry(&ctx, &a).expect_err("no registry");
         assert_eq!(crate::error::classify_error(&err), ExitCode::ConfigError);
+    }
+
+    #[test]
+    fn selected_clients_matches_install_target_resolution() {
+        // The TUI display must derive from the same resolution the install
+        // path uses: an explicit config `clients` list resolves to exactly
+        // what `InstallTarget::parse` would target (parse + dedup + order),
+        // not a separately re-parsed list.
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = ["copilot,claude".to_string()];
+        let display = selected_clients(tmp.path(), ConfigScope::Project, &cfg);
+        let installed = crate::install::target::InstallTarget::parse(tmp.path(), ConfigScope::Project, &[], &cfg)
+            .unwrap()
+            .clients()
+            .to_vec();
+        assert_eq!(display, installed);
+        assert_eq!(display, vec![ClientTarget::Copilot, ClientTarget::Claude]);
+    }
+
+    #[test]
+    fn selected_clients_empty_config_uses_detection() {
+        // An empty config `clients` list folds into detection (and the
+        // `[claude]` fallback when nothing is detected) — identical to the
+        // install path's behavior for an unconfigured scope.
+        let tmp = tempfile::tempdir().unwrap();
+        let display = selected_clients(tmp.path(), ConfigScope::Project, &[]);
+        let detected = crate::install::target::detect_clients(tmp.path(), ConfigScope::Project);
+        assert_eq!(display, detected);
+        // A bare workspace detects nothing ⇒ the shared `[claude]` fallback.
+        assert_eq!(display, vec![ClientTarget::Claude]);
+    }
+
+    #[test]
+    fn selected_clients_unknown_name_degrades_to_detection() {
+        // An unparseable config entry makes `InstallTarget::parse` error (the
+        // install path surfaces that to the user); the display must degrade
+        // to the detected set rather than panicking or silently dropping.
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = ["vscode".to_string()];
+        let display = selected_clients(tmp.path(), ConfigScope::Project, &cfg);
+        assert_eq!(
+            display,
+            crate::install::target::detect_clients(tmp.path(), ConfigScope::Project)
+        );
     }
 }

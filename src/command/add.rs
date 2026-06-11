@@ -85,7 +85,7 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     // identifier is always fully-qualified, so the config and lock persist
     // the registry host explicitly — the default is a pure CLI-input
     // convenience.
-    let global_default = global_config_default(ctx, scope.scope);
+    let global_default = super::global_config_default(ctx, scope.scope);
     let default_registry = super::resolve_default_registry(
         ctx,
         scope.options.default_registry.as_deref(),
@@ -186,20 +186,6 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     };
 
     Ok((AddReport::new(kind, name, pinned), ExitCode::Success))
-}
-
-/// The global config's `[options].default_registry`, loaded best-effort as
-/// the lowest-priority registry fallback for a **project**-scope `add`. A
-/// global-scope run already has the global config as its active scope, so
-/// `None` is returned to avoid consulting it twice. Load failures degrade
-/// to `None` (the global config is advisory here, never fatal).
-fn global_config_default(ctx: &Context, scope: crate::config::scope::ConfigScope) -> Option<String> {
-    if scope == crate::config::scope::ConfigScope::Global {
-        return None;
-    }
-    crate::config::global_config::GlobalConfig::load(&ctx.paths().global_config())
-        .ok()
-        .and_then(|cfg| cfg.options.default_registry)
 }
 
 /// Parse `<ref>`, expanding a short identifier against `default_registry`
