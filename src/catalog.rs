@@ -13,8 +13,11 @@
 
 pub mod catalog_error;
 pub mod registry_catalog;
+pub mod search_match;
 
 #[allow(unused_imports)]
 pub use catalog_error::{CatalogError, CatalogErrorKind};
 #[allow(unused_imports)]
 pub use registry_catalog::{Catalog, CatalogEntry};
+#[allow(unused_imports)]
+pub use search_match::SearchQuery;

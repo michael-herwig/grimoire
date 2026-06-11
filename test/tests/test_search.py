@@ -222,6 +222,124 @@ def test_search_offline_serves_cached_exit_0(
     )
 
 
+def test_search_multi_term_is_and(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A whitespace-split query ANDs its terms: every term must match an
+    entry (across repo / summary / description / keywords) for it to surface.
+
+    A 2+ term query carries no single-term name prefilter (no substring can
+    AND across terms), so an online ``--refresh`` would build the capped
+    browse window and miss this test's UUID repos. We warm a catalog scoped
+    to ``unique_repo`` with a single-term ``--refresh``, then run the
+    two-term query ``--offline`` so the in-memory AND narrows the warm cache.
+    """
+    # Two repos under the same unique segment; only one carries `lint`.
+    make_artifact(
+        f"{unique_repo}/rust-lint",
+        "rule",
+        {"rust-lint.md": "---\npaths: ['**/*.rs']\n---\n# rust\n"},
+        tag="latest",
+        annotations={
+            "com.grimoire.keywords": "rust,lint",
+            "org.opencontainers.image.description": "Rust lint rules",
+        },
+    )
+    make_artifact(
+        f"{unique_repo}/rust-fmt",
+        "rule",
+        {"rust-fmt.md": "---\npaths: ['**/*.rs']\n---\n# fmt\n"},
+        tag="latest",
+        annotations={
+            "com.grimoire.keywords": "rust,format",
+            "org.opencontainers.image.description": "Rust format rules",
+        },
+    )
+    runner = grim_at(project_dir)
+
+    # Warm a catalog scoped to this test's repos (single-term prefilter).
+    warm = runner.json(
+        "search", unique_repo, "--registry", REGISTRY_HOST, "--refresh"
+    )
+    warm_repos = {r["repo"].split("/")[-1] for r in warm}
+    assert {"rust-lint", "rust-fmt"} <= warm_repos, (
+        f"warm catalog must hold both repos, got {warm_repos}"
+    )
+
+    # `<unique_repo> lint` over the warm cache: `lint` ANDs in memory and
+    # matches only rust-lint (rust-fmt's keywords/description lack `lint`).
+    rows = runner.json(
+        "--offline", "search", f"{unique_repo} lint", "--registry", REGISTRY_HOST
+    )
+    repos = [r["repo"] for r in rows]
+    assert any(r.endswith(f"{unique_repo}/rust-lint") for r in repos), (
+        f"the entry matching both terms must surface, got {repos}"
+    )
+    assert not any(r.endswith(f"{unique_repo}/rust-fmt") for r in repos), (
+        f"the entry missing the second term must be filtered out, got {repos}"
+    )
+
+
+def test_search_kind_keyword_filters(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A bare kind keyword (`skill`/`rule`) filters by kind, not as a text
+    term, ANDed with the rest of the query.
+
+    A kind-keyword query carries no single-term name prefilter (no substring
+    can express it), so an online ``--refresh`` would build the capped browse
+    window over the whole shared registry and miss this test's UUID repos.
+    We therefore warm a catalog scoped to ``unique_repo`` with a single-term
+    ``--refresh`` first, then run the kind-filter query ``--offline`` so the
+    in-memory matcher narrows the warm cache deterministically — exactly the
+    offline-serves-cache path the matcher is designed to support.
+    """
+    make_artifact(
+        f"{unique_repo}/a-skill",
+        "skill",
+        {"a-skill/SKILL.md": "---\nname: a-skill\n---\n# s\n"},
+        tag="latest",
+    )
+    make_artifact(
+        f"{unique_repo}/a-rule",
+        "rule",
+        {"a-rule.md": "---\npaths: ['**/*.rs']\n---\n# r\n"},
+        tag="latest",
+    )
+    runner = grim_at(project_dir)
+
+    # Warm a catalog scoped to this test's repos (single-term prefilter).
+    warm = runner.json(
+        "search", unique_repo, "--registry", REGISTRY_HOST, "--refresh"
+    )
+    warm_repos = {r["repo"].split("/")[-1] for r in warm}
+    assert {"a-skill", "a-rule"} <= warm_repos, (
+        f"warm catalog must hold both kinds, got {warm_repos}"
+    )
+
+    # `<unique_repo> rule` over the warm cache ⇒ only the rule survives.
+    rule_rows = runner.json(
+        "--offline", "search", f"{unique_repo} rule", "--registry", REGISTRY_HOST
+    )
+    rule_repos = [r["repo"] for r in rule_rows]
+    assert all(r["kind"] == "rule" for r in rule_rows), rule_rows
+    assert any(r.endswith(f"{unique_repo}/a-rule") for r in rule_repos), rule_repos
+    assert not any(r.endswith(f"{unique_repo}/a-skill") for r in rule_repos), (
+        f"the `rule` kind keyword must filter out the skill, got {rule_repos}"
+    )
+
+    # `<unique_repo> skill` over the warm cache ⇒ only the skill survives.
+    skill_rows = runner.json(
+        "--offline", "search", f"{unique_repo} skill", "--registry", REGISTRY_HOST
+    )
+    skill_repos = [r["repo"] for r in skill_rows]
+    assert all(r["kind"] == "skill" for r in skill_rows), skill_rows
+    assert any(r.endswith(f"{unique_repo}/a-skill") for r in skill_repos), skill_repos
+    assert not any(r.endswith(f"{unique_repo}/a-rule") for r in skill_repos), (
+        f"the `skill` kind keyword must filter out the rule, got {skill_repos}"
+    )
+
+
 def test_tui_non_tty_exits_0_with_message(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
@@ -230,6 +348,26 @@ def test_tui_non_tty_exits_0_with_message(
     result = runner.run("tui", "--registry", REGISTRY_HOST, check=False)
     assert result.returncode == 0, (
         f"non-TTY tui must exit 0, got {result.returncode}; {result.stderr}"
+    )
+    assert (
+        "not a TTY" in result.stdout
+        or "interactive terminal" in result.stdout
+    )
+
+
+def test_tui_refresh_flag_non_tty_exits_0(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """`grim tui --refresh` parses and still honours the non-TTY guard: the
+    new flag governs only the initial load and never changes the exit guard.
+    """
+    runner = grim_at(project_dir)
+    result = runner.run(
+        "tui", "--registry", REGISTRY_HOST, "--refresh", check=False
+    )
+    assert result.returncode == 0, (
+        f"non-TTY tui --refresh must exit 0, got {result.returncode}; "
+        f"{result.stderr}"
     )
     assert (
         "not a TTY" in result.stdout

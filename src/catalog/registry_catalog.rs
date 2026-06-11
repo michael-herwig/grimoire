@@ -30,6 +30,7 @@ use crate::oci::{Identifier, PinnedIdentifier};
 use crate::store::atomic_write::atomic_write;
 
 use super::catalog_error::CatalogError;
+use super::search_match::SearchQuery;
 
 /// Catalog freshness window: a catalog older than this is stale and is
 /// rebuilt on the next online `search`/`tui` (offline still serves it).
@@ -99,28 +100,18 @@ impl CatalogEntry {
         format!("{}/{}", self.registry, self.repository)
     }
 
-    /// Whether `query` matches this entry: a case-insensitive substring of
-    /// the repo path, the summary, the description, or any keyword. An
-    /// empty query matches everything.
-    pub fn matches(&self, query: &str) -> bool {
-        if query.is_empty() {
-            return true;
-        }
-        let q = query.to_lowercase();
-        if self.repo().to_lowercase().contains(&q) {
-            return true;
-        }
-        if let Some(d) = &self.description
-            && d.to_lowercase().contains(&q)
-        {
-            return true;
-        }
-        if let Some(s) = &self.summary
-            && s.to_lowercase().contains(&q)
-        {
-            return true;
-        }
-        self.keywords.iter().any(|k| k.to_lowercase().contains(&q))
+    /// Whether `query` matches this entry, delegating to the shared
+    /// [`SearchQuery`] matcher (AND-of-terms over kind / repo / summary /
+    /// description / keywords, plus bare kind-keyword filters). The query is
+    /// parsed once by the caller so each catalog row costs no re-parse.
+    pub fn matches(&self, query: &SearchQuery) -> bool {
+        query.matches_fields(
+            self.kind.as_deref(),
+            &self.repo(),
+            self.summary.as_deref().unwrap_or(""),
+            self.description.as_deref().unwrap_or(""),
+            &self.keywords,
+        )
     }
 }
 
@@ -972,6 +963,7 @@ mod tests {
 
     #[test]
     fn entry_matches_query_case_insensitively() {
+        let parse = SearchQuery::parse;
         let e = CatalogEntry {
             registry: "localhost:5000".to_string(),
             repository: "acme/code-review".to_string(),
@@ -983,11 +975,27 @@ mod tests {
             version: None,
             fetched_at: ts(1),
         };
-        assert!(e.matches(""), "empty query matches all");
-        assert!(e.matches("REVIEW"), "repo path, case-insensitive");
-        assert!(e.matches("quality"), "description substring");
-        assert!(e.matches("BLURB"), "summary substring, case-insensitive");
-        assert!(e.matches("lint"), "keyword");
-        assert!(!e.matches("python"), "non-match");
+        assert!(e.matches(&parse("")), "empty query matches all");
+        assert!(e.matches(&parse("REVIEW")), "repo path, case-insensitive");
+        assert!(e.matches(&parse("quality")), "description substring");
+        assert!(e.matches(&parse("BLURB")), "summary substring, case-insensitive");
+        assert!(e.matches(&parse("lint")), "keyword");
+        assert!(!e.matches(&parse("python")), "non-match");
+        // Multi-term AND: both terms must match (repo + summary; repo + desc).
+        assert!(e.matches(&parse("review blurb")), "multi-term AND over repo+summary");
+        assert!(e.matches(&parse("review quality")), "multi-term AND over repo+desc");
+        assert!(!e.matches(&parse("review python")), "multi-term miss ⇒ no match");
+        // A bare kind keyword filters by kind, ANDed with text terms.
+        assert!(e.matches(&parse("skill")), "kind keyword matches skill entry");
+        assert!(e.matches(&parse("skill review")), "kind keyword AND text term");
+        assert!(!e.matches(&parse("rule")), "kind keyword filters out non-rule");
+
+        // A rule-kinded entry is filtered out by `skill` and in by `rule`.
+        let r = CatalogEntry {
+            kind: Some("rule".to_string()),
+            ..e.clone()
+        };
+        assert!(r.matches(&parse("rule")), "rule keyword matches rule entry");
+        assert!(!r.matches(&parse("skill")), "skill keyword filters out rule entry");
     }
 }

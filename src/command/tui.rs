@@ -38,6 +38,11 @@ pub struct TuiArgs {
     #[arg(long)]
     pub registry: Option<String>,
 
+    /// Force a catalog rebuild even if the cache is fresh (governs the
+    /// initial load only; the interactive `r` key always forces a reload).
+    #[arg(long)]
+    pub refresh: bool,
+
     /// Browse against the global scope's lock/state instead of the
     /// discovered project.
     #[arg(long)]
@@ -89,6 +94,7 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
         catalog_path: ctx.paths().catalog_file(),
         access,
         offline: ctx.offline(),
+        force_refresh: args.refresh,
         scope: scope.scope,
         workspace: scope.workspace.clone(),
         lock_path: scope.lock_path.clone(),
@@ -140,6 +146,7 @@ mod tests {
         let ctx = Context::new(&opts());
         let a = TuiArgs {
             registry: Some("ghcr.io".to_string()),
+            refresh: false,
             global: false,
             config: None,
         };
@@ -151,6 +158,7 @@ mod tests {
         let ctx = Context::new(&opts());
         let a = TuiArgs {
             registry: None,
+            refresh: false,
             global: false,
             config: None,
         };

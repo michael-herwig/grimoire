@@ -4,11 +4,13 @@
 //! `grim search` — query the registry catalog.
 //!
 //! Loads (or refreshes) the cached [`Catalog`] for the resolved registry,
-//! filters entries whose repo / description / keywords contain the
-//! case-insensitive query (an empty query lists everything), and annotates
-//! each match with its install status derived from the discovered scope's
-//! lock + install-state via the shared [`derive_badge`] helper (the same
-//! derivation `grim status` uses — not duplicated here).
+//! filters entries with the shared [`SearchQuery`] matcher (whitespace-split
+//! AND of terms over kind / repo / summary / description / keywords, plus
+//! bare kind keywords — `skill`/`rule`/`bundle` and plurals — acting as kind
+//! filters; an empty query lists everything), and annotates each match with
+//! its install status derived from the discovered scope's lock + install-state
+//! via the shared [`derive_badge`] helper (the same derivation `grim status`
+//! uses — not duplicated here).
 //!
 //! State is data: `search` always exits 0, even with no results. Offline
 //! degrades — the catalog layer serves whatever is cached and never errors
@@ -17,6 +19,7 @@
 use clap::Args;
 
 use crate::api::search_report::{SearchEntry, SearchReport};
+use crate::catalog::SearchQuery;
 use crate::catalog::registry_catalog::Catalog;
 use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
@@ -30,8 +33,11 @@ use super::scope_resolution;
 /// `grim search` arguments.
 #[derive(Debug, Args)]
 pub struct SearchArgs {
-    /// Case-insensitive substring to match against repo / description /
-    /// keywords. Empty ⇒ list the whole catalog.
+    /// Search terms, whitespace-split and ANDed: each term substring-matches
+    /// (case-insensitive) any of kind / repo / summary / description /
+    /// keywords. A bare kind keyword (`skill`/`rule`/`bundle`, singular or
+    /// plural) filters by kind instead of matching as text. Empty ⇒ list the
+    /// whole catalog.
     pub query: Option<String>,
 
     /// Force a catalog rebuild even if the cache is fresh.
@@ -65,11 +71,23 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
 
     let access = super::access_seam(ctx)?;
     let catalog_path = ctx.paths().catalog_file();
-    let query = args.query.as_deref().unwrap_or("");
-    // The query doubles as the catalog's repository-name prefilter so a
-    // targeted search does not enumerate a (potentially huge) registry.
+    // Parse the raw query once: the in-memory matcher reuses it per row.
+    let parsed = SearchQuery::parse(args.query.as_deref().unwrap_or(""));
+    // The build's repository-name prefilter is derived from the parsed query,
+    // not the raw string: a single text term scopes the build cheaply; a
+    // multi-term or kind-keyword query yields an empty prefilter (no single
+    // substring can AND across terms) and builds the capped browse window,
+    // then narrows in memory below.
     let catalog = super::grim(
-        Catalog::load_or_refresh(&catalog_path, &registry, query, &access, ctx.offline(), args.refresh).await,
+        Catalog::load_or_refresh(
+            &catalog_path,
+            &registry,
+            parsed.prefilter_term(),
+            &access,
+            ctx.offline(),
+            args.refresh,
+        )
+        .await,
     )?;
 
     // Scope badges are best-effort: `search` is not scope-bound, so a
@@ -78,10 +96,11 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
     let (lock, state) = load_scope_best_effort(ctx, args);
 
     // The catalog was prefiltered by repo *name*; re-filter in memory so a
-    // description/keyword-only match still surfaces among the built set.
+    // summary/description/keyword-only match (and multi-term AND / kind
+    // filters) still narrows the built set correctly.
     let mut entries: Vec<SearchEntry> = catalog
         .entries()
-        .filter(|e| e.matches(query))
+        .filter(|e| e.matches(&parsed))
         .map(|e| SearchEntry {
             kind: e.kind.clone(),
             repo: e.repo(),

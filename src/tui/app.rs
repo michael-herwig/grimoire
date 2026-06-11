@@ -56,6 +56,10 @@ pub struct TuiContext {
     pub access: Arc<dyn OciAccess>,
     /// Whether this invocation is offline (degrade, never crash).
     pub offline: bool,
+    /// Whether the initial catalog load force-rebuilds even a fresh cache
+    /// (the `--refresh` flag). The interactive `r` key always forces a
+    /// reload regardless of this; this governs only the first load.
+    pub force_refresh: bool,
     /// The scope install/update materialize into.
     pub scope: ConfigScope,
     /// The workspace root targets are rooted at.
@@ -232,9 +236,11 @@ fn map_key(key: KeyEvent) -> Option<TuiInput> {
     })
 }
 
-/// Load the catalog (cold) into `state`, degrading on any failure.
+/// Load the catalog into `state` for the initial render, honouring the
+/// `--refresh` flag (`ctx.force_refresh`) so a fresh cache is rebuilt when
+/// asked. Degrades on any failure.
 async fn load_into(ctx: &TuiContext, state: &mut TuiState) {
-    reload_into(ctx, state, false).await;
+    reload_into(ctx, state, ctx.force_refresh).await;
 }
 
 /// Load or rebuild the catalog into `state`. `force` rebuilds even a
