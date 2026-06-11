@@ -69,16 +69,6 @@ pub fn resolve_default_registry(
         .map(str::to_string)
 }
 
-/// The effective default registry for expanding a short identifier when
-/// only one scope's config is in hand: precedence is `--registry` flag >
-/// `$GRIM_DEFAULT_REGISTRY` > the given config `[options].default_registry`.
-/// A thin wrapper over [`resolve_default_registry`] with no global-config
-/// fallback (callers that can also peek the global config call the helper
-/// directly).
-pub fn effective_default_registry(config_default: Option<&str>, ctx: &crate::context::Context) -> Option<String> {
-    resolve_default_registry(ctx, config_default, None)
-}
-
 /// The global config's `[options].default_registry`, loaded best-effort as
 /// the lowest-priority registry fallback. Returns `None` for a global-scope
 /// run — the global config is already that run's active scope, so consulting
