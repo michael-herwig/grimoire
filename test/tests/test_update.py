@@ -73,6 +73,52 @@ def test_update_named_only_touches_that_artifact(
     assert (project_dir / ".claude/rules/b.md").read_text() == "b1\n"
 
 
+def test_update_installs_newly_declared_rule(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    # Add-on-upgrade for a non-bundle, config-level addition: the
+    # declaration gains a new rule and the lock is refreshed (so the
+    # stale-lock guard stays out of the picture); a full `grim update`
+    # must then materialize the addition through the full-resolve path —
+    # even though it was never separately installed, the update's
+    # force-materialization writes it to disk.
+    a_repo = f"{unique_repo}/a"
+    make_artifact(a_repo, "rule", {"a.md": "a1\n"}, tag="latest")
+    write_config(project_dir, rules={"a": f"{registry}/{a_repo}:latest"})
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+    runner.run("install", check=False)
+    assert (project_dir / ".claude/rules/a.md").read_text() == "a1\n"
+
+    # Declare a second rule AND re-lock so the lock is not stale, then run a
+    # full update (no names) to exercise the add path via resolve_lock.
+    b_repo = f"{unique_repo}/b"
+    make_artifact(b_repo, "rule", {"b.md": "b1\n"}, tag="latest")
+    write_config(
+        project_dir,
+        rules={
+            "a": f"{registry}/{a_repo}:latest",
+            "b": f"{registry}/{b_repo}:latest",
+        },
+    )
+    runner.run("lock", check=False)
+    # The new rule is locked but not yet on disk — only `update` materializes it.
+    assert not (project_dir / ".claude/rules/b.md").exists()
+
+    rows = runner.json("update")
+    by_name = {r["name"]: r for r in rows}
+    # The newly declared rule appears in the update report with a real pin.
+    # Its action is `unchanged` (the re-lock above already established the
+    # pin, so the digest does not move during update) — the add-on-upgrade
+    # contract is the disk materialization below, not the diff label.
+    assert "b" in by_name
+    assert by_name["b"]["new"] is not None, "the locked rule carries a pin"
+    # The addition is materialized by the update; the pre-existing rule is
+    # untouched.
+    assert (project_dir / ".claude/rules/b.md").read_text() == "b1\n"
+    assert (project_dir / ".claude/rules/a.md").read_text() == "a1\n"
+
+
 def test_partial_update_with_stale_lock_exits_65(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
