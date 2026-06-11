@@ -6,13 +6,15 @@
 //! [`crate::install::materializer::DefaultMaterializer`] expects.
 //!
 //! The pack ↔ install round-trip is a hard contract: `pack_skill_dir`
-//! emits entries rooted at `<name>/` and `pack_rule_file` emits a single
-//! `<name>.md`, byte-for-byte what the materializer (and the acceptance
-//! harness `make_artifact`) extracts. The tar entries are emitted in
-//! sorted path order so the layer digest is deterministic.
+//! emits entries rooted at `<name>/`, while `pack_rule_file` and
+//! `pack_agent_file` emit a single `<name>.md` (the rule variant plus an
+//! optional support dir), byte-for-byte what the materializer (and the
+//! acceptance harness `make_artifact`) extracts. The tar entries are
+//! emitted in sorted path order so the layer digest is deterministic.
 
 use std::path::{Path, PathBuf};
 
+use super::agent_frontmatter::AgentFrontmatter;
 use super::rule_frontmatter::{ParsedRule, RuleFrontmatter};
 use super::skill_error::{SkillError, SkillErrorKind};
 use super::skill_frontmatter::SkillFrontmatter;
@@ -81,7 +83,37 @@ pub fn validate_rule_file(file: &Path) -> Result<RuleFrontmatter, SkillError> {
     Ok(frontmatter)
 }
 
-/// The rule's logical name: the file stem of a `.md` file.
+/// Validate the agent file at `file`.
+///
+/// An agent is a single `.md` file whose frontmatter is **required** and
+/// must carry `name` + `description`; the frontmatter `name` must equal
+/// the file stem (the OpenCode filename-as-identity rule, enforced for
+/// every client so the identity is consistent).
+///
+/// # Errors
+///
+/// [`SkillErrorKind::Io`], [`SkillErrorKind::NameInvalid`],
+/// [`SkillErrorKind::NameMismatch`],
+/// [`SkillErrorKind::MissingFrontmatter`], or
+/// [`SkillErrorKind::FrontmatterParse`].
+pub fn validate_agent_file(file: &Path) -> Result<AgentFrontmatter, SkillError> {
+    let stem = rule_name(file)?;
+    SkillName::parse(&stem).map_err(|e| SkillError::new(file, SkillErrorKind::NameInvalid(e)))?;
+    let doc = std::fs::read_to_string(file).map_err(|e| SkillError::new(file, SkillErrorKind::Io(e)))?;
+    let parsed = AgentFrontmatter::parse_doc(&doc, file)?;
+    if parsed.frontmatter.name.as_str() != stem {
+        return Err(SkillError::new(
+            file,
+            SkillErrorKind::NameMismatch {
+                frontmatter: parsed.frontmatter.name.to_string(),
+                dir: stem,
+            },
+        ));
+    }
+    Ok(parsed.frontmatter)
+}
+
+/// The rule's (or agent's) logical name: the file stem of a `.md` file.
 fn rule_name(file: &Path) -> Result<String, SkillError> {
     let stem = file
         .file_stem()
@@ -160,6 +192,29 @@ pub fn pack_rule_file(file: &Path) -> Result<Vec<u8>, SkillError> {
         let bytes = std::fs::read(abs).map_err(|e| SkillError::new(abs, SkillErrorKind::Io(e)))?;
         append_entry(&mut builder, entry_path, &bytes).map_err(|e| SkillError::new(abs, SkillErrorKind::Io(e)))?;
     }
+    builder
+        .into_inner()
+        .map_err(|e| SkillError::new(file, SkillErrorKind::Io(e)))
+}
+
+/// Pack the agent file at `file` into an uncompressed tar with exactly one
+/// `<name>.md` entry.
+///
+/// Unlike [`pack_rule_file`], a sibling directory sharing the stem is
+/// **not** packed — agents have no support-directory contract (every
+/// client reads a standalone agent file). The single stable-header entry
+/// makes the layer digest deterministic.
+///
+/// # Errors
+///
+/// [`SkillErrorKind::Io`] for a read failure,
+/// [`SkillErrorKind::NameInvalid`] for a stem-less path.
+pub fn pack_agent_file(file: &Path) -> Result<Vec<u8>, SkillError> {
+    let name = rule_name(file)?;
+    let bytes = std::fs::read(file).map_err(|e| SkillError::new(file, SkillErrorKind::Io(e)))?;
+    let mut builder = tar::Builder::new(Vec::new());
+    append_entry(&mut builder, &format!("{name}.md"), &bytes)
+        .map_err(|e| SkillError::new(file, SkillErrorKind::Io(e)))?;
     builder
         .into_inner()
         .map_err(|e| SkillError::new(file, SkillErrorKind::Io(e)))
@@ -383,6 +438,83 @@ mod tests {
         let first = pack_rule_file(&f).unwrap();
         let second = pack_rule_file(&f).unwrap();
         assert_eq!(first, second, "multi-file rule pack must be byte-stable");
+    }
+
+    #[test]
+    fn validate_agent_file_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("code-reviewer.md");
+        write(
+            &f,
+            "---\nname: code-reviewer\ndescription: Reviews diffs.\n---\nYou review code.\n",
+        );
+        let fm = validate_agent_file(&f).expect("valid agent");
+        assert_eq!(fm.name.as_str(), "code-reviewer");
+        assert_eq!(fm.description.as_str(), "Reviews diffs.");
+    }
+
+    #[test]
+    fn validate_agent_file_name_stem_mismatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("code-reviewer.md");
+        write(&f, "---\nname: other-name\ndescription: d\n---\nbody\n");
+        let err = validate_agent_file(&f).expect_err("stem mismatch");
+        assert!(matches!(err.kind, SkillErrorKind::NameMismatch { .. }));
+    }
+
+    #[test]
+    fn validate_agent_file_requires_frontmatter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("agent.md");
+        write(&f, "no frontmatter at all\n");
+        let err = validate_agent_file(&f).expect_err("agent frontmatter is required");
+        assert!(matches!(err.kind, SkillErrorKind::MissingFrontmatter));
+    }
+
+    #[test]
+    fn validate_agent_file_bad_stem() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("Bad_Name.md");
+        write(&f, "---\nname: Bad_Name\ndescription: d\n---\n");
+        assert!(matches!(
+            validate_agent_file(&f).expect_err("bad name").kind,
+            SkillErrorKind::NameInvalid(_)
+        ));
+    }
+
+    #[test]
+    fn pack_agent_round_trips_through_materializer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("code-reviewer.md");
+        let doc = "---\nname: code-reviewer\ndescription: d\n---\nYou review code.\n";
+        write(&f, doc);
+        let tar = pack_agent_file(&f).expect("pack");
+        let dest = tmp.path().join("out");
+        let written = DefaultMaterializer
+            .materialize(ArtifactKind::Agent, "code-reviewer", &tar, &dest)
+            .expect("materialize");
+        assert_eq!(written, vec![PathBuf::from("code-reviewer.md")]);
+        assert_eq!(std::fs::read_to_string(dest.join("code-reviewer.md")).unwrap(), doc);
+    }
+
+    #[test]
+    fn pack_agent_ignores_sibling_dir_and_is_deterministic() {
+        // Agents have no support-directory contract: a sibling dir sharing
+        // the stem must NOT be packed (unlike rules).
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("my-agent.md");
+        write(&f, "---\nname: my-agent\ndescription: d\n---\nbody\n");
+        write(&tmp.path().join("my-agent/extra.md"), "# ignored\n");
+
+        let first = pack_agent_file(&f).unwrap();
+        let second = pack_agent_file(&f).unwrap();
+        assert_eq!(first, second, "agent pack must be byte-stable");
+
+        let dest = tmp.path().join("out");
+        let written = DefaultMaterializer
+            .materialize(ArtifactKind::Agent, "my-agent", &first, &dest)
+            .expect("materialize");
+        assert_eq!(written, vec![PathBuf::from("my-agent.md")], "single entry only");
     }
 
     #[test]

@@ -23,7 +23,7 @@ use std::collections::BTreeMap;
 
 use crate::oci::ArtifactKind;
 use crate::oci::manifest::OciManifest;
-use crate::skill::{RuleFrontmatter, SkillFrontmatter};
+use crate::skill::{AgentFrontmatter, RuleFrontmatter, SkillFrontmatter};
 
 /// Infer the artifact kind from a pulled manifest's OCI type: the
 /// `artifactType` first, then the config descriptor's media type as a
@@ -107,6 +107,33 @@ pub fn annotations_for_rule(
     }
     if let Some(summary) = string_from_extra(fm, "summary") {
         a.insert("com.grimoire.summary".to_string(), summary);
+    }
+    a
+}
+
+/// Build the manifest annotation map for an agent.
+///
+/// Agents carry a real `name`/`description` in their required frontmatter
+/// (like skills); catalog metadata (`keywords`, `summary`) comes from the
+/// `metadata` map. The map stays deterministic (no wall-clock `created`)
+/// so re-release is idempotent — see [`annotations_for_skill`].
+pub fn annotations_for_agent(fm: &AgentFrontmatter, version: &str, source: Option<&str>) -> BTreeMap<String, String> {
+    let mut a = BTreeMap::new();
+    a.insert("org.opencontainers.image.title".to_string(), fm.name.to_string());
+    a.insert(
+        "org.opencontainers.image.description".to_string(),
+        fm.description.to_string(),
+    );
+    a.insert("org.opencontainers.image.version".to_string(), version.to_string());
+    if let Some(src) = source {
+        a.insert("org.opencontainers.image.source".to_string(), src.to_string());
+    }
+    // Omitted `created` for idempotent re-release — see `annotations_for_skill`.
+    if let Some(kw) = fm.metadata.get("keywords") {
+        a.insert("com.grimoire.keywords".to_string(), kw.clone());
+    }
+    if let Some(summary) = fm.metadata.get("summary") {
+        a.insert("com.grimoire.summary".to_string(), summary.clone());
     }
     a
 }
@@ -296,6 +323,32 @@ mod tests {
         let parsed = RuleFrontmatter::parse_doc(doc, Path::new("r.md")).unwrap();
         let a = annotations_for_rule("r", &parsed.frontmatter, &parsed.body, "1.0.0", None);
         assert!(!a.contains_key("com.grimoire.keywords"));
+    }
+
+    #[test]
+    fn agent_annotations_are_deterministic_and_complete() {
+        let doc = "---\nname: code-reviewer\ndescription: Reviews diffs.\nmodel: sonnet\nmetadata:\n  keywords: review,agent\n  summary: terse blurb\n---\nbody\n";
+        let parsed = AgentFrontmatter::parse_doc(doc, Path::new("code-reviewer.md")).unwrap();
+        let a = annotations_for_agent(&parsed.frontmatter, "1.0.0", Some("ghcr.io/acme/code-reviewer:1.0.0"));
+        assert_eq!(a["org.opencontainers.image.title"], "code-reviewer");
+        assert_eq!(a["org.opencontainers.image.description"], "Reviews diffs.");
+        assert_eq!(a["org.opencontainers.image.version"], "1.0.0");
+        assert_eq!(a["org.opencontainers.image.source"], "ghcr.io/acme/code-reviewer:1.0.0");
+        assert_eq!(a["com.grimoire.keywords"], "review,agent");
+        assert_eq!(a["com.grimoire.summary"], "terse blurb");
+        assert!(!a.contains_key("org.opencontainers.image.created"));
+        let b = annotations_for_agent(&parsed.frontmatter, "1.0.0", Some("ghcr.io/acme/code-reviewer:1.0.0"));
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn agent_without_catalog_metadata_omits_optional_keys() {
+        let doc = "---\nname: a\ndescription: d\n---\nbody\n";
+        let parsed = AgentFrontmatter::parse_doc(doc, Path::new("a.md")).unwrap();
+        let a = annotations_for_agent(&parsed.frontmatter, "0.1.0", None);
+        assert!(!a.contains_key("org.opencontainers.image.source"));
+        assert!(!a.contains_key("com.grimoire.keywords"));
+        assert!(!a.contains_key("com.grimoire.summary"));
     }
 
     #[test]
