@@ -9,7 +9,7 @@
 //! ([`super::app`]) drives these transitions; [`super::render`] projects
 //! the state for display.
 
-use super::tree;
+use crate::catalog::SearchQuery;
 
 /// The install state of a catalog repository relative to the active
 /// scope, as shown in the TUI.
@@ -64,17 +64,6 @@ pub enum Mode {
     Help,
     /// Choosing a specific version for the selected row from a popup.
     VersionPick,
-}
-
-/// Which catalog view the list is showing.
-///
-/// Closed internal enum — matches stay total, no `#[non_exhaustive]`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ViewMode {
-    /// The flat, filterable list (the default; search operates here).
-    Flat,
-    /// The collapsible tree grouped by the OCI identifier path.
-    Tree,
 }
 
 /// The modal version picker: the row it targets, the fetched tags, and the
@@ -145,13 +134,9 @@ pub struct TuiState {
     pub scope_label: String,
     /// The active version picker, when [`Mode::VersionPick`].
     pub picker: Option<VersionPicker>,
-    /// Whether the list is flat or the grouped tree.
-    pub view_mode: ViewMode,
-    /// Collapsed group keys (tree mode). Persists across rebuilds and
-    /// scope toggles — an unknown key (after a reload) is simply inert.
-    pub collapsed: std::collections::BTreeSet<String>,
     /// The effective default registry; when a row's registry host equals
-    /// it the registry root is elided from the tree (shorter names).
+    /// it the registry prefix is elided from the displayed name (shorter
+    /// names) while the stored `repo` keeps the full reference.
     pub default_registry: Option<String>,
     /// The active scope's effective selected client names (`claude`,
     /// `opencode`, …), surfaced in the status area. Pure display data — no
@@ -173,8 +158,6 @@ impl Default for TuiState {
             marked: std::collections::BTreeSet::new(),
             scope_label: String::new(),
             picker: None,
-            view_mode: ViewMode::Flat,
-            collapsed: std::collections::BTreeSet::new(),
             default_registry: None,
             clients: Vec::new(),
         }
@@ -187,9 +170,21 @@ impl TuiState {
         Self::default()
     }
 
-    /// Replace the catalog rows (a load completed). The filter is
-    /// recomputed against the current query and the selection is clamped.
-    pub fn set_rows(&mut self, rows: Vec<TuiRow>) {
+    /// Replace the catalog rows (a load completed). Rows are sorted once
+    /// here — grouped by kind, then by case-insensitive leaf name — so the
+    /// flat list always reads in a stable order and every downstream index
+    /// (`filtered`, `marked`, app.rs batch targets) refers to the sorted
+    /// order. This is the single choke point: marks are cleared below and
+    /// app.rs derives per-row state by the `repo` string, never by a row
+    /// index cached across a `set_rows` call, so sorting here is safe.
+    pub fn set_rows(&mut self, mut rows: Vec<TuiRow>) {
+        rows.sort_by(|a, b| {
+            a.kind.cmp(&b.kind).then_with(|| {
+                leaf_name(&a.repo)
+                    .to_lowercase()
+                    .cmp(&leaf_name(&b.repo).to_lowercase())
+            })
+        });
         self.rows = rows;
         self.loading = false;
         self.recompute_filter();
@@ -199,42 +194,14 @@ impl TuiState {
         self.marked.clear();
     }
 
-    /// The flattened tree lines for the current rows + collapsed set.
-    /// Rebuilt on demand (no cache) so a group rollup always reflects the
-    /// freshest per-row state, including after an install/update/scope
-    /// change mutates `rows` in place.
-    pub fn flattened(&self) -> Vec<tree::DisplayRow> {
-        let t = tree::build(&self.rows, self.default_registry.as_deref());
-        tree::flatten(&t, &self.collapsed)
-    }
-
-    /// Number of selectable lines in the active view.
+    /// Number of selectable rows (the filtered view).
     fn display_len(&self) -> usize {
-        match self.view_mode {
-            ViewMode::Flat => self.filtered.len(),
-            ViewMode::Tree => self.flattened().len(),
-        }
+        self.filtered.len()
     }
 
-    /// The `rows` index of the current selection, if any. In tree mode a
-    /// group line has no single row, so this is `None` there.
+    /// The `rows` index of the current selection, if any.
     pub fn selected_row_index(&self) -> Option<usize> {
-        match self.view_mode {
-            ViewMode::Flat => self.filtered.get(self.selected).copied(),
-            ViewMode::Tree => match self.flattened().get(self.selected)? {
-                tree::DisplayRow::Leaf { row, .. } => Some(*row),
-                tree::DisplayRow::Group { .. } => None,
-            },
-        }
-    }
-
-    /// Whether the current selection is a tree group line.
-    pub fn selected_is_group(&self) -> bool {
-        self.view_mode == ViewMode::Tree
-            && matches!(
-                self.flattened().get(self.selected),
-                Some(tree::DisplayRow::Group { .. })
-            )
+        self.filtered.get(self.selected).copied()
     }
 
     /// Whether the row at `rows` index `i` is marked.
@@ -242,25 +209,9 @@ impl TuiState {
         self.marked.contains(&i)
     }
 
-    /// Toggle the mark on the current selection. On a tree group this
-    /// marks every descendant leaf (smart toggle: clears them instead
-    /// when all are already marked). No-op without a selectable target.
+    /// Toggle the mark on the current selection. No-op without a
+    /// selectable target.
     pub fn toggle_mark_selected(&mut self) {
-        if self.view_mode == ViewMode::Tree
-            && let Some(tree::DisplayRow::Group { rows, .. }) = self.flattened().get(self.selected)
-        {
-            if rows.is_empty() {
-                return;
-            }
-            if rows.iter().all(|i| self.marked.contains(i)) {
-                for i in rows {
-                    self.marked.remove(i);
-                }
-            } else {
-                self.marked.extend(rows.iter().copied());
-            }
-            return;
-        }
         if let Some(i) = self.selected_row_index()
             && !self.marked.insert(i)
         {
@@ -293,15 +244,7 @@ impl TuiState {
         if !self.marked.is_empty() {
             return self.marked.iter().copied().collect();
         }
-        // No marks: the single selection — or, on a tree group, every
-        // descendant leaf (act on a whole group with one keypress).
-        if self.view_mode == ViewMode::Tree {
-            return match self.flattened().get(self.selected) {
-                Some(tree::DisplayRow::Leaf { row, .. }) => vec![*row],
-                Some(tree::DisplayRow::Group { rows, .. }) => rows.clone(),
-                None => Vec::new(),
-            };
-        }
+        // No marks: the single selection.
         self.selected_row_index().into_iter().collect()
     }
 
@@ -351,65 +294,9 @@ impl TuiState {
         self.selected = next as usize;
     }
 
-    /// Clamp the selection into the active view's visible range (used
-    /// after a collapse/expand changes how many lines are visible).
-    fn clamp_display_selection(&mut self) {
-        let len = self.display_len();
-        if len == 0 {
-            self.selected = 0;
-        } else if self.selected >= len {
-            self.selected = len - 1;
-        }
-    }
-
-    /// Set the effective default registry (elided as the tree root).
+    /// Set the effective default registry (elided from displayed names).
     pub fn set_default_registry(&mut self, registry: Option<String>) {
         self.default_registry = registry;
-    }
-
-    /// Flip between the flat list and the grouped tree. A no-op while
-    /// searching — search operates on the flat list only.
-    pub fn toggle_view_mode(&mut self) {
-        if self.mode == Mode::Search {
-            return;
-        }
-        self.view_mode = match self.view_mode {
-            ViewMode::Flat => ViewMode::Tree,
-            ViewMode::Tree => ViewMode::Flat,
-        };
-        self.selected = 0;
-    }
-
-    /// Collapse or expand the selected tree group. No-op unless a group
-    /// line is selected in tree mode.
-    pub fn toggle_collapse_selected(&mut self) {
-        if let Some(tree::DisplayRow::Group { key, collapsed, .. }) = self.flattened().get(self.selected) {
-            if *collapsed {
-                self.collapsed.remove(key);
-            } else {
-                let key = key.clone();
-                self.collapsed.insert(key);
-            }
-            self.clamp_display_selection();
-        }
-    }
-
-    /// Expand the selected tree group (if collapsed). No-op otherwise.
-    pub fn expand_selected(&mut self) {
-        if let Some(tree::DisplayRow::Group { key, .. }) = self.flattened().get(self.selected) {
-            let key = key.clone();
-            self.collapsed.remove(&key);
-            self.clamp_display_selection();
-        }
-    }
-
-    /// Collapse the selected tree group (if expanded). No-op otherwise.
-    pub fn collapse_selected(&mut self) {
-        if let Some(tree::DisplayRow::Group { key, .. }) = self.flattened().get(self.selected) {
-            let key = key.clone();
-            self.collapsed.insert(key);
-            self.clamp_display_selection();
-        }
     }
 
     /// Enter the detail pane for the current selection. A no-op when there
@@ -420,13 +307,8 @@ impl TuiState {
         }
     }
 
-    /// Enter search-edit mode. Search operates on the flat list, so this
-    /// drops out of tree view (the user re-presses `t` to return).
+    /// Enter search-edit mode.
     pub fn enter_search(&mut self) {
-        if self.view_mode == ViewMode::Tree {
-            self.view_mode = ViewMode::Flat;
-            self.selected = 0;
-        }
         self.mode = Mode::Search;
     }
 
@@ -496,27 +378,24 @@ impl TuiState {
         self.mode = Mode::List;
     }
 
-    /// The currently selected row, if any (a tree group has none).
+    /// The currently selected row, if any.
     pub fn selected_row(&self) -> Option<&TuiRow> {
         self.selected_row_index().and_then(|i| self.rows.get(i))
     }
 
-    /// Recompute `filtered` from `rows` against the current query
-    /// (case-insensitive substring over repo / summary / description /
-    /// keywords).
+    /// Recompute `filtered` from `rows` against the current query using the
+    /// shared [`SearchQuery`] matcher, so the TUI search bar and `grim
+    /// search` apply identical semantics: whitespace-split AND-of-terms over
+    /// kind / repo / summary / description / keywords, plus bare kind
+    /// keywords (`skill`/`rule`/`bundle` ± plural) that filter by kind. The
+    /// query is parsed once, then every row is matched against it.
     fn recompute_filter(&mut self) {
-        let q = self.query.to_lowercase();
+        let query = SearchQuery::parse(&self.query);
         self.filtered = self
             .rows
             .iter()
             .enumerate()
-            .filter(|(_, r)| {
-                q.is_empty()
-                    || r.repo.to_lowercase().contains(&q)
-                    || r.summary.to_lowercase().contains(&q)
-                    || r.description.to_lowercase().contains(&q)
-                    || r.keywords.iter().any(|k| k.to_lowercase().contains(&q))
-            })
+            .filter(|(_, r)| query.matches_fields(Some(&r.kind), &r.repo, &r.summary, &r.description, &r.keywords))
             .map(|(i, _)| i)
             .collect();
     }
@@ -529,6 +408,13 @@ impl TuiState {
             self.selected = self.filtered.len() - 1;
         }
     }
+}
+
+/// The trailing name segment of a `registry/repository` reference — the
+/// sort key for the flat list within a kind group. Falls back to the whole
+/// string when there is no `/`.
+fn leaf_name(repo: &str) -> &str {
+    repo.rsplit('/').next().unwrap_or(repo)
 }
 
 #[cfg(test)]
@@ -751,76 +637,61 @@ mod tests {
         assert_eq!(s.selected_row().unwrap().repo, "r/delta");
     }
 
-    fn tree_seeded() -> TuiState {
+    #[test]
+    fn set_rows_sorts_by_kind_then_case_insensitive_name() {
         let mut s = TuiState::new();
-        s.set_default_registry(Some("reg".to_string()));
+        // Shuffled input across two kinds and mixed case.
+        let mut z_rule = row("r/Zeta", "d", &[], ArtifactState::NotInstalled);
+        z_rule.kind = "rule".to_string();
+        let mut a_rule = row("r/alpha", "d", &[], ArtifactState::NotInstalled);
+        a_rule.kind = "rule".to_string();
+        let z_skill = row("r/zulu", "d", &[], ArtifactState::NotInstalled); // skill
+        let a_skill = row("r/Bravo", "d", &[], ArtifactState::NotInstalled); // skill
+        s.set_rows(vec![z_skill, z_rule, a_skill, a_rule]);
+        // Grouped by kind (rule < skill), then case-insensitive leaf name.
+        let order: Vec<(&str, &str)> = s.rows.iter().map(|r| (r.kind.as_str(), r.repo.as_str())).collect();
+        assert_eq!(
+            order,
+            vec![
+                ("rule", "r/alpha"),
+                ("rule", "r/Zeta"),
+                ("skill", "r/Bravo"),
+                ("skill", "r/zulu"),
+            ]
+        );
+    }
+
+    #[test]
+    fn filter_is_multi_term_and_via_shared_matcher() {
+        let mut s = TuiState::new();
         s.set_rows(vec![
-            row("reg/acme/alpha", "a", &[], ArtifactState::Installed),
-            row("reg/acme/beta", "b", &[], ArtifactState::NotInstalled),
-            row("reg/other", "c", &[], ArtifactState::Installed),
+            row("acme/rust-style", "d", &["lint"], ArtifactState::NotInstalled),
+            row("acme/python", "d", &["lint"], ArtifactState::NotInstalled),
         ]);
-        s
+        // Both terms must hit (one in repo, one in keywords) — AND, not OR.
+        s.apply_query("rust lint");
+        assert_eq!(s.filtered.len(), 1);
+        assert_eq!(s.selected_row().unwrap().repo, "acme/rust-style");
+        // A single term that only one row carries still matches just that row.
+        s.apply_query("python");
+        assert_eq!(s.filtered.len(), 1);
+        assert_eq!(s.selected_row().unwrap().repo, "acme/python");
     }
 
     #[test]
-    fn view_toggle_flips_and_is_inert_while_searching() {
-        let mut s = tree_seeded();
-        assert_eq!(s.view_mode, ViewMode::Flat);
-        s.move_selection(2);
-        s.toggle_view_mode();
-        assert_eq!(s.view_mode, ViewMode::Tree);
-        assert_eq!(s.selected, 0, "selection resets on view switch");
-        // Entering search forces back to the flat list.
-        s.enter_search();
-        assert_eq!(s.view_mode, ViewMode::Flat);
-        s.toggle_view_mode(); // no-op while searching
-        assert_eq!(s.view_mode, ViewMode::Flat);
-    }
-
-    #[test]
-    fn tree_group_selection_targets_every_descendant() {
-        let mut s = tree_seeded();
-        s.toggle_view_mode();
-        // Flattened: [acme(group,0), alpha(leaf,1), beta(leaf,1), other(leaf,0)].
-        assert!(s.selected_is_group());
-        // No marks ⇒ the group action targets both descendant leaves.
-        assert_eq!(s.action_targets(), vec![0, 1]);
-        // Space on a group marks every descendant; again clears them.
-        s.toggle_mark_selected();
-        assert!(s.is_row_marked(0) && s.is_row_marked(1));
-        assert!(!s.is_row_marked(2));
-        s.toggle_mark_selected();
-        assert!(s.marked.is_empty(), "smart toggle clears a fully-marked group");
-        // A leaf selection targets just its row.
-        s.move_selection(3); // the top-level `other` leaf (rows index 2)
-        assert!(!s.selected_is_group());
-        assert_eq!(s.action_targets(), vec![2]);
-    }
-
-    #[test]
-    fn collapse_hides_descendants_and_clamps_selection() {
-        let mut s = tree_seeded();
-        s.toggle_view_mode();
-        s.move_selection(3); // select the last visible line
-        assert_eq!(s.selected, 3);
-        // Collapsing `acme` removes alpha+beta ⇒ 2 visible lines; the
-        // selection clamps back into range.
-        s.selected = 0;
-        s.collapse_selected();
-        assert!(s.collapsed.contains("acme"));
-        assert_eq!(s.flattened().len(), 2);
-        s.move_selection(99);
-        assert_eq!(s.selected, 1, "selection stays in the collapsed range");
-        s.expand_selected(); // selection is on `other`, not a group ⇒ no-op
-        assert!(s.collapsed.contains("acme"));
-    }
-
-    #[test]
-    fn marks_survive_view_toggle() {
-        let mut s = tree_seeded();
-        s.toggle_mark_selected(); // flat: mark rows index 0
-        assert!(s.is_row_marked(0));
-        s.toggle_view_mode();
-        assert!(s.is_row_marked(0), "marks are keyed by row index, not view");
+    fn filter_bare_kind_keyword_filters_by_kind() {
+        let mut s = TuiState::new();
+        let skill = row("acme/code-review", "d", &[], ArtifactState::NotInstalled);
+        let mut rule = row("acme/rust-style", "d", &[], ArtifactState::NotInstalled);
+        rule.kind = "rule".to_string();
+        s.set_rows(vec![skill, rule]);
+        // A bare kind keyword filters by kind, not as a literal text term.
+        s.apply_query("rule");
+        assert_eq!(s.filtered.len(), 1);
+        assert_eq!(s.selected_row().unwrap().kind, "rule");
+        // Kind keyword AND a text term: kind==skill and `review` in the repo.
+        s.apply_query("skill review");
+        assert_eq!(s.filtered.len(), 1);
+        assert_eq!(s.selected_row().unwrap().repo, "acme/code-review");
     }
 }

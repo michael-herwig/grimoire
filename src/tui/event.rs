@@ -43,12 +43,6 @@ pub enum TuiInput {
     ClearMarks,
     /// Toggle the active scope (Global ⇄ Project).
     ScopeToggle,
-    /// Toggle the flat list ⇄ grouped tree view.
-    ViewToggle,
-    /// Expand the selected tree group.
-    Expand,
-    /// Collapse the selected tree group.
-    Collapse,
     /// Show the keybinding help overlay.
     Help,
     /// Open the version picker for the selected row.
@@ -182,9 +176,6 @@ fn handle_search(state: &mut TuiState, input: TuiInput) -> TuiAction {
         | TuiInput::MarkAll
         | TuiInput::ClearMarks
         | TuiInput::ScopeToggle
-        | TuiInput::ViewToggle
-        | TuiInput::Expand
-        | TuiInput::Collapse
         | TuiInput::Help
         | TuiInput::Versions
         | TuiInput::Refresh => TuiAction::None,
@@ -214,13 +205,7 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
             TuiAction::None
         }
         TuiInput::Enter => {
-            // On a tree group, Enter folds/unfolds it; on a leaf (or in
-            // flat view) it opens the detail pane as before.
-            if state.selected_is_group() {
-                state.toggle_collapse_selected();
-            } else {
-                state.enter_detail();
-            }
+            state.enter_detail();
             TuiAction::None
         }
         TuiInput::Esc => {
@@ -253,18 +238,6 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
         }
         TuiInput::Char('r') | TuiInput::Refresh => TuiAction::Refresh,
         TuiInput::Char('g') | TuiInput::ScopeToggle => TuiAction::ToggleScope,
-        TuiInput::Char('t') | TuiInput::ViewToggle => {
-            state.toggle_view_mode();
-            TuiAction::None
-        }
-        TuiInput::Expand => {
-            state.expand_selected();
-            TuiAction::None
-        }
-        TuiInput::Collapse => {
-            state.collapse_selected();
-            TuiAction::None
-        }
         TuiInput::Char('?') | TuiInput::Help => {
             state.enter_help();
             TuiAction::None
@@ -513,15 +486,19 @@ mod tests {
         let mut s = seeded();
         handle(&mut s, TuiInput::Char('/'));
         assert_eq!(s.mode, Mode::Search);
-        // 'i' in search mode is a literal character, NOT install.
+        // 'i' in search mode is a literal query character, NOT install.
         assert_eq!(handle(&mut s, TuiInput::Char('i')), TuiAction::None);
         assert_eq!(s.query, "i");
-        // No repo contains 'i' here ⇒ empty filter.
-        assert!(s.filtered.is_empty());
-        // Backspace clears it.
+        // Backspace clears it; an empty query matches everything again.
         handle(&mut s, TuiInput::Backspace);
         assert_eq!(s.query, "");
         assert_eq!(s.filtered.len(), 3);
+        // A character absent from every field ⇒ empty filter (proves the
+        // shared matcher actually narrows, not that 'i' is special).
+        handle(&mut s, TuiInput::Char('z'));
+        assert_eq!(s.query, "z");
+        assert!(s.filtered.is_empty());
+        handle(&mut s, TuiInput::Backspace);
         // Enter commits the (empty) query, back to list.
         assert_eq!(handle(&mut s, TuiInput::Enter), TuiAction::None);
         assert_eq!(s.mode, Mode::List);
@@ -542,58 +519,26 @@ mod tests {
         assert_eq!(handle(&mut s, TuiInput::Quit), TuiAction::Quit);
     }
 
-    fn tree_state() -> TuiState {
-        let mut s = TuiState::new();
-        s.set_default_registry(Some("reg".to_string()));
-        s.set_rows(vec![row("reg/acme/a"), row("reg/acme/b")]);
-        s
-    }
-
     #[test]
-    fn t_toggles_tree_and_group_action_targets_descendants() {
-        let mut s = tree_state();
-        assert_eq!(handle(&mut s, TuiInput::Char('t')), TuiAction::None);
-        assert_eq!(s.view_mode, crate::tui::state::ViewMode::Tree);
-        // Selection rests on the `acme` group ⇒ one keypress acts on all.
-        assert!(s.selected_is_group());
-        assert_eq!(
-            handle(&mut s, TuiInput::Install),
-            TuiAction::Batch {
-                op: BatchOp::Install,
-                rows: vec![0, 1]
-            }
-        );
-        // The abstract input maps the same as the hotkey.
-        let mut s2 = tree_state();
-        assert_eq!(handle(&mut s2, TuiInput::ViewToggle), TuiAction::None);
-        assert_eq!(s2.view_mode, crate::tui::state::ViewMode::Tree);
-    }
-
-    #[test]
-    fn enter_folds_a_group_and_expand_collapse_inputs_work() {
-        let mut s = tree_state();
-        handle(&mut s, TuiInput::Char('t')); // → tree
-        // Enter on a group folds it (it does NOT open the detail pane).
+    fn enter_in_browse_always_opens_detail() {
+        // With the tree removed there is no group branch — Enter always
+        // opens the detail pane for the selected row.
+        let mut s = seeded();
+        s.move_selection(1);
         assert_eq!(handle(&mut s, TuiInput::Enter), TuiAction::None);
-        assert_eq!(s.mode, Mode::List);
-        assert_eq!(s.flattened().len(), 1, "descendants hidden");
-        // Expand re-opens it; Collapse folds it again.
-        assert_eq!(handle(&mut s, TuiInput::Expand), TuiAction::None);
-        assert_eq!(s.flattened().len(), 3);
-        assert_eq!(handle(&mut s, TuiInput::Collapse), TuiAction::None);
-        assert_eq!(s.flattened().len(), 1);
+        assert_eq!(s.mode, Mode::Detail);
+        assert_eq!(s.selected_row().unwrap().repo, "r/b");
     }
 
     #[test]
-    fn t_is_a_literal_query_char_while_searching() {
-        let mut s = tree_state();
+    fn t_is_inert_in_browse_and_literal_in_search() {
+        let mut s = seeded();
+        // `t` no longer toggles anything in list mode (tree removed).
+        assert_eq!(handle(&mut s, TuiInput::Char('t')), TuiAction::None);
+        assert_eq!(s.mode, Mode::List);
+        // In search it is just a literal query char.
         handle(&mut s, TuiInput::Char('/'));
         assert_eq!(handle(&mut s, TuiInput::Char('t')), TuiAction::None);
         assert_eq!(s.query, "t");
-        assert_eq!(
-            s.view_mode,
-            crate::tui::state::ViewMode::Flat,
-            "search never enters tree"
-        );
     }
 }

@@ -16,8 +16,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
-use super::state::{ArtifactState, Mode, TuiState, ViewMode};
-use super::tree::DisplayRow;
+use super::state::{ArtifactState, Mode, TuiState};
 
 /// A pure, ratatui-free color tag for a status cell. [`draw`] maps it to a
 /// concrete ratatui [`Color`]; keeping it abstract preserves the headless
@@ -47,15 +46,6 @@ fn status_view(state: ArtifactState) -> (&'static str, &'static str, ColorKey) {
         ArtifactState::Outdated => ("↑", "outdated", ColorKey::Outdated),
         ArtifactState::Modified => ("✱", "modified", ColorKey::Modified),
         ArtifactState::IntegrityMissing => ("✘", "integrity-missing", ColorKey::IntegrityMissing),
-    }
-}
-
-/// Glyph for an artifact kind (`skill` / `rule`, else a neutral dot).
-fn kind_glyph(kind: &str) -> &'static str {
-    match kind {
-        "skill" => "◆",
-        "rule" => "▸",
-        _ => "•",
     }
 }
 
@@ -128,6 +118,10 @@ pub struct RenderModel {
     /// The active scope label (`project` / `global`), shown in its own
     /// box beside the search; empty when no scope is resolvable.
     pub scope: String,
+    /// The active scope's effective selected clients, pre-joined as
+    /// `clients: a, b` for the legend line; empty when none are selected
+    /// (the span is then omitted entirely).
+    pub clients: String,
     /// Static column headers for the list.
     pub headers: [&'static str; 4],
     /// The visible (filtered) rows.
@@ -180,10 +174,8 @@ fn strip_default_registry<'a>(repo: &'a str, default_registry: Option<&str>) -> 
     repo
 }
 
-/// Build the visible cells for one catalog leaf. `repo_text` is the
-/// Repo-column content (the full reference in flat mode, the indented
-/// bare name in tree mode); everything else is identical, so flat and
-/// tree share one projection.
+/// Build the visible cells for one catalog row. `repo_text` is the
+/// Repo-column content (the full reference, default registry elided).
 fn render_leaf(r: &super::state::TuiRow, repo_text: &str, selected: bool, marked: bool) -> RenderRow {
     let (glyph, label, color) = status_view(r.state);
     // A user-pinned version shows with a leading `*`; otherwise the
@@ -196,77 +188,13 @@ fn render_leaf(r: &super::state::TuiRow, repo_text: &str, selected: bool, marked
     RenderRow {
         columns: [
             fit(repo_text, W_REPO),
-            fit(&format!("{} {}", kind_glyph(&r.kind), r.kind), W_KIND),
+            fit(&r.kind, W_KIND),
             fit(&tag_cell, W_TAG),
             format!("{glyph} {label}"),
         ],
         selected,
         marked,
         status_color: color,
-    }
-}
-
-/// Project the flattened tree into render rows: a group header (indented,
-/// expand glyph, install rollup) or an indented leaf showing the bare
-/// name (the registry/path prefix is the parent chain).
-fn tree_render_rows(state: &TuiState) -> Vec<RenderRow> {
-    state
-        .flattened()
-        .into_iter()
-        .enumerate()
-        .filter_map(|(pos, d)| match d {
-            DisplayRow::Group {
-                label,
-                depth,
-                collapsed,
-                rollup,
-                rows,
-                ..
-            } => {
-                let arrow = if collapsed { "▸" } else { "▾" };
-                let indent = "  ".repeat(depth);
-                let (glyph, _, color) = status_view(rollup.worst());
-                let all_marked = !rows.is_empty() && rows.iter().all(|i| state.is_row_marked(*i));
-                Some(RenderRow {
-                    columns: [
-                        fit(&format!("{indent}{arrow} {label}"), W_REPO),
-                        fit("", W_KIND),
-                        fit("", W_TAG),
-                        format!("{glyph} {}/{} installed", rollup.installed, rollup.total),
-                    ],
-                    selected: pos == state.selected,
-                    marked: all_marked,
-                    status_color: color,
-                })
-            }
-            DisplayRow::Leaf { label, depth, row, .. } => {
-                let r = state.rows.get(row)?;
-                let indent = "  ".repeat(depth);
-                Some(render_leaf(
-                    r,
-                    &format!("{indent}{label}"),
-                    pos == state.selected,
-                    state.is_row_marked(row),
-                ))
-            }
-        })
-        .collect()
-}
-
-/// The detail-pane text for the current tree-group selection (a group has
-/// no single row, so the flat detail does not apply).
-fn group_detail(state: &TuiState) -> String {
-    match state.flattened().into_iter().nth(state.selected) {
-        Some(DisplayRow::Group { key, label, rollup, .. }) => format!(
-            "{label}\n\npath: {key}\n\nentries: {}\ninstalled: {}\noutdated: {}\nmodified: {}\nintegrity-missing: {}\nnot-installed: {}",
-            rollup.total,
-            rollup.installed,
-            rollup.outdated,
-            rollup.modified,
-            rollup.integrity_missing,
-            rollup.not_installed,
-        ),
-        _ => "no selection".to_string(),
     }
 }
 
@@ -289,63 +217,55 @@ pub fn frame(state: &TuiState) -> RenderModel {
         (state.query.clone(), false)
     };
 
-    let rows: Vec<RenderRow> = if state.view_mode == ViewMode::Tree && !state.loading {
-        tree_render_rows(state)
-    } else {
-        state
-            .filtered
-            .iter()
-            .enumerate()
-            .filter_map(|(pos, &i)| state.rows.get(i).map(|r| (pos, i, r)))
-            .map(|(pos, i, r)| {
-                let shown = strip_default_registry(&r.repo, state.default_registry.as_deref());
-                render_leaf(r, shown, pos == state.selected, state.is_row_marked(i))
-            })
-            .collect()
-    };
+    let rows: Vec<RenderRow> = state
+        .filtered
+        .iter()
+        .enumerate()
+        .filter_map(|(pos, &i)| state.rows.get(i).map(|r| (pos, i, r)))
+        .map(|(pos, i, r)| {
+            let shown = strip_default_registry(&r.repo, state.default_registry.as_deref());
+            render_leaf(r, shown, pos == state.selected, state.is_row_marked(i))
+        })
+        .collect();
 
-    let detail = if state.view_mode == ViewMode::Tree && state.selected_is_group() {
-        group_detail(state)
-    } else {
-        match state.selected_row() {
-            Some(r) => {
-                let kw = if r.keywords.is_empty() {
-                    "-".to_string()
-                } else {
-                    r.keywords.join(", ")
-                };
-                let version = if !r.version.is_empty() {
-                    r.version.as_str()
-                } else if !r.latest_tag.is_empty() {
-                    r.latest_tag.as_str()
-                } else {
-                    "-"
-                };
-                let pinned = match &r.pinned_version {
-                    Some(p) => format!("\npinned: {p}"),
-                    None => String::new(),
-                };
-                // Short blurb above the full description, only when present
-                // (keeps the layout — and snapshot tests — unchanged for
-                // entries without a summary).
-                let summary = if r.summary.is_empty() {
-                    String::new()
-                } else {
-                    format!("summary: {}\n\n", r.summary)
-                };
-                format!(
-                    "{}\n\n{}{}\n\nkeywords: {}\nversion: {}{}\nstatus: {}",
-                    r.repo,
-                    summary,
-                    if r.description.is_empty() { "-" } else { &r.description },
-                    kw,
-                    version,
-                    pinned,
-                    r.state
-                )
-            }
-            None => "no selection".to_string(),
+    let detail = match state.selected_row() {
+        Some(r) => {
+            let kw = if r.keywords.is_empty() {
+                "-".to_string()
+            } else {
+                r.keywords.join(", ")
+            };
+            let version = if !r.version.is_empty() {
+                r.version.as_str()
+            } else if !r.latest_tag.is_empty() {
+                r.latest_tag.as_str()
+            } else {
+                "-"
+            };
+            let pinned = match &r.pinned_version {
+                Some(p) => format!("\npinned: {p}"),
+                None => String::new(),
+            };
+            // Short blurb above the full description, only when present
+            // (keeps the layout — and snapshot tests — unchanged for
+            // entries without a summary).
+            let summary = if r.summary.is_empty() {
+                String::new()
+            } else {
+                format!("summary: {}\n\n", r.summary)
+            };
+            format!(
+                "{}\n\n{}{}\n\nkeywords: {}\nversion: {}{}\nstatus: {}",
+                r.repo,
+                summary,
+                if r.description.is_empty() { "-" } else { &r.description },
+                kw,
+                version,
+                pinned,
+                r.state
+            )
         }
+        None => "no selection".to_string(),
     };
 
     // Status is transient only — loading / counts / batch results, or the
@@ -367,10 +287,10 @@ pub fn frame(state: &TuiState) -> RenderModel {
     // Widest → narrowest. `draw` picks the widest that fits; the last
     // (`? help`) is the irreducible minimum so help is always discoverable.
     let hint_tiers = vec![
-        "↑↓ move · space mark · i/u/d act · v versions · g scope · t tree · / search · ? help · q quit".to_string(),
-        "↑↓ move · i/u/d act · v ver · g scope · t tree · / search · ? help · q quit".to_string(),
-        "↑↓ · i/u/d · v · g · t · / · ? help · q".to_string(),
-        "i/u/d v g t / ? q".to_string(),
+        "↑↓ move · space mark · i/u/d act · v versions · g scope · / search · ? help · q quit".to_string(),
+        "↑↓ move · i/u/d act · v ver · g scope · / search · ? help · q quit".to_string(),
+        "↑↓ · i/u/d · v · g · / · ? help · q".to_string(),
+        "i/u/d v g / ? q".to_string(),
         "? help".to_string(),
     ];
     let hint = hint_tiers[0].clone();
@@ -386,11 +306,20 @@ pub fn frame(state: &TuiState) -> RenderModel {
         }
     });
 
+    // Selected clients render as a quiet span on the legend line; empty
+    // selection omits the span (no stray `clients:` label).
+    let clients = if state.clients.is_empty() {
+        String::new()
+    } else {
+        format!("clients: {}", state.clients.join(", "))
+    };
+
     RenderModel {
         title,
         search,
         search_placeholder,
         scope: state.scope_label.clone(),
+        clients,
         headers: ["Repo", "Kind", "Tag", "Status"],
         rows,
         detail,
@@ -462,6 +391,19 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
         .alignment(Alignment::Right),
         chunks[0],
     );
+    // Selected clients: a quiet, persistent span on the left of the title
+    // row (the title is centered, so the left edge is free). Omitted
+    // entirely when no clients are selected.
+    if !model.clients.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                model.clients.clone(),
+                Style::default().fg(Color::DarkGray),
+            ))
+            .alignment(Alignment::Left),
+            chunks[0],
+        );
+    }
 
     // Search row: scope-mode box on the left, query box on the right.
     let search_row = Layout::default()
@@ -692,13 +634,11 @@ fn legend_line() -> Line<'static> {
 fn draw_help(f: &mut Frame) {
     let rows = [
         ("↑ / ↓", "move selection"),
-        ("space", "mark / unmark the row (or whole group, in tree)"),
+        ("space", "mark / unmark the row"),
         ("a / c", "mark all visible / clear marks"),
         ("i / u / d", "install / update / uninstall (marked set or selection)"),
         ("v", "pick a specific version for the selected row"),
         ("g", "toggle scope: project ⇄ global"),
-        ("t", "toggle the tree / flat view"),
-        ("→ / ←", "expand / collapse a group (tree view)"),
         ("/", "search; type to filter, enter to commit"),
         ("enter", "open the detail pane"),
         ("r", "refresh the catalog from the registry"),
@@ -807,7 +747,7 @@ mod tests {
         // table aligns; status keeps its glyph+label verbatim. Repo is
         // the first column, kind second.
         assert_eq!(m.rows[0].columns[0], fit("r/alpha", W_REPO));
-        assert_eq!(m.rows[0].columns[1], fit("◆ skill", W_KIND));
+        assert_eq!(m.rows[0].columns[1], fit("skill", W_KIND));
         // The Tag column shows the explicit version, not `latest`.
         assert_eq!(m.rows[0].columns[2], fit("2.1.0", W_TAG));
         assert_eq!(m.rows[0].columns[3], "✓ installed");
@@ -849,9 +789,6 @@ mod tests {
         ] {
             assert_eq!(status_view(st), (glyph, label, color));
         }
-        assert_eq!(kind_glyph("skill"), "◆");
-        assert_eq!(kind_glyph("rule"), "▸");
-        assert_eq!(kind_glyph("-"), "•");
     }
 
     #[test]
@@ -963,26 +900,13 @@ mod tests {
     }
 
     #[test]
-    fn frame_tree_view_projects_groups_indented_leaves_and_rollup() {
+    fn frame_projects_selected_clients_and_omits_when_empty() {
         let mut s = TuiState::new();
-        s.set_default_registry(Some("reg".to_string()));
-        s.set_rows(vec![
-            row("reg/acme/code.review", ArtifactState::Installed),
-            row("reg/acme/lint", ArtifactState::NotInstalled),
-        ]);
-        s.toggle_view_mode();
-        let m = frame(&s);
-        // reg elided ⇒ acme ▸ code ▸ review (leaf), and acme ▸ lint (leaf).
-        assert_eq!(m.rows.len(), 4);
-        assert!(m.rows[0].columns[0].starts_with("▾ acme"), "expanded group header");
-        assert!(m.rows[0].columns[3].contains("1/2 installed"), "group rollup");
-        assert!(m.rows[1].columns[0].starts_with("  ▾ code"), "nested group is indented");
-        // The leaf shows the bare name (not the full registry/repo path).
-        assert!(m.rows[2].columns[0].trim_start().starts_with("review"));
-        assert!(!m.rows[2].columns[0].contains('/'), "leaf is the name only");
-        // A selected group projects its rollup into the detail pane.
-        assert!(m.detail.contains("path: acme"));
-        assert!(m.detail.contains("entries: 2"));
+        s.set_rows(vec![row("r/a", ArtifactState::Installed)]);
+        // No clients selected ⇒ the span is omitted (empty string).
+        assert_eq!(frame(&s).clients, "");
+        s.set_clients(vec!["claude".to_string(), "opencode".to_string()]);
+        assert_eq!(frame(&s).clients, "clients: claude, opencode");
     }
 
     #[test]
@@ -1001,7 +925,7 @@ mod tests {
     }
 
     #[test]
-    fn frame_flat_view_is_unchanged_by_tree_support() {
+    fn frame_flat_view_keeps_full_ref() {
         let mut s = TuiState::new();
         s.set_rows(vec![row("reg/acme/tool", ArtifactState::Installed)]);
         let m = frame(&s);

@@ -235,8 +235,6 @@ fn map_key(key: KeyEvent) -> Option<TuiInput> {
     Some(match key.code {
         KeyCode::Up => TuiInput::Up,
         KeyCode::Down => TuiInput::Down,
-        KeyCode::Right => TuiInput::Expand,
-        KeyCode::Left => TuiInput::Collapse,
         KeyCode::Enter => TuiInput::Enter,
         KeyCode::Esc => TuiInput::Esc,
         KeyCode::Backspace => TuiInput::Backspace,
