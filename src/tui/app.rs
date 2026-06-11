@@ -364,14 +364,21 @@ fn build_row_check(lock: &GrimoireLock, row: &TuiRow) -> Option<RowCheck> {
     })
 }
 
+/// Whether a [`CheckMsg`] stamped with `msg_generation` is still fresh at
+/// `live_generation`. A stamp older than the live generation means the work
+/// was scheduled under a scope/refresh the user has since left (a scope toggle
+/// or `r` bumped the generation); applying it would mutate the wrong scope's
+/// view, so the drain path discards it. Pure so the discard rule is one
+/// unit-testable predicate shared by the per-row and catalog drain arms.
+fn is_generation_fresh(msg_generation: u64, live_generation: u64) -> bool {
+    msg_generation == live_generation
+}
+
 /// Apply a per-row "outdated" result to `state` **only** when its stamp is
-/// fresh. A `msg_generation` older than `live_generation` means the check was
-/// scheduled under a scope/refresh the user has since left (a scope toggle or
-/// `r` bumped the generation), so flipping a row from it would mutate the
-/// wrong scope's view — discard it. Returns `true` when a flip happened.
+/// fresh (see [`is_generation_fresh`]). Returns `true` when a flip happened.
 /// Pure over `state` so the discard is unit-testable without a [`TuiContext`].
 fn apply_outdated_if_fresh(state: &mut TuiState, repo: &str, msg_generation: u64, live_generation: u64) -> bool {
-    msg_generation == live_generation && state.mark_outdated_if_installed(repo)
+    is_generation_fresh(msg_generation, live_generation) && state.mark_outdated_if_installed(repo)
 }
 
 /// Drain every pending [`CheckMsg`] non-blockingly and apply it to `state`.
@@ -389,13 +396,20 @@ fn drain_checks(
     // `try_recv` never blocks; loop until the channel is momentarily empty.
     while let Ok(msg) = rx.try_recv() {
         match msg {
-            CheckMsg::CatalogReady(catalog) => {
-                // Re-derive rows from the fresh catalog against the active
-                // scope, then reconcile preserving marks, cursor, live ↑ /
-                // pins + the kind-sort and filter. The scope load is cheap
-                // (advisory).
-                drain_catalog_ready(ctx, state, &catalog);
-                changed = true;
+            CheckMsg::CatalogReady { catalog, generation } => {
+                // Discard a catalog walked under a superseded scope: a refresh
+                // spawned before a scope toggle / `r` carries the old stamp,
+                // and merging it after a fresh one would resurrect the wrong
+                // scope's rows. Only a stamp matching the live generation is
+                // reconciled.
+                if is_generation_fresh(generation, live_generation) {
+                    // Re-derive rows from the fresh catalog against the active
+                    // scope, then reconcile preserving marks, cursor, live ↑ /
+                    // pins + the kind-sort and filter. The scope load is cheap
+                    // (advisory).
+                    drain_catalog_ready(ctx, state, &catalog);
+                    changed = true;
+                }
             }
             // A per-row result is honored only when its stamp matches the
             // live generation: a scope toggle or refresh bumped the
@@ -971,6 +985,22 @@ mod tests {
             "a fresh-generation result flips the row"
         );
         assert_eq!(s.rows[0].state, ArtifactState::Outdated);
+    }
+
+    #[test]
+    fn catalog_ready_stamp_freshness_gates_the_merge() {
+        // The same predicate that guards per-row flips guards the CatalogReady
+        // drain arm: a catalog walked under a superseded generation is stale
+        // and must be discarded so it cannot resurrect the wrong scope's rows
+        // after a scope toggle / refresh; a matching stamp is reconciled.
+        assert!(
+            !is_generation_fresh(0, 1),
+            "a catalog stamped under the old generation is discarded"
+        );
+        assert!(
+            is_generation_fresh(1, 1),
+            "a catalog stamped under the live generation is reconciled"
+        );
     }
 
     #[test]

@@ -221,9 +221,13 @@ impl TuiState {
     /// - **Marks**: the marked set is translated old-index → `repo` → new
     ///   index, so a mark survives the resort; marks on repos that vanished
     ///   from the fresh set drop (the row no longer exists to act on).
-    /// - **Cursor**: the selection stays on the same `repo`; if that repo
-    ///   vanished (or was filtered out) the selection clamps into range
-    ///   rather than snapping to the top.
+    /// - **Cursor**: the selection follows the same `repo` **only while it is
+    ///   still visible** — present in the row set *and* in the active filter;
+    ///   then it lands on that repo's new filtered position. If the repo
+    ///   vanished or the active query now filters it out, the cursor resets to
+    ///   the top of the filtered view (index 0) — the reset `set_rows` already
+    ///   applied — and `clamp_selection` only further adjusts in the degenerate
+    ///   empty-filter case (selection forced to 0). It never dangles.
     /// - **Filter**: the active query is untouched; `set_rows` recomputes
     ///   `filtered` against it.
     ///
@@ -267,9 +271,12 @@ impl TuiState {
                 .collect();
         }
 
-        // Re-position the cursor on the same repo. If it vanished or is
-        // filtered out, `clamp_selection` keeps the selection in range rather
-        // than snapping to the top.
+        // Re-position the cursor on the same repo, but only when it is still
+        // visible (present in `rows` *and* in the current `filtered` view).
+        // When it vanished or the active query filters it out, none of the
+        // `let` guards bind and `selected` keeps the index-0 reset `set_rows`
+        // applied — i.e. the cursor lands at the top of the filtered view.
+        // `clamp_selection` below then only matters in the empty-filter case.
         if let Some(repo) = selected_repo
             && let Some(rows_idx) = self.rows.iter().position(|r| r.repo == repo)
             && let Some(filtered_pos) = self.filtered.iter().position(|&i| i == rows_idx)

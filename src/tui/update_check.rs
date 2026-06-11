@@ -56,19 +56,24 @@ const SEARCH_COALESCE: Duration = Duration::from_millis(300);
 /// a check is scheduled and the moment its result is drained, so an index
 /// would dangle.
 ///
-/// Per-row variants additionally carry the `generation` the check was
-/// scheduled under. A scope toggle or refresh bumps the checker's
-/// generation; the drain loop discards any per-row result whose stamp is
-/// older than the live generation, so a check spawned under one scope can
-/// never flip a row that now belongs to a different scope's lock/row set.
+/// Every variant carries the `generation` the work was scheduled under. A
+/// scope toggle or refresh bumps the checker's generation; the drain loop
+/// discards any result whose stamp is older than the live generation, so work
+/// spawned under one scope can never mutate a row set that now belongs to a
+/// different scope. For per-row results that prevents flipping the wrong
+/// scope's lock/row set; for the catalog refresh it prevents a stale catalog
+/// (walked under the previous scope) from merging after a fresh one and
+/// resurrecting wrong rows.
 ///
 /// Closed internal enum — matches stay total, no `#[non_exhaustive]`.
 #[derive(Debug)]
 pub enum CheckMsg {
-    /// A background catalog refresh completed. The app reconciles this
-    /// catalog into the current row set by `repo` key, preserving marks,
-    /// selection, and any live per-row `↑` flags.
-    CatalogReady(Box<Catalog>),
+    /// A background catalog refresh completed, stamped with the generation it
+    /// was spawned under. The app reconciles this catalog into the current row
+    /// set by `repo` key, preserving marks, selection, and any live per-row
+    /// `↑` flags — but only when the stamp matches the live generation; a
+    /// catalog walked under a now-superseded scope is discarded on drain.
+    CatalogReady { catalog: Box<Catalog>, generation: u64 },
     /// The row's floating tag now resolves to a digest that differs from
     /// its locked pin — a newer version is available. Stamped with the
     /// generation the check was scheduled under (stale stamps are dropped).
@@ -142,13 +147,19 @@ pub struct UpdateChecker {
     /// In-flight + finished task handles, reaped each tick and aborted on
     /// drop.
     tasks: JoinSet<()>,
-    /// Repos with a per-row check already spawned and not yet finished, so a
-    /// re-schedule does not fire a duplicate in-flight check for the same
-    /// row. Owned by the task lifecycle: each spawned task removes its repo
-    /// once its send attempt resolves (success *or* failure), so a dropped
-    /// result on a full channel can never strand a repo as permanently
-    /// in-flight. Shared with the tasks via [`Arc`].
-    in_flight: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// `(repo, generation)` pairs with a per-row check already spawned and not
+    /// yet finished, so a re-schedule does not fire a duplicate in-flight check
+    /// for the same row *within the same generation*. Keyed by generation as
+    /// well as repo so a forced re-arm under a fresh generation is **not**
+    /// suppressed by a task still in flight under the previous one: that old
+    /// task holds `(repo, old_gen)`, the fresh check inserts `(repo, new_gen)`,
+    /// a distinct key — both coexist, the old guard later frees exactly its own
+    /// entry, and the set stays bounded by concurrency. Owned by the task
+    /// lifecycle: each spawned task removes its own `(repo, generation)` once
+    /// its send attempt resolves (success *or* failure), so a dropped result on
+    /// a full channel can never strand a repo as permanently in-flight. Shared
+    /// with the tasks via [`Arc`].
+    in_flight: Arc<Mutex<std::collections::HashSet<(String, u64)>>>,
     /// When the last search-triggered scheduling pass ran, for debounce.
     last_scheduled: Option<Instant>,
     /// Monotonically increasing scope/refresh generation. Stamped onto every
@@ -169,6 +180,7 @@ impl UpdateChecker {
             registry,
             tasks: JoinSet::new(),
             in_flight: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            // (the set is keyed by (repo, generation); see the field doc)
             last_scheduled: None,
             generation: 0,
         };
@@ -239,26 +251,39 @@ impl UpdateChecker {
         let tx = self.tx.clone();
         let access = Arc::clone(&self.access);
         let registry = self.registry.clone();
+        let generation = self.generation;
         self.tasks.spawn(async move {
             // `force = true` rebuilds even a fresh cache; `offline = false`
             // because the app pre-checks `ctx.offline` and never spawns when
             // offline (and `load_or_refresh` would degrade to cache anyway).
             if let Ok(catalog) = Catalog::load_or_refresh(&catalog_path, &registry, "", &access, false, true).await {
                 // Drop on a full channel: a stale catalog is superseded by
-                // the next refresh; never block the task.
-                let _ = tx.try_send(CheckMsg::CatalogReady(Box::new(catalog)));
+                // the next refresh; never block the task. Stamped with the
+                // scheduling generation so a refresh spawned under a scope the
+                // user has since left is discarded on drain rather than merged.
+                let _ = tx.try_send(CheckMsg::CatalogReady {
+                    catalog: Box::new(catalog),
+                    generation,
+                });
             }
         });
     }
 
     /// Spawn one bounded per-row check for each item in `checks`, skipping
-    /// any whose `repo` already has a check in flight. Each task acquires a
-    /// [`Semaphore`] permit first (so at most [`ROW_CHECK_CONCURRENCY`] run
-    /// at once), resolves the floating tag with [`Operation::Query`] (a
-    /// read-only-fresh lookup that never writes a tag pointer), reports the
-    /// pure [`outdated_from_resolve`] decision stamped with the current
-    /// [`Self::generation`], and clears its own in-flight slot once the send
-    /// attempt resolves.
+    /// any whose `(repo, generation)` already has a check in flight. Each task
+    /// acquires a [`Semaphore`] permit first (so at most
+    /// [`ROW_CHECK_CONCURRENCY`] run at once), resolves the floating tag with
+    /// [`Operation::Query`] (a read-only-fresh lookup that never writes a tag
+    /// pointer), reports the pure [`outdated_from_resolve`] decision stamped
+    /// with the current [`Self::generation`], and clears its own in-flight slot
+    /// once the send attempt resolves.
+    ///
+    /// Dedup is keyed by `(repo, generation)`, not by `repo` alone: a forced
+    /// re-arm bumps the generation *before* re-scheduling, so a task still in
+    /// flight under the previous generation holds `(repo, old_gen)` and never
+    /// blocks the fresh `(repo, new_gen)` check from being scheduled. That
+    /// fresh check is what surfaces the row under the new scope; the old task's
+    /// result is discarded on drain as stale.
     pub fn spawn_row_checks(&mut self, checks: Vec<RowCheck>) {
         let generation = self.generation;
         for check in checks {
@@ -266,9 +291,11 @@ impl UpdateChecker {
                 // Hold the in-flight lock only to test-and-set the dedup slot;
                 // never across the await below.
                 let mut guard = self.in_flight.lock().unwrap_or_else(|p| p.into_inner());
-                if !guard.insert(check.repo.clone()) {
-                    // A check for this repo is already in flight — do not
-                    // duplicate it (dedup, the spec's "no duplicate in-flight").
+                if !guard.insert((check.repo.clone(), generation)) {
+                    // A check for this repo *in this generation* is already in
+                    // flight — do not duplicate it (the spec's "no duplicate
+                    // in-flight"). A check under a *prior* generation does not
+                    // block this one: its key carries the old generation.
                     continue;
                 }
             }
@@ -279,12 +306,16 @@ impl UpdateChecker {
             self.tasks.spawn(async move {
                 // Clear the in-flight slot when this task ends, however it
                 // ends (send dropped on a full channel, resolve error, even a
-                // panic mid-task). Owning the slot here — not in the drain
-                // loop — is what prevents a dropped result from stranding the
-                // repo as permanently in-flight and never re-checked.
+                // panic mid-task). The guard removes *exactly* this task's
+                // `(repo, generation)` key, so an old-generation task draining
+                // out never evicts the fresh-generation entry. Owning the slot
+                // here — not in the drain loop — is what prevents a dropped
+                // result from stranding the repo as permanently in-flight and
+                // never re-checked.
                 let _slot = InFlightGuard {
                     set: Arc::clone(&in_flight),
                     repo: check.repo.clone(),
+                    generation,
                 };
                 // Acquire a permit for the lifetime of the registry call so
                 // concurrency stays bounded; the permit drops when the task
@@ -321,15 +352,19 @@ impl UpdateChecker {
     }
 }
 
-/// Removes a repo from the shared in-flight set on drop, so the slot is
-/// freed when the owning task ends *regardless of how it ends* — a clean
-/// send, a dropped send on a full channel, a resolve error, or a panic.
-/// This RAII tie to the task lifecycle (not the drain loop) is what fixes
-/// the dedup-leak where a dropped result would otherwise strand a repo as
+/// Removes a `(repo, generation)` slot from the shared in-flight set on drop,
+/// so the slot is freed when the owning task ends *regardless of how it ends*
+/// — a clean send, a dropped send on a full channel, a resolve error, or a
+/// panic. The key carries the generation so a task draining out under a
+/// superseded generation removes *exactly* its own entry and never evicts a
+/// fresh-generation check scheduled for the same repo after a re-arm. This
+/// RAII tie to the task lifecycle (not the drain loop) is what fixes the
+/// dedup-leak where a dropped result would otherwise strand a repo as
 /// permanently in-flight.
 struct InFlightGuard {
-    set: Arc<Mutex<std::collections::HashSet<String>>>,
+    set: Arc<Mutex<std::collections::HashSet<(String, u64)>>>,
     repo: String,
+    generation: u64,
 }
 
 impl Drop for InFlightGuard {
@@ -338,7 +373,7 @@ impl Drop for InFlightGuard {
         // prior panic while holding it leaves no broken invariant — just
         // take the inner set and remove our slot.
         let mut guard = self.set.lock().unwrap_or_else(|p| p.into_inner());
-        guard.remove(&self.repo);
+        guard.remove(&(self.repo.clone(), self.generation));
     }
 }
 
@@ -600,7 +635,10 @@ mod tests {
         for _ in 0..RESULT_CHANNEL_CAPACITY {
             checker
                 .tx
-                .try_send(CheckMsg::CatalogReady(Box::new(Catalog::empty("localhost:5000"))))
+                .try_send(CheckMsg::CatalogReady {
+                    catalog: Box::new(Catalog::empty("localhost:5000")),
+                    generation: 0,
+                })
                 .expect("filler fits");
         }
         checker.spawn_row_checks(vec![check.clone()]);
@@ -612,7 +650,7 @@ mod tests {
         tokio::task::yield_now().await;
 
         // Drain the filler so the channel has room for the next result.
-        while let Ok(CheckMsg::CatalogReady(_)) = rx.try_recv() {}
+        while let Ok(CheckMsg::CatalogReady { .. }) = rx.try_recv() {}
 
         // Re-schedule: the slot was freed despite the dropped result, so this
         // pass reaches the registry and a result actually lands.
@@ -653,6 +691,92 @@ mod tests {
                 assert_eq!(generation, 1, "result is stamped with the live generation at spawn");
             }
             other => panic!("expected RowOutdated, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn catalog_refresh_carries_scheduling_generation() {
+        // A catalog refresh is stamped with the generation it was spawned
+        // under, so the drain path can discard one walked under a superseded
+        // scope. `load_or_refresh` with an empty `list_catalog` yields an empty
+        // catalog, which is enough to observe the stamp.
+        let access = GatedAccess::new();
+        let dyn_access: Arc<dyn OciAccess> = access.clone();
+        let (mut checker, mut rx) = UpdateChecker::new(dyn_access, "localhost:5000".to_string());
+        checker.bump_generation(); // now at generation 1
+        let tmp = std::env::temp_dir().join(format!("grim-catalog-gen-{}.json", std::process::id()));
+        checker.spawn_catalog_refresh(tmp.clone());
+        match rx.recv().await.expect("a catalog result") {
+            CheckMsg::CatalogReady { generation, .. } => {
+                assert_eq!(generation, 1, "the catalog result carries the spawn generation");
+            }
+            other => panic!("expected CatalogReady, got {other:?}"),
+        }
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[tokio::test]
+    async fn re_arm_under_fresh_generation_is_not_suppressed_by_in_flight_old_task() {
+        // Finding-1 regression: a forced re-arm bumps the generation, but a
+        // task from the previous generation is still in flight holding the
+        // repo's slot. Keying the in-flight set by (repo, generation) — not by
+        // repo alone — must let the fresh-generation check schedule anyway, so
+        // the row is re-checked under the new scope instead of being stranded
+        // until some later trigger.
+        let access = GatedAccess::new();
+        // Gate every call so both the gen-0 and gen-1 tasks stay in flight.
+        access.gated.store(true, Ordering::SeqCst);
+        let dyn_access: Arc<dyn OciAccess> = access.clone();
+        let (mut checker, mut rx) = UpdateChecker::new(dyn_access, "localhost:5000".to_string());
+        let check = sample_check();
+
+        // Generation 0: spawn a task that blocks inside resolve_digest.
+        checker.spawn_row_checks(vec![check.clone()]);
+        while access.calls.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+
+        // A forced re-arm: bump the generation, then re-schedule the same repo
+        // *while the gen-0 task is still gated in flight*.
+        checker.bump_generation();
+        checker.spawn_row_checks(vec![check.clone()]);
+        // The fresh (repo, gen=1) key is distinct from the in-flight
+        // (repo, gen=0) key, so this pass must reach the registry: a second
+        // call lands even though the first task has not yet returned.
+        while access.calls.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            access.calls.load(Ordering::SeqCst),
+            2,
+            "the fresh-generation re-arm is not suppressed by the in-flight old-generation task"
+        );
+
+        // Release both tasks; each frees exactly its own (repo, generation)
+        // slot, and two stamped results arrive (gen 0 and gen 1).
+        access.release();
+        let a = rx.recv().await.expect("first result");
+        let b = rx.recv().await.expect("second result");
+        let gens: std::collections::BTreeSet<u64> = [&a, &b]
+            .iter()
+            .map(|m| match m {
+                CheckMsg::RowOutdated { generation, .. }
+                | CheckMsg::RowUpToDate { generation, .. }
+                | CheckMsg::Failed { generation, .. } => *generation,
+                CheckMsg::CatalogReady { generation, .. } => *generation,
+            })
+            .collect();
+        assert_eq!(
+            gens,
+            std::collections::BTreeSet::from([0, 1]),
+            "both the old- and fresh-generation checks produced a result"
+        );
+
+        // Both (repo, gen) slots freed: the set is empty, so a third re-arm at
+        // the live generation can schedule again without stranding.
+        {
+            let guard = checker.in_flight.lock().unwrap_or_else(|p| p.into_inner());
+            assert!(guard.is_empty(), "every (repo, generation) slot freed on completion");
         }
     }
 }
