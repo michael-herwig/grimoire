@@ -4,6 +4,7 @@ paths:
   - "**/Cargo.toml"
 summary: Idiomatic Rust style rules
 keywords: rust,style,lints,quality
+repository: https://github.com/grimoire-samples/rust-style
 ---
 
 # Rust Style

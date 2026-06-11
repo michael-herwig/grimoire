@@ -6,6 +6,7 @@ tools: Read,Grep,Bash
 metadata:
   summary: Diff review agent
   keywords: review,diff,quality
+  repository: https://github.com/grimoire-samples/reviewer
 ---
 # Reviewer
 

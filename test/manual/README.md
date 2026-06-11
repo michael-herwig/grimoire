@@ -82,12 +82,13 @@ grim tui                          # interactive (requires a TTY)
 
 | Key | Action |
 |-----|--------|
-| `↑`/`↓` | move selection |
+| `↑`/`↓` | move selection (scroll the detail pane while it is open) |
 | `space` | mark/unmark the selected row |
 | `a` / `c` | mark all visible / clear marks |
 | `i` / `u` / `d` | install / update / **uninstall** the marked set (or the selection if nothing marked) |
+| `o` | open the selected entry's repository URL in the browser |
 | `g` | toggle scope (project ⇄ global) — title shows the active scope |
-| `/` | search; `enter` browse detail; `r` refresh catalog; `q` quit |
+| `/` | search; `enter` browse detail (`j`/`k` also scroll there); `r` refresh catalog; `q` quit |
 
 Try: mark a couple with `space`, press `i` (batch install), watch the
 state glyphs flip to green; `d` to batch-uninstall; `g` to see the same
@@ -95,6 +96,17 @@ catalog against the global scope's state. Tamper a file
 (`echo x >> test/manual/project/.claude/skills/hello-world/SKILL.md`)
 then refresh — it shows `✱ modified`; delete the dir and it shows
 `✘ integrity-missing`.
+
+The detail pane (`enter`) shows the centered identifier, a `Summary:` /
+`Description:` section, and a `Metadata:` block (version + status stay on
+the catalog row). Most rig artifacts carry an authored `repository` URL
+(`https://github.com/grimoire-samples/…`, emitted as the
+`org.opencontainers.image.source` annotation) — `o` opens it.
+`hello-world` and `security-baseline` intentionally carry none, so they
+demo the `Repository: -` fallback and the "no repository URL for this
+entry" status line. The `architecture-guide` **skill** ships a
+deliberately long description so its pane overflows a small terminal —
+open it and scroll (`↑`/`↓` or `j`/`k`).
 
 ### 2. Lock & install into a client
 

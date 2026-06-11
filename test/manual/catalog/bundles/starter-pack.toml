@@ -12,6 +12,7 @@
 summary = "Curated starter pack"
 keywords = "starter,review,style,security"
 description = "A starter set: the code-review skill plus the Rust and security rules"
+repository = "https://github.com/grimoire-samples/starter-pack"
 
 [skills]
 code-reviewer = "localhost:5050/grimoire/skills/code-reviewer:1"

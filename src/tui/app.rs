@@ -258,6 +258,12 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
             TuiAction::LoadVersions { row } => {
                 load_versions(&ctx, &mut state, row).await;
             }
+            TuiAction::OpenUrl { url } => {
+                state.set_status(match open_url(&url) {
+                    Ok(()) => format!("opened {url}"),
+                    Err(e) => format!("open failed: {e}"),
+                });
+            }
             TuiAction::ToggleScope => {
                 if ctx.toggle_scope() {
                     state.set_scope_label(&ctx.scope_label);
@@ -587,6 +593,7 @@ fn rows_from_catalog(catalog: &Catalog, lock: Option<&GrimoireLock>, state: &Ins
                 description: e.description.clone().unwrap_or_default(),
                 summary: e.summary.clone().unwrap_or_default(),
                 keywords: e.keywords.clone(),
+                repository_url: e.repository_url.clone(),
                 latest_tag: e.latest_tag.clone().unwrap_or_default(),
                 // Show the explicit highest version; fall back to the
                 // representative tag when no semver tag exists.
@@ -1104,6 +1111,33 @@ fn split_repo(repo: &str) -> Option<(String, String)> {
     repo.split_once('/').map(|(r, p)| (r.to_string(), p.to_string()))
 }
 
+/// Open `url` with the platform opener, detached: stdio is nulled so the
+/// child can never write into the alternate screen / raw-mode terminal,
+/// and the handle is reaped in a background task (openers exit fast).
+///
+/// # Errors
+///
+/// A non-HTTPS URL (defense in depth — only the catalog guard's vetted
+/// `https://` values reach here) or a spawn failure.
+fn open_url(url: &str) -> io::Result<()> {
+    if !url.starts_with("https://") {
+        return Err(io::Error::other("not an https URL"));
+    }
+    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    let mut child = tokio::process::Command::new(opener)
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    tokio::spawn(async move {
+        // Reap so the opener never zombifies; its exit code is irrelevant
+        // (the status line already reported the attempt).
+        let _ = child.wait().await;
+    });
+    Ok(())
+}
+
 /// The display names of the active scope's effective selected clients
 /// (`claude`, `opencode`, …), in [`crate::install::client_target::ClientTarget::ALL`]
 /// order, for the status area.
@@ -1114,6 +1148,15 @@ fn client_names(ctx: &TuiContext) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_url_rejects_non_https() {
+        // Defense in depth below the catalog guard: nothing but https://
+        // ever reaches the platform opener.
+        for bad in ["http://x", "file:///etc/passwd", "ghcr.io/acme/x", ""] {
+            assert!(open_url(bad).is_err(), "{bad} must be rejected");
+        }
+    }
 
     #[test]
     fn split_repo_splits_first_slash_only() {
@@ -1143,6 +1186,7 @@ mod tests {
             description: String::new(),
             summary: String::new(),
             keywords: Vec::new(),
+            repository_url: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
             pinned_version: None,

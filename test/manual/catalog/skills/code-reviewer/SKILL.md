@@ -6,6 +6,7 @@ metadata:
   summary: Multi-pass diff reviewer
   keywords: review,quality,solid,dry,audit
   author: grimoire-manual-rig
+  repository: https://github.com/grimoire-samples/code-reviewer
 ---
 
 # Code Reviewer

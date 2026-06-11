@@ -81,6 +81,8 @@ pub enum TuiAction {
     ToggleScope,
     /// Lazily fetch the tag list for `row` and feed it to the open picker.
     LoadVersions { row: usize },
+    /// Open `url` in the system browser (the selected row's repository).
+    OpenUrl { url: String },
     /// Exit the TUI cleanly.
     Quit,
     /// Nothing to do beyond the in-place state change.
@@ -194,14 +196,29 @@ fn batch(state: &TuiState, op: BatchOp) -> TuiAction {
 }
 
 /// List / detail keys: navigation, mode entry, and the artifact actions.
+/// `↑`/`↓` are mode-sensitive: they move the selection in the list but
+/// scroll the pane while the detail view is open (`j`/`k` alias the
+/// scroll there; both stay literal query chars in search).
 fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
     match input {
         TuiInput::Up => {
-            state.move_selection(-1);
+            if state.mode == Mode::Detail {
+                state.scroll_detail(-1);
+            } else {
+                state.move_selection(-1);
+            }
             TuiAction::None
         }
         TuiInput::Down => {
-            state.move_selection(1);
+            if state.mode == Mode::Detail {
+                state.scroll_detail(1);
+            } else {
+                state.move_selection(1);
+            }
+            TuiAction::None
+        }
+        TuiInput::Char('j') | TuiInput::Char('k') if state.mode == Mode::Detail => {
+            state.scroll_detail(if input == TuiInput::Char('j') { 1 } else { -1 });
             TuiAction::None
         }
         TuiInput::Enter => {
@@ -246,6 +263,13 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
             Some(row) => TuiAction::LoadVersions { row },
             None => TuiAction::None,
         },
+        TuiInput::Char('o') => match state.selected_row().and_then(|r| r.repository_url.clone()) {
+            Some(url) => TuiAction::OpenUrl { url },
+            None => {
+                state.set_status("no repository URL for this entry");
+                TuiAction::None
+            }
+        },
         // Any other printable in list mode is inert.
         TuiInput::Char(_) => TuiAction::None,
         TuiInput::Backspace => TuiAction::None,
@@ -264,6 +288,7 @@ mod tests {
             description: "d".to_string(),
             summary: String::new(),
             keywords: vec!["kw".to_string()],
+            repository_url: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
             pinned_version: None,
@@ -528,6 +553,64 @@ mod tests {
         assert_eq!(handle(&mut s, TuiInput::Enter), TuiAction::None);
         assert_eq!(s.mode, Mode::Detail);
         assert_eq!(s.selected_row().unwrap().repo, "r/b");
+    }
+
+    #[test]
+    fn detail_arrows_scroll_instead_of_moving_selection() {
+        let mut s = seeded();
+        handle(&mut s, TuiInput::Enter);
+        assert_eq!(s.mode, Mode::Detail);
+        // Down scrolls the pane; the selection stays put.
+        assert_eq!(handle(&mut s, TuiInput::Down), TuiAction::None);
+        assert_eq!(s.selected, 0, "selection unchanged in detail mode");
+        assert_eq!(s.detail_scroll, 1);
+        // j/k alias the scroll.
+        handle(&mut s, TuiInput::Char('j'));
+        assert_eq!(s.detail_scroll, 2);
+        handle(&mut s, TuiInput::Char('k'));
+        assert_eq!(s.detail_scroll, 1);
+        // Up scrolls back and saturates at the top.
+        handle(&mut s, TuiInput::Up);
+        handle(&mut s, TuiInput::Up);
+        assert_eq!(s.detail_scroll, 0);
+        assert_eq!(s.selected, 0);
+        // Back in the list, arrows move the selection again.
+        handle(&mut s, TuiInput::Esc);
+        handle(&mut s, TuiInput::Down);
+        assert_eq!(s.selected, 1);
+        // j/k stay inert in list mode (no vim-navigation surprise).
+        assert_eq!(handle(&mut s, TuiInput::Char('j')), TuiAction::None);
+        assert_eq!(s.selected, 1);
+        assert_eq!(s.detail_scroll, 0);
+    }
+
+    #[test]
+    fn o_opens_repository_url_or_reports_absence() {
+        let mut s = seeded();
+        // No URL on the row ⇒ status message, no action.
+        assert_eq!(handle(&mut s, TuiInput::Char('o')), TuiAction::None);
+        assert_eq!(s.status_line, "no repository URL for this entry");
+        // With a URL the action carries it (list and detail mode).
+        s.rows[0].repository_url = Some("https://github.com/acme/a".to_string());
+        assert_eq!(
+            handle(&mut s, TuiInput::Char('o')),
+            TuiAction::OpenUrl {
+                url: "https://github.com/acme/a".to_string()
+            }
+        );
+        handle(&mut s, TuiInput::Enter);
+        assert_eq!(s.mode, Mode::Detail);
+        assert_eq!(
+            handle(&mut s, TuiInput::Char('o')),
+            TuiAction::OpenUrl {
+                url: "https://github.com/acme/a".to_string()
+            }
+        );
+        // 'o' is a literal query char while searching.
+        handle(&mut s, TuiInput::Esc);
+        handle(&mut s, TuiInput::Char('/'));
+        assert_eq!(handle(&mut s, TuiInput::Char('o')), TuiAction::None);
+        assert_eq!(s.query, "o");
     }
 
     #[test]

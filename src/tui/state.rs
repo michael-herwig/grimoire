@@ -95,6 +95,9 @@ pub struct TuiRow {
     pub summary: String,
     /// Catalog keywords.
     pub keywords: Vec<String>,
+    /// HTTPS source-repository URL (already vetted by the catalog's
+    /// `https://` read-back guard); target of the `o` open action.
+    pub repository_url: Option<String>,
     /// The representative tag (empty string when absent) — may be the
     /// moving `latest` pointer; used as the resolution fallback.
     pub latest_tag: String,
@@ -117,6 +120,10 @@ pub struct TuiState {
     pub filtered: Vec<usize>,
     /// Selection index *into `filtered`* (not into `rows`).
     pub selected: usize,
+    /// Detail-pane vertical scroll offset (post-wrap rows). Saturates at 0
+    /// here; the upper bound is clamped at projection time
+    /// ([`crate::tui::render::frame`]) where the line count is known.
+    pub detail_scroll: u16,
     /// The live search query.
     pub query: String,
     /// Current interaction mode.
@@ -154,6 +161,7 @@ impl Default for TuiState {
             rows: Vec::new(),
             filtered: Vec::new(),
             selected: 0,
+            detail_scroll: 0,
             query: String::new(),
             mode: Mode::List,
             loading: true,
@@ -194,6 +202,7 @@ impl TuiState {
         self.loading = false;
         self.recompute_filter();
         self.selected = 0;
+        self.detail_scroll = 0;
         // Row identities changed wholesale — stale marks would point at
         // unrelated rows.
         self.marked.clear();
@@ -402,16 +411,20 @@ impl TuiState {
     }
 
     /// Apply a new query string and recompute the filter, clamping the
-    /// selection so it stays in range.
+    /// selection so it stays in range. Resets the detail scroll — the
+    /// selection may now point at a different row.
     pub fn apply_query(&mut self, query: impl Into<String>) {
+        self.detail_scroll = 0;
         self.query = query.into();
         self.recompute_filter();
         self.clamp_selection();
     }
 
     /// Move the selection by `delta` (saturating at both ends — never
-    /// wraps, never out of range).
+    /// wraps, never out of range). Resets the detail scroll — the pane now
+    /// shows a different row.
     pub fn move_selection(&mut self, delta: i64) {
+        self.detail_scroll = 0;
         let len = self.display_len();
         if len == 0 {
             self.selected = 0;
@@ -422,15 +435,25 @@ impl TuiState {
         self.selected = next as usize;
     }
 
+    /// Scroll the detail pane by `delta` rows, saturating at the top. The
+    /// upper bound is clamped at projection time
+    /// ([`crate::tui::render::frame`]) where the rendered line count is
+    /// known — state only guarantees the offset never goes negative.
+    pub fn scroll_detail(&mut self, delta: i64) {
+        let next = (i64::from(self.detail_scroll) + delta).max(0);
+        self.detail_scroll = u16::try_from(next).unwrap_or(u16::MAX);
+    }
+
     /// Set the effective default registry (elided from displayed names).
     pub fn set_default_registry(&mut self, registry: Option<String>) {
         self.default_registry = registry;
     }
 
-    /// Enter the detail pane for the current selection. A no-op when there
-    /// is no selectable row.
+    /// Enter the detail pane for the current selection, starting at the
+    /// top. A no-op when there is no selectable row.
     pub fn enter_detail(&mut self) {
         if self.selected_row().is_some() {
+            self.detail_scroll = 0;
             self.mode = Mode::Detail;
         }
     }
@@ -556,6 +579,7 @@ mod tests {
             description: desc.to_string(),
             summary: String::new(),
             keywords: kw.iter().map(|s| s.to_string()).collect(),
+            repository_url: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
             pinned_version: None,
@@ -1087,5 +1111,30 @@ mod tests {
         s.apply_query("skill review");
         assert_eq!(s.filtered.len(), 1);
         assert_eq!(s.selected_row().unwrap().repo, "acme/code-review");
+    }
+
+    #[test]
+    fn detail_scroll_saturates_at_zero_and_resets_on_context_change() {
+        let mut s = seeded();
+        // Saturates at the top.
+        s.scroll_detail(-5);
+        assert_eq!(s.detail_scroll, 0);
+        s.scroll_detail(3);
+        assert_eq!(s.detail_scroll, 3);
+        // Selection move ⇒ different row ⇒ reset.
+        s.move_selection(1);
+        assert_eq!(s.detail_scroll, 0);
+        // Entering detail starts at the top.
+        s.scroll_detail(2);
+        s.enter_detail();
+        assert_eq!(s.detail_scroll, 0);
+        // A query edit may change the selected row ⇒ reset.
+        s.scroll_detail(2);
+        s.apply_query("alpha");
+        assert_eq!(s.detail_scroll, 0);
+        // A wholesale row replacement resets too.
+        s.scroll_detail(2);
+        s.set_rows(vec![row("r/zeta", "d", &[], ArtifactState::NotInstalled)]);
+        assert_eq!(s.detail_scroll, 0);
     }
 }

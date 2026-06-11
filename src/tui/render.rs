@@ -64,6 +64,10 @@ const W_STATUS: usize = 19;
 /// symbol). Sized to exactly this side-by-side so Detail gets all slack.
 const CATALOG_WIDTH: u16 = (2 + W_REPO + 2 + W_KIND + 2 + W_TAG + 2 + W_STATUS) as u16 + 2 /* borders */;
 
+/// Narrowest usable Detail column (side-by-side layout threshold in
+/// [`draw`], and the conservative wrap width [`detail_scroll_max`] uses).
+const DETAIL_MIN_WIDTH: u16 = 30;
+
 /// Truncate `s` to `width` *display chars* (ellipsis on overflow) then
 /// left-pad to exactly `width`, so every cell is the same width and the
 /// table never skews on a long repository path.
@@ -105,6 +109,31 @@ pub struct PickerView {
     pub pinned: Option<String>,
 }
 
+/// One semantic line of the Detail pane. Pure data — [`draw`] maps each
+/// kind to concrete styling with zero logic of its own.
+///
+/// Closed internal enum — matches stay total, no `#[non_exhaustive]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DetailLine {
+    /// Blank spacer.
+    Blank,
+    /// The artifact reference — centered, bold, accent color.
+    Identifier(String),
+    /// An underlined section label; the colon is part of the label
+    /// (e.g. `Summary:`).
+    SectionLabel(&'static str),
+    /// `label value` on one line; the label includes the colon
+    /// (e.g. `Keywords:`).
+    MetaEntry {
+        /// The highlighted key, colon included.
+        label: &'static str,
+        /// The plain value rendered on the same line.
+        value: String,
+    },
+    /// Plain wrapped body text.
+    Text(String),
+}
+
 /// A plain, ratatui-free description of the whole screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderModel {
@@ -126,8 +155,12 @@ pub struct RenderModel {
     pub headers: [&'static str; 4],
     /// The visible (filtered) rows.
     pub rows: Vec<RenderRow>,
-    /// The detail-pane text for the selected row (multi-line).
-    pub detail: String,
+    /// The detail-pane content for the selected row, as semantic lines
+    /// ([`draw`] maps each kind to its styling).
+    pub detail: Vec<DetailLine>,
+    /// The detail pane's vertical scroll offset, already clamped to the
+    /// pane's estimated rendered height (see [`detail_scroll_max`]).
+    pub detail_scroll: u16,
     /// The bottom status line — transient only (loading, counts, batch
     /// results, marked-set actions). Empty when idle.
     pub status: String,
@@ -151,6 +184,91 @@ pub struct RenderModel {
     pub show_help: bool,
     /// The version-picker overlay, when [`Mode::VersionPick`].
     pub picker: Option<PickerView>,
+}
+
+/// Build the Detail pane's semantic lines for the current selection.
+///
+/// Layout: the centered identifier framed by blank lines, an underlined
+/// `Summary:` section (the short blurb, `-` when absent), an optional
+/// `Description:` section (only when a description exists), then a
+/// `Metadata:` section of `Label: value` rows. Version and status are
+/// deliberately NOT repeated here — the catalog row already shows both
+/// (Tag column, status glyph). `Pinned:` appears only when the picker
+/// pinned a version.
+fn detail_lines(state: &TuiState) -> Vec<DetailLine> {
+    let Some(r) = state.selected_row() else {
+        return vec![DetailLine::Text("no selection".to_string())];
+    };
+    let keywords = if r.keywords.is_empty() {
+        "-".to_string()
+    } else {
+        r.keywords.join(", ")
+    };
+    let summary = if r.summary.is_empty() { "-" } else { r.summary.as_str() };
+
+    let mut lines = vec![
+        DetailLine::Blank,
+        DetailLine::Identifier(r.repo.clone()),
+        DetailLine::Blank,
+        DetailLine::SectionLabel("Summary:"),
+        DetailLine::Blank,
+        DetailLine::Text(summary.to_string()),
+    ];
+    if !r.description.is_empty() {
+        lines.extend([
+            DetailLine::Blank,
+            DetailLine::SectionLabel("Description:"),
+            DetailLine::Blank,
+            DetailLine::Text(r.description.clone()),
+        ]);
+    }
+    lines.extend([
+        DetailLine::Blank,
+        DetailLine::SectionLabel("Metadata:"),
+        DetailLine::Blank,
+        DetailLine::MetaEntry {
+            label: "Keywords:",
+            value: keywords,
+        },
+        DetailLine::MetaEntry {
+            label: "Repository:",
+            value: r.repository_url.clone().unwrap_or_else(|| "-".to_string()),
+        },
+    ]);
+    if let Some(p) = &r.pinned_version {
+        lines.push(DetailLine::MetaEntry {
+            label: "Pinned:",
+            value: p.clone(),
+        });
+    }
+    lines
+}
+
+/// The visible text of one semantic detail line (the wrap-estimate input;
+/// tests reuse it to assert content without caring about styling).
+fn detail_line_text(line: &DetailLine) -> String {
+    match line {
+        DetailLine::Blank => String::new(),
+        DetailLine::Identifier(s) | DetailLine::Text(s) => s.clone(),
+        DetailLine::SectionLabel(l) => (*l).to_string(),
+        DetailLine::MetaEntry { label, value } => format!("{label} {value}"),
+    }
+}
+
+/// Conservative upper bound for the detail scroll offset.
+///
+/// `Paragraph::scroll` counts *post-wrap* rows, which depend on the live
+/// pane width the pure layer cannot know. Estimate each line's row count
+/// at the narrowest possible pane ([`DETAIL_MIN_WIDTH`] minus the two
+/// border cells); a wider pane wraps less, so the bound only ever
+/// over-allows (a short blank tail when fully scrolled), never under.
+fn detail_scroll_max(lines: &[DetailLine]) -> u16 {
+    let width = usize::from(DETAIL_MIN_WIDTH - 2);
+    let rows: usize = lines
+        .iter()
+        .map(|l| detail_line_text(l).chars().count().div_ceil(width).max(1))
+        .sum();
+    u16::try_from(rows.saturating_sub(1)).unwrap_or(u16::MAX)
 }
 
 /// Pick the widest hint tier whose text (plus a one-cell right margin)
@@ -232,45 +350,8 @@ pub fn frame(state: &TuiState) -> RenderModel {
         })
         .collect();
 
-    let detail = match state.selected_row() {
-        Some(r) => {
-            let kw = if r.keywords.is_empty() {
-                "-".to_string()
-            } else {
-                r.keywords.join(", ")
-            };
-            let version = if !r.version.is_empty() {
-                r.version.as_str()
-            } else if !r.latest_tag.is_empty() {
-                r.latest_tag.as_str()
-            } else {
-                "-"
-            };
-            let pinned = match &r.pinned_version {
-                Some(p) => format!("\npinned: {p}"),
-                None => String::new(),
-            };
-            // Short blurb above the full description, only when present
-            // (keeps the layout — and snapshot tests — unchanged for
-            // entries without a summary).
-            let summary = if r.summary.is_empty() {
-                String::new()
-            } else {
-                format!("summary: {}\n\n", r.summary)
-            };
-            format!(
-                "{}\n\n{}{}\n\nkeywords: {}\nversion: {}{}\nstatus: {}",
-                r.repo,
-                summary,
-                if r.description.is_empty() { "-" } else { &r.description },
-                kw,
-                version,
-                pinned,
-                r.state
-            )
-        }
-        None => "no selection".to_string(),
-    };
+    let detail = detail_lines(state);
+    let detail_scroll = state.detail_scroll.min(detail_scroll_max(&detail));
 
     // Status is transient only — loading / counts / batch results, or the
     // marked-set action keys (contextual). The always-on key summary lives
@@ -291,7 +372,7 @@ pub fn frame(state: &TuiState) -> RenderModel {
     // Widest → narrowest. `draw` picks the widest that fits; the last
     // (`? help`) is the irreducible minimum so help is always discoverable.
     let hint_tiers = vec![
-        "↑↓ move · space mark · i/u/d act · v versions · g scope · / search · ? help · q quit".to_string(),
+        "↑↓ move · space mark · i/u/d act · v versions · o open · g scope · / search · ? help · q quit".to_string(),
         "↑↓ move · i/u/d act · v ver · g scope · / search · ? help · q quit".to_string(),
         "↑↓ · i/u/d · v · g · / · ? help · q".to_string(),
         "i/u/d v g / ? q".to_string(),
@@ -335,6 +416,7 @@ pub fn frame(state: &TuiState) -> RenderModel {
         headers: ["Repo", "Kind", "Tag", "Status"],
         rows,
         detail,
+        detail_scroll,
         status,
         hint,
         hint_tiers,
@@ -365,7 +447,6 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
     // Side-by-side once there is room for the full Catalog plus a usable
     // Detail column; the Catalog takes exactly its natural width and
     // Detail absorbs all remaining space.
-    const DETAIL_MIN_WIDTH: u16 = 30;
     let (list_area, detail_area) = if chunks[2].width >= CATALOG_WIDTH + DETAIL_MIN_WIDTH {
         let cols = Layout::default()
             .direction(Direction::Horizontal)
@@ -525,10 +606,37 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(if model.detail_focused { Color::Cyan } else { Color::Blue }))
         .title(Span::styled("Detail", accent));
+    // Mechanical mapping only — the layout decisions live in
+    // `detail_lines` (the pure projection).
+    let detail_text: Vec<Line> = model
+        .detail
+        .iter()
+        .map(|l| match l {
+            DetailLine::Blank => Line::from(""),
+            DetailLine::Identifier(s) => Line::from(Span::styled(
+                s.clone(),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ))
+            .alignment(Alignment::Center),
+            DetailLine::SectionLabel(label) => Line::from(Span::styled(
+                (*label).to_string(),
+                Style::default().fg(Color::White).add_modifier(Modifier::UNDERLINED),
+            )),
+            DetailLine::MetaEntry { label, value } => Line::from(vec![
+                Span::styled(
+                    format!("{label} "),
+                    Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(value.clone(), Style::default().fg(Color::White)),
+            ]),
+            DetailLine::Text(s) => Line::from(Span::styled(s.clone(), Style::default().fg(Color::White))),
+        })
+        .collect();
     f.render_widget(
-        Paragraph::new(Span::styled(model.detail.clone(), Style::default().fg(Color::White)))
+        Paragraph::new(detail_text)
             .block(detail_block)
-            .wrap(Wrap { trim: false }),
+            .wrap(Wrap { trim: false })
+            .scroll((model.detail_scroll, 0)),
         detail_area,
     );
 
@@ -653,11 +761,12 @@ fn legend_line(truncation_hint: &str) -> Line<'static> {
 /// A centered help overlay listing every keybinding.
 fn draw_help(f: &mut Frame) {
     let rows = [
-        ("↑ / ↓", "move selection"),
+        ("↑ / ↓", "move selection (scroll the detail pane when open)"),
         ("space", "mark / unmark the row"),
         ("a / c", "mark all visible / clear marks"),
         ("i / u / d", "install / update / uninstall (marked set or selection)"),
         ("v", "pick a specific version for the selected row"),
+        ("o", "open the selected entry's repository URL"),
         ("g", "toggle scope: project ⇄ global"),
         ("/", "search; type to filter, enter to commit"),
         ("enter", "open the detail pane"),
@@ -735,6 +844,12 @@ mod tests {
     use super::*;
     use crate::tui::state::{ArtifactState, TuiRow};
 
+    /// Flatten the semantic detail lines to one plain string for
+    /// contains-style assertions (styling is irrelevant to content tests).
+    fn detail_text(m: &RenderModel) -> String {
+        m.detail.iter().map(detail_line_text).collect::<Vec<_>>().join("\n")
+    }
+
     fn row(repo: &str, state: ArtifactState) -> TuiRow {
         TuiRow {
             kind: "skill".to_string(),
@@ -742,6 +857,7 @@ mod tests {
             description: "review code".to_string(),
             summary: String::new(),
             keywords: vec!["rust".to_string(), "lint".to_string()],
+            repository_url: None,
             latest_tag: "latest".to_string(),
             version: "2.1.0".to_string(),
             pinned_version: None,
@@ -776,10 +892,13 @@ mod tests {
         assert_eq!(m.rows[1].status_color, ColorKey::NotInstalled);
         assert!(m.rows[0].selected, "first row selected by default");
         assert!(!m.rows[1].selected);
-        assert!(m.detail.contains("r/alpha"));
-        assert!(m.detail.contains("keywords: rust, lint"));
-        assert!(m.detail.contains("version: 2.1.0"));
-        assert!(m.detail.contains("status: installed"));
+        let detail = detail_text(&m);
+        assert!(detail.contains("r/alpha"));
+        assert!(detail.contains("Keywords: rust, lint"));
+        // Version + status live on the catalog row (Tag column, status
+        // glyph) — the detail pane does not repeat them.
+        assert!(!detail.contains("Version:"));
+        assert!(!detail.contains("Status:"));
         assert!(!m.detail_focused);
         // Idle: status is empty; the key summary lives in `hint`.
         assert_eq!(m.status, "");
@@ -840,7 +959,7 @@ mod tests {
         assert_eq!(m.title, "Grimoire [offline]");
         assert_eq!(m.status, "loading catalog…");
         assert!(m.rows.is_empty());
-        assert_eq!(m.detail, "no selection");
+        assert_eq!(m.detail, vec![DetailLine::Text("no selection".to_string())]);
     }
 
     #[test]
@@ -908,7 +1027,76 @@ mod tests {
         s.confirm_version();
         let m2 = frame(&s);
         assert_eq!(m2.rows[0].columns[2], fit("*2.1.0", W_TAG));
-        assert!(m2.detail.contains("pinned: 2.1.0"));
+        assert!(detail_text(&m2).contains("Pinned: 2.1.0"));
+    }
+
+    #[test]
+    fn detail_lines_follow_the_section_layout() {
+        let mut s = TuiState::new();
+        let mut r = row("r/alpha", ArtifactState::Installed);
+        r.summary = "short blurb".to_string();
+        r.repository_url = Some("https://github.com/acme/alpha".to_string());
+        s.set_rows(vec![r]);
+        let m = frame(&s);
+        assert_eq!(
+            m.detail,
+            vec![
+                DetailLine::Blank,
+                DetailLine::Identifier("r/alpha".to_string()),
+                DetailLine::Blank,
+                DetailLine::SectionLabel("Summary:"),
+                DetailLine::Blank,
+                DetailLine::Text("short blurb".to_string()),
+                DetailLine::Blank,
+                DetailLine::SectionLabel("Description:"),
+                DetailLine::Blank,
+                DetailLine::Text("review code".to_string()),
+                DetailLine::Blank,
+                DetailLine::SectionLabel("Metadata:"),
+                DetailLine::Blank,
+                DetailLine::MetaEntry {
+                    label: "Keywords:",
+                    value: "rust, lint".to_string()
+                },
+                DetailLine::MetaEntry {
+                    label: "Repository:",
+                    value: "https://github.com/acme/alpha".to_string()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn detail_lines_fall_back_to_dashes() {
+        // No summary, no description, no repository ⇒ `-` placeholders and
+        // the Description section is omitted entirely.
+        let mut s = TuiState::new();
+        let mut r = row("r/alpha", ArtifactState::Installed);
+        r.description = String::new();
+        s.set_rows(vec![r]);
+        let m = frame(&s);
+        let detail = detail_text(&m);
+        assert!(!detail.contains("Description:"), "empty description omits the section");
+        assert!(detail.contains("Repository: -"));
+        assert!(m.detail.contains(&DetailLine::Text("-".to_string())), "summary dash");
+    }
+
+    #[test]
+    fn frame_clamps_detail_scroll_to_estimated_height() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![row("r/alpha", ArtifactState::Installed)]);
+        s.enter_detail();
+        // Way past the end: the projection clamps to the wrap estimate.
+        for _ in 0..500 {
+            s.scroll_detail(1);
+        }
+        let m = frame(&s);
+        let max = detail_scroll_max(&m.detail);
+        assert_eq!(m.detail_scroll, max);
+        assert!(max > 0, "a populated pane has a non-zero scroll range");
+        // Within range: passed through untouched.
+        s.detail_scroll = 1;
+        assert_eq!(frame(&s).detail_scroll, 1);
     }
 
     #[test]

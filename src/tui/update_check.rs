@@ -405,6 +405,7 @@ mod tests {
             description: String::new(),
             summary: String::new(),
             keywords: Vec::new(),
+            repository_url: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
             pinned_version: None,
