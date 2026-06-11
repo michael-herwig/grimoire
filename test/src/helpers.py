@@ -43,8 +43,9 @@ def write_config(
     skills: dict[str, str] | None = None,
     rules: dict[str, str] | None = None,
     bundles: dict[str, str] | None = None,
+    agents: dict[str, str] | None = None,
 ) -> Path:
-    """Write a ``grimoire.toml`` with the given skill/rule/bundle refs.
+    """Write a ``grimoire.toml`` with the given skill/rule/bundle/agent refs.
 
     Each value is a fully-qualified ``registry/repo:tag`` (or ``@digest``)
     string, exactly as a user would write it. Returns the config path.
@@ -59,6 +60,9 @@ def write_config(
         lines.append(f'{name} = "{ref}"')
     lines.append("[rules]")
     for name, ref in (rules or {}).items():
+        lines.append(f'{name} = "{ref}"')
+    lines.append("[agents]")
+    for name, ref in (agents or {}).items():
         lines.append(f'{name} = "{ref}"')
     cfg = project_dir / "grimoire.toml"
     cfg.write_text("\n".join(lines) + "\n")

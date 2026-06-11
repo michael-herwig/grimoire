@@ -340,6 +340,51 @@ def test_search_kind_keyword_filters(
     )
 
 
+def test_search_kind_agent_keyword_filters_to_agents_only(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """The ``agent`` kind keyword filters search results to agent artifacts only.
+
+    Follows the same warm-cache / offline pattern as the skill/rule kind-filter
+    test above — warm the catalog scoped to ``unique_repo``, then run the
+    kind-filter query ``--offline``.
+    """
+    # Publish one agent and one rule under the same unique_repo segment.
+    make_artifact(
+        f"{unique_repo}/my-agent",
+        "agent",
+        {"my-agent.md": "---\nname: my-agent\ndescription: An agent.\nmodel: sonnet\n---\n# Agent\n"},
+        tag="latest",
+    )
+    make_artifact(
+        f"{unique_repo}/my-rule",
+        "rule",
+        {"my-rule.md": "---\npaths: ['**/*.rs']\n---\n# Rule\n"},
+        tag="latest",
+    )
+    runner = grim_at(project_dir)
+
+    # Warm the catalog scoped to this test's repos.
+    warm = runner.json(
+        "search", unique_repo, "--registry", REGISTRY_HOST, "--refresh"
+    )
+    warm_repos = {r["repo"].split("/")[-1] for r in warm}
+    assert {"my-agent", "my-rule"} <= warm_repos, (
+        f"warm catalog must hold both kinds, got {warm_repos}"
+    )
+
+    # `<unique_repo> agent` over the warm cache ⇒ only the agent survives.
+    agent_rows = runner.json(
+        "--offline", "search", f"{unique_repo} agent", "--registry", REGISTRY_HOST
+    )
+    agent_repos = [r["repo"] for r in agent_rows]
+    assert all(r["kind"] == "agent" for r in agent_rows), agent_rows
+    assert any(r.endswith(f"{unique_repo}/my-agent") for r in agent_repos), agent_repos
+    assert not any(r.endswith(f"{unique_repo}/my-rule") for r in agent_repos), (
+        f"the `agent` kind keyword must filter out the rule, got {agent_repos}"
+    )
+
+
 def test_tui_non_tty_exits_0_with_message(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
