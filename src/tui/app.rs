@@ -25,25 +25,28 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
 use crate::catalog::registry_catalog::Catalog;
-use crate::config::declaration::DesiredSet;
+use crate::command::add::{relock_entry, write_config};
+use crate::command::grim;
+use crate::command::uninstall::undeclare_and_unlock;
+use crate::config::declaration::{ConfigOptions, DesiredSet};
+use crate::config::global_config::GlobalConfig;
+use crate::config::project_config::ProjectConfig;
 use crate::config::scope::ConfigScope;
 use crate::install::install_state::InstallState;
 use crate::install::installer::{InstallOutcome, install_all};
 use crate::install::materializer::DefaultMaterializer;
 use crate::install::target::InstallTarget;
+use crate::lock::file_lock::ConfigFileLock;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
 use crate::oci::access::OciAccess;
 use crate::oci::{ArtifactKind, Identifier};
-use crate::resolve::resolve_options::ResolveOptions;
-use crate::resolve::resolver::resolve_lock;
 
 use super::event::{BatchOp, TuiAction, TuiInput, handle};
 use super::render::{draw, frame};
 use super::state::{ArtifactState, Mode, TuiRow, TuiState};
 use super::update_check::{CheckMsg, RowCheck, UpdateChecker, eligible_for_recheck};
 
-use std::collections::BTreeMap;
 use std::time::Instant;
 
 use tokio::sync::mpsc::Receiver;
@@ -68,11 +71,14 @@ pub struct TuiContext {
     pub scope: ConfigScope,
     /// The workspace root targets are rooted at.
     pub workspace: std::path::PathBuf,
-    /// The scope's lock path (for badge derivation only — the TUI
-    /// resolves a fresh single-artifact lock per action).
+    /// The scope's lock path (badge derivation + the per-action relock).
     pub lock_path: std::path::PathBuf,
     /// The scope's install-state path.
     pub state_path: std::path::PathBuf,
+    /// The scope's config path (`grimoire.toml`). The TUI declares an
+    /// install into it through the same seam `grim add` uses, and the
+    /// delete action undeclares through the `grim uninstall` seam.
+    pub config_path: std::path::PathBuf,
     /// The AI client target(s) to materialize into (the raw config `clients`
     /// option; empty triggers detection at install time). Still needed for
     /// the `InstallTarget::parse` fallback in [`perform`].
@@ -101,6 +107,8 @@ pub struct ScopeSwap {
     pub lock_path: std::path::PathBuf,
     /// The scope's install-state path.
     pub state_path: std::path::PathBuf,
+    /// The scope's config path (`grimoire.toml`).
+    pub config_path: std::path::PathBuf,
     /// The AI client target(s) to materialize into (raw config clients).
     pub clients_default: Vec<String>,
     /// The effective selected clients for this scope (config or detected).
@@ -122,6 +130,7 @@ impl TuiContext {
             workspace: std::mem::replace(&mut self.workspace, alt.workspace),
             lock_path: std::mem::replace(&mut self.lock_path, alt.lock_path),
             state_path: std::mem::replace(&mut self.state_path, alt.state_path),
+            config_path: std::mem::replace(&mut self.config_path, alt.config_path),
             clients_default: std::mem::replace(&mut self.clients_default, alt.clients_default),
             clients_selected: std::mem::replace(&mut self.clients_selected, alt.clients_selected),
             label: std::mem::replace(&mut self.scope_label, alt.label),
@@ -236,6 +245,14 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
             }
             TuiAction::Batch { op, rows } => {
                 run_batch(&ctx, &mut state, &rows, op).await;
+                // An install/update may have just pinned a version older
+                // than the registry's floating tag (the user picked an old
+                // version in the picker) — re-check exactly those rows now
+                // so the badge flips to `↑ outdated` immediately, not at
+                // the next manual refresh.
+                if op != BatchOp::Uninstall {
+                    recheck_rows(&ctx, &state, &mut checker, &rows);
+                }
             }
             TuiAction::LoadVersions { row } => {
                 load_versions(&ctx, &mut state, row).await;
@@ -362,6 +379,39 @@ fn build_row_check(lock: &GrimoireLock, row: &TuiRow) -> Option<RowCheck> {
         id,
         locked_digest: locked.pinned.digest(),
     })
+}
+
+/// Spawn immediate per-row re-checks for the rows a batch just installed
+/// or updated (no debounce — a finished batch is an explicit gesture, like
+/// `r`). The checker's `(repo, generation)` in-flight dedup absorbs any
+/// overlap with a scheduled sweep. This is what flips a just-installed old
+/// version to `↑ outdated` without waiting for a manual refresh: the lock
+/// now pins the old digest, and the floating-tag re-check observes the
+/// registry's newer one.
+fn recheck_rows(ctx: &TuiContext, state: &TuiState, checker: &mut UpdateChecker, rows: &[usize]) {
+    if ctx.offline {
+        return;
+    }
+    let (lock, _install_state) = load_scope_for_badges(ctx);
+    let Some(lock) = lock else {
+        return; // No lock ⇒ no pins to compare against.
+    };
+    let checks = post_batch_checks(&lock, &state.rows, rows);
+    if !checks.is_empty() {
+        checker.spawn_row_checks(checks);
+    }
+}
+
+/// The pure post-batch selection: the [`RowCheck`]s for exactly the
+/// acted-on row indices that are eligible (installed/outdated) and carry a
+/// lock pin. Out-of-range indices and ineligible rows are skipped.
+fn post_batch_checks(lock: &GrimoireLock, rows: &[TuiRow], indices: &[usize]) -> Vec<RowCheck> {
+    indices
+        .iter()
+        .filter_map(|&i| rows.get(i))
+        .filter(|r| eligible_for_recheck(r))
+        .filter_map(|r| build_row_check(lock, r))
+        .collect()
 }
 
 /// Whether a [`CheckMsg`] stamped with `msg_generation` is still fresh at
@@ -721,11 +771,12 @@ async fn run_batch(ctx: &TuiContext, state: &mut TuiState, rows: &[usize], op: B
     });
 }
 
-/// Uninstall one catalog row through the shared
-/// [`crate::install::uninstall`] seam: delete the materialized files,
-/// drop the install-state record, and drop the lock pin (the TUI does
-/// not edit `grimoire.toml` — it never wrote a config binding). Mirrors
-/// the file/state half of `command::uninstall` without forking it.
+/// Uninstall one catalog row through the shared seams: delete the
+/// materialized files and drop the install-state record
+/// ([`crate::install::uninstall`]), then undeclare the entry from the
+/// config + lock ([`undeclare_and_unlock`]) — the full inverse of the
+/// install action, which declares like `grim add`. Lock entries written
+/// by the TUI before it declared installs are dropped the same way.
 fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
     let (_registry, repository) =
         split_repo(&row.repo).ok_or_else(|| anyhow::anyhow!("malformed catalog repo: {}", row.repo))?;
@@ -763,19 +814,16 @@ fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
             .with_context(|| format!("vendor config sync failed for client '{client}'"))?;
     }
 
-    // Drop the lock pin so the badge no longer derives "installed".
-    if let Ok(previous) = lock_io::load(&ctx.lock_path) {
-        let mut lock = previous.clone();
-        match kind {
-            ArtifactKind::Skill => lock.skills.retain(|a| a.name != name),
-            ArtifactKind::Rule => lock.rules.retain(|a| a.name != name),
-            // The TUI lists individual skills/rules; bundles are not
-            // browsable or installable through it.
-            ArtifactKind::Bundle => unreachable!("the TUI never operates on bundles"),
-        }
-        lock_io::save(&ctx.lock_path, &lock, Some(&previous))
-            .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
-    }
+    // Undeclare from the config + lock through the `grim uninstall` seam
+    // (config flock held for the read-modify-write), so the badge no
+    // longer derives "installed" and a later `grim install` does not
+    // silently bring the entry back.
+    let _guard = match ctx.config_path.exists() {
+        true => Some(grim(ConfigFileLock::try_acquire(&ctx.config_path))?),
+        false => None,
+    };
+    let (options, mut set) = load_scope_declaration(ctx)?;
+    undeclare_and_unlock(&ctx.config_path, &ctx.lock_path, &options, &mut set, kind, &name)?;
     Ok(())
 }
 
@@ -791,6 +839,13 @@ fn outcome_label(o: &InstallOutcome) -> &'static str {
 }
 
 /// Resolve + materialize one catalog repo through the shared path.
+///
+/// Mirrors `grim add` + a single-artifact `grim install`: the entry is
+/// **declared** in the scope's `grimoire.toml` under the config flock,
+/// relocked through the same partial-relock seam `add` uses (so the lock's
+/// declaration hash always matches the config — a TUI install is never an
+/// undeclared lock entry), and then only the acted-on artifact is
+/// materialized.
 async fn perform(ctx: &TuiContext, row: &TuiRow, is_update: bool) -> anyhow::Result<String> {
     let (registry, repository) =
         split_repo(&row.repo).ok_or_else(|| anyhow::anyhow!("malformed catalog repo: {}", row.repo))?;
@@ -812,24 +867,35 @@ async fn perform(ctx: &TuiContext, row: &TuiRow, is_update: bool) -> anyhow::Res
         .unwrap_or_else(|| "latest".to_string());
     let id = Identifier::new_registry(repository.clone(), registry).clone_with_tag(tag);
 
-    // A single-artifact desired set — exactly the shape the commands feed
-    // the resolver, so resolution/locking/materializing are unforked.
-    let mut skills = BTreeMap::new();
-    let mut rules = BTreeMap::new();
+    // Declare + relock under the config flock, exactly like `grim add`
+    // (the declaration is re-read fresh — the config can change while the
+    // TUI runs). A repeated install of the same entry is an idempotent
+    // overwrite.
+    let _guard = match ctx.config_path.exists() {
+        true => Some(grim(ConfigFileLock::try_acquire(&ctx.config_path))?),
+        false => None,
+    };
+    let (options, mut set) = load_scope_declaration(ctx)?;
     match kind {
         ArtifactKind::Skill => {
-            skills.insert(name.clone(), id);
+            set.skills.insert(name.clone(), id);
         }
         ArtifactKind::Rule => {
-            rules.insert(name.clone(), id);
+            set.rules.insert(name.clone(), id);
         }
         ArtifactKind::Bundle => unreachable!("the TUI never operates on bundles"),
     }
-    let set = DesiredSet::from_parts(skills, rules);
+    set.invalidate_declaration_hash_cache();
+    grim(write_config(&ctx.config_path, &options, &set))?;
 
-    let new_lock = resolve_lock(&set, &ctx.access, ctx.scope, &ResolveOptions::default())
-        .await
-        .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
+    let previous = lock_io::load(&ctx.lock_path).ok();
+    let new_lock = grim(relock_entry(&set, previous.as_ref(), &name, &ctx.access, ctx.scope).await)?;
+    grim(lock_io::save(&ctx.lock_path, &new_lock, previous.as_ref()))?;
+
+    // Materialize only the acted-on artifact — the rest of the (now
+    // complete) lock belongs to `grim install`, not a single-row action.
+    let single = single_entry_lock(&new_lock, kind, &name)
+        .ok_or_else(|| anyhow::anyhow!("resolved lock is missing '{name}'"))?;
 
     let target = InstallTarget::parse(&ctx.workspace, ctx.scope, &[], &ctx.clients_default)
         .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
@@ -840,7 +906,7 @@ async fn perform(ctx: &TuiContext, row: &TuiRow, is_update: bool) -> anyhow::Res
     // `update` forces re-materialization (rolling-release contract),
     // matching `command::update`; `install` honours the integrity gate.
     let outcomes = install_all(
-        &new_lock,
+        &single,
         &ctx.access,
         &materializer,
         &target,
@@ -862,10 +928,6 @@ async fn perform(ctx: &TuiContext, row: &TuiRow, is_update: bool) -> anyhow::Res
             .with_context(|| format!("vendor config sync failed for client '{client}'"))?;
     }
 
-    // Persist the resolved single-artifact lock alongside the scope so the
-    // badge derivation (and a later command run) observes the new pin.
-    merge_and_save_lock(ctx, &new_lock, kind, &name)?;
-
     let mut label = "unchanged".to_string();
     for o in outcomes {
         match o.result {
@@ -876,39 +938,45 @@ async fn perform(ctx: &TuiContext, row: &TuiRow, is_update: bool) -> anyhow::Res
     Ok(label)
 }
 
-/// Splice the single resolved artifact into the scope's existing lock (or
-/// create one) and persist it, so the row badge reflects the new pin
-/// without clobbering other locked artifacts.
-fn merge_and_save_lock(
-    ctx: &TuiContext,
-    resolved: &GrimoireLock,
-    kind: ArtifactKind,
-    name: &str,
-) -> anyhow::Result<()> {
-    let mut lock = lock_io::load(&ctx.lock_path).unwrap_or_else(|_| resolved.clone());
-    let Some(entry) = resolved
+/// Load the active scope's declaration fresh from disk: the config can
+/// change while the TUI runs (another `grim add`, an editor), so each
+/// install/uninstall re-reads rather than caching a parse from startup.
+/// A missing global config is an empty declaration (mirroring
+/// `scope_resolution::resolve`); a missing project config is an error.
+fn load_scope_declaration(ctx: &TuiContext) -> anyhow::Result<(ConfigOptions, DesiredSet)> {
+    match ctx.scope {
+        ConfigScope::Global => {
+            let cfg = grim(GlobalConfig::load(&ctx.config_path))?;
+            Ok((cfg.options, cfg.set))
+        }
+        ConfigScope::Project => {
+            let discovered = grim(ProjectConfig::discover(Some(&ctx.config_path)))?;
+            Ok((discovered.config.options, discovered.config.set))
+        }
+    }
+}
+
+/// Project the single `kind`/`name` entry out of `lock` as a one-artifact
+/// lock (same metadata), so the shared `install_all` path materializes
+/// exactly the acted-on row and nothing else. `None` when the entry is
+/// absent from the resolved lock (defensive — not expected).
+fn single_entry_lock(lock: &GrimoireLock, kind: ArtifactKind, name: &str) -> Option<GrimoireLock> {
+    let entry = lock
         .skills
         .iter()
-        .chain(resolved.rules.iter())
+        .chain(lock.rules.iter())
         .find(|a| a.kind == kind && a.name == name)
-        .cloned()
-    else {
-        return Ok(());
+        .cloned()?;
+    let (skills, rules) = match kind {
+        ArtifactKind::Skill => (vec![entry], Vec::new()),
+        ArtifactKind::Rule => (Vec::new(), vec![entry]),
+        ArtifactKind::Bundle => return None,
     };
-    let bucket = match kind {
-        ArtifactKind::Skill => &mut lock.skills,
-        ArtifactKind::Rule => &mut lock.rules,
-        ArtifactKind::Bundle => unreachable!("the TUI never operates on bundles"),
-    };
-    match bucket.iter_mut().find(|a| a.name == name) {
-        Some(slot) => *slot = entry,
-        None => bucket.push(entry),
-    }
-    // Carry the freshly-resolved declaration metadata so the lock stays
-    // self-consistent for a subsequent command-line run.
-    lock.metadata = resolved.metadata.clone();
-    lock_io::save(&ctx.lock_path, &lock, None).map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
-    Ok(())
+    Some(GrimoireLock {
+        metadata: lock.metadata.clone(),
+        skills,
+        rules,
+    })
 }
 
 /// Split `registry/repository` at the first `/`.
@@ -1000,6 +1068,83 @@ mod tests {
         assert!(
             is_generation_fresh(1, 1),
             "a catalog stamped under the live generation is reconciled"
+        );
+    }
+
+    fn sha(byte: char) -> String {
+        std::iter::repeat_n(byte, 64).collect()
+    }
+
+    /// A locked artifact pinned under registry `r` with `repository == name`,
+    /// matching the `installed_row("r/<name>")` fixture shape.
+    fn locked(name: &str, kind: ArtifactKind, byte: char) -> crate::lock::locked_artifact::LockedArtifact {
+        let id = Identifier::new_registry(name, "r").clone_with_digest(crate::oci::Digest::Sha256(sha(byte)));
+        crate::lock::locked_artifact::LockedArtifact::direct(
+            name.to_string(),
+            kind,
+            crate::oci::PinnedIdentifier::try_from(id).unwrap(),
+        )
+    }
+
+    fn lock_fixture(
+        skills: Vec<crate::lock::locked_artifact::LockedArtifact>,
+        rules: Vec<crate::lock::locked_artifact::LockedArtifact>,
+    ) -> GrimoireLock {
+        GrimoireLock {
+            metadata: crate::lock::grimoire_lock::LockMetadata {
+                lock_version: crate::lock::lock_version::LockVersion::V1,
+                declaration_hash_version: 1,
+                declaration_hash: format!("sha256:{}", sha('d')),
+                generated_by: "grim test".to_string(),
+                generated_at: "2026-06-11T00:00:00Z".to_string(),
+            },
+            skills,
+            rules,
+        }
+    }
+
+    #[test]
+    fn post_batch_checks_selects_only_eligible_locked_rows() {
+        // Regression: after an install of an old version the acted-on row
+        // must be selected for an immediate registry re-check (that check is
+        // what flips the badge to `outdated` without a manual refresh) —
+        // while ineligible rows, unlocked rows, and out-of-range indices
+        // contribute nothing.
+        let lock = lock_fixture(vec![locked("a", ArtifactKind::Skill, '1')], Vec::new());
+        let mut not_installed = installed_row("r/b");
+        not_installed.state = ArtifactState::NotInstalled;
+        let rows = vec![installed_row("r/a"), not_installed, installed_row("r/unlocked")];
+
+        let checks = post_batch_checks(&lock, &rows, &[0, 1, 2, 99]);
+
+        assert_eq!(checks.len(), 1, "only the installed + locked row is rechecked");
+        assert_eq!(checks[0].repo, "r/a");
+        assert_eq!(checks[0].locked_digest, crate::oci::Digest::Sha256(sha('1')));
+    }
+
+    #[test]
+    fn single_entry_lock_projects_one_artifact_with_metadata() {
+        let lock = lock_fixture(
+            vec![
+                locked("a", ArtifactKind::Skill, '1'),
+                locked("b", ArtifactKind::Skill, '2'),
+            ],
+            vec![locked("c", ArtifactKind::Rule, '3')],
+        );
+
+        let single = single_entry_lock(&lock, ArtifactKind::Skill, "b").expect("entry exists");
+        assert_eq!(single.skills.len(), 1);
+        assert_eq!(single.skills[0].name, "b");
+        assert!(single.rules.is_empty());
+        assert_eq!(single.metadata, lock.metadata, "metadata carries over unchanged");
+
+        let rule = single_entry_lock(&lock, ArtifactKind::Rule, "c").expect("rule entry exists");
+        assert!(rule.skills.is_empty());
+        assert_eq!(rule.rules.len(), 1);
+
+        assert!(
+            single_entry_lock(&lock, ArtifactKind::Skill, "missing").is_none(),
+            "an absent entry projects to None"
         );
     }
 
