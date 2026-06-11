@@ -255,16 +255,17 @@ fn parse_reference(
     }
 }
 
-/// The effective default registry for the publish reference: the project
-/// config `[options].default_registry` wins (best-effort discovery — a
-/// publish run from outside a project tree simply has none), else the
-/// context default (`--registry` / `GRIM_DEFAULT_REGISTRY`). Owned so the
-/// transient discovered config can drop.
+/// The effective default registry for the publish reference, via the
+/// centralized precedence helper. Precedence (highest first): the
+/// `--registry` flag, then `GRIM_DEFAULT_REGISTRY`, then the discovered
+/// project config `[options].default_registry` (best-effort — a publish run
+/// from outside a project tree simply has none). Owned so the transient
+/// discovered config can drop.
 fn release_default_registry(ctx: &Context) -> Option<String> {
-    crate::config::project_config::ProjectConfig::discover(None)
+    let project_default = crate::config::project_config::ProjectConfig::discover(None)
         .ok()
-        .and_then(|d| d.config.options.default_registry)
-        .or_else(|| ctx.default_registry().map(str::to_string))
+        .and_then(|d| d.config.options.default_registry);
+    super::resolve_default_registry(ctx, project_default.as_deref(), None)
 }
 
 /// Move every cascade tag onto `digest`. The exact version (`version`) is

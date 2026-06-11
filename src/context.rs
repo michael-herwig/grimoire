@@ -31,7 +31,10 @@ use crate::store::{BlobStore, GrimPaths};
 #[derive(Debug, Clone)]
 pub struct Context {
     grim_home: PathBuf,
-    default_registry: Option<String>,
+    /// The `--registry` flag value only (highest registry precedence).
+    registry_flag: Option<String>,
+    /// `$GRIM_DEFAULT_REGISTRY`, captured once at construction.
+    registry_env: Option<String>,
     offline: bool,
 }
 
@@ -39,12 +42,15 @@ impl Context {
     /// Builds the context from parsed global options and the environment.
     ///
     /// Resolution-affecting CLI flags take precedence over their
-    /// environment-variable counterparts.
+    /// environment-variable counterparts. The `--registry` flag and the
+    /// `$GRIM_DEFAULT_REGISTRY` env var are stored separately so the
+    /// registry-precedence helper can order the flag above the env above
+    /// any config default (see `command::resolve_default_registry`).
     pub fn new(options: &GlobalOptions) -> Self {
-        let default_registry = options.registry.clone().or_else(env::default_registry);
         Self {
             grim_home: env::grim_home(),
-            default_registry,
+            registry_flag: options.registry.clone(),
+            registry_env: env::default_registry(),
             offline: options.offline || env::offline(),
         }
     }
@@ -54,9 +60,23 @@ impl Context {
         &self.grim_home
     }
 
-    /// The default registry for short identifiers, if configured.
+    /// The `--registry` flag value, if given. Highest registry precedence —
+    /// the precedence helper orders this above env and config.
+    pub fn registry_flag(&self) -> Option<&str> {
+        self.registry_flag.as_deref()
+    }
+
+    /// `$GRIM_DEFAULT_REGISTRY`, if set.
+    pub fn registry_env(&self) -> Option<&str> {
+        self.registry_env.as_deref()
+    }
+
+    /// The default registry for short identifiers: the `--registry` flag,
+    /// else `$GRIM_DEFAULT_REGISTRY`. Used by `login` / `logout` (which keep
+    /// CLI-arg-first then this) — config defaults are layered in by
+    /// `command::resolve_default_registry`, not here.
     pub fn default_registry(&self) -> Option<&str> {
-        self.default_registry.as_deref()
+        self.registry_flag.as_deref().or(self.registry_env.as_deref())
     }
 
     /// Whether all network access is disabled for this invocation.
@@ -153,5 +173,18 @@ mod tests {
         let ctx = Context::new(&o);
         assert_eq!(ctx.default_registry(), Some("ghcr.io/acme"));
         assert!(ctx.grim_home().is_absolute() || ctx.grim_home().ends_with(".grimoire"));
+    }
+
+    #[test]
+    fn registry_flag_is_split_from_env_and_surfaced_separately() {
+        // The `--registry` flag populates `registry_flag()`; `default_registry()`
+        // folds flag-or-env for login back-compat. (The env var is not mutated
+        // here — that is `unsafe` and the crate forbids it; the env accessor is
+        // exercised structurally.)
+        let mut o = opts();
+        o.registry = Some("ghcr.io/acme".to_string());
+        let ctx = Context::new(&o);
+        assert_eq!(ctx.registry_flag(), Some("ghcr.io/acme"));
+        assert_eq!(ctx.default_registry(), Some("ghcr.io/acme"));
     }
 }

@@ -107,6 +107,16 @@ impl Vendor for ClaudeVendor {
     // Rules: `paths:` is native and authored canonically; Claude defines
     // no vendor-specific rule fields today, so the registry is empty.
 
+    fn detect(&self, workspace: &Path, scope: ConfigScope) -> bool {
+        match scope {
+            ConfigScope::Project => workspace.join(".claude").exists(),
+            // Global: the native user-level root Claude actually discovers
+            // (or its `$CLAUDE_CONFIG_DIR` override) being present marks
+            // Claude as a configured client on this machine.
+            ConfigScope::Global => global_root(env_dir("CLAUDE_CONFIG_DIR"), home_dir()).is_some_and(|p| p.exists()),
+        }
+    }
+
     fn skills_root(&self, workspace: &Path, scope: ConfigScope) -> PathBuf {
         scope_root(workspace, scope).join("skills")
     }
@@ -169,6 +179,21 @@ mod tests {
             global_root(None, None),
             None,
             "no override, no home ⇒ caller falls back"
+        );
+    }
+
+    #[test]
+    fn detect_project_scope_follows_dot_claude_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let w = tmp.path();
+        assert!(
+            !ClaudeVendor.detect(w, ConfigScope::Project),
+            "absent .claude ⇒ not detected"
+        );
+        std::fs::create_dir_all(w.join(".claude")).unwrap();
+        assert!(
+            ClaudeVendor.detect(w, ConfigScope::Project),
+            "present .claude ⇒ detected"
         );
     }
 

@@ -35,6 +35,21 @@ impl Vendor for OpenCodeVendor {
 
     // Both registries empty: OpenCode reads only universal fields.
 
+    fn detect(&self, workspace: &Path, scope: ConfigScope) -> bool {
+        match scope {
+            ConfigScope::Project => workspace.join(".opencode").exists(),
+            // Global: a present native skills dir (or its
+            // `$OPENCODE_CONFIG_DIR` override) OR a present global
+            // `opencode.json` config file. A configured-but-empty OpenCode
+            // user — only an `opencode.json`, no skills dir yet — still
+            // counts as a real OpenCode user.
+            ConfigScope::Global => {
+                global_skills_root(env_dir("OPENCODE_CONFIG_DIR"), xdg_config_dir()).is_some_and(|p| p.exists())
+                    || opencode_config::config_path_for_scope(workspace, scope).is_some_and(|p| p.is_file())
+            }
+        }
+    }
+
     fn skills_root(&self, workspace: &Path, scope: ConfigScope) -> PathBuf {
         match scope {
             ConfigScope::Project => workspace.join(".opencode").join("skills"),
@@ -122,6 +137,15 @@ mod tests {
             Some(PathBuf::from("/xdg/opencode/skills"))
         );
         assert_eq!(global_skills_root(None, None), None);
+    }
+
+    #[test]
+    fn detect_project_scope_follows_dot_opencode_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let w = tmp.path();
+        assert!(!OpenCodeVendor.detect(w, ConfigScope::Project));
+        std::fs::create_dir_all(w.join(".opencode")).unwrap();
+        assert!(OpenCodeVendor.detect(w, ConfigScope::Project));
     }
 
     #[test]

@@ -69,9 +69,13 @@ pub struct TuiContext {
     pub lock_path: std::path::PathBuf,
     /// The scope's install-state path.
     pub state_path: std::path::PathBuf,
-    /// The AI client target(s) to materialize into (the config `clients`
-    /// option; empty defaults to `claude`).
+    /// The AI client target(s) to materialize into (the raw config `clients`
+    /// option; empty triggers detection at install time). Still needed for
+    /// the `InstallTarget::parse` fallback in [`perform`].
     pub clients_default: Vec<String>,
+    /// The *effective* selected clients for the active scope (config clients
+    /// when set, else detected) — surfaced in the status area for display.
+    pub clients_selected: Vec<crate::install::client_target::ClientTarget>,
     /// Human label for the active scope (`project` / `global`), shown in
     /// the title.
     pub scope_label: String,
@@ -93,8 +97,10 @@ pub struct ScopeSwap {
     pub lock_path: std::path::PathBuf,
     /// The scope's install-state path.
     pub state_path: std::path::PathBuf,
-    /// The AI client target(s) to materialize into.
+    /// The AI client target(s) to materialize into (raw config clients).
     pub clients_default: Vec<String>,
+    /// The effective selected clients for this scope (config or detected).
+    pub clients_selected: Vec<crate::install::client_target::ClientTarget>,
     /// Human label (`project` / `global`).
     pub label: String,
 }
@@ -113,6 +119,7 @@ impl TuiContext {
             lock_path: std::mem::replace(&mut self.lock_path, alt.lock_path),
             state_path: std::mem::replace(&mut self.state_path, alt.state_path),
             clients_default: std::mem::replace(&mut self.clients_default, alt.clients_default),
+            clients_selected: std::mem::replace(&mut self.clients_selected, alt.clients_selected),
             label: std::mem::replace(&mut self.scope_label, alt.label),
         };
         self.scope = alt.scope;
@@ -155,6 +162,7 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
     let mut state = TuiState::new();
     state.set_offline(ctx.offline);
     state.set_scope_label(&ctx.scope_label);
+    state.set_clients(client_names(&ctx));
     // The browsed registry is the effective default: eliding its host
     // from the tree root keeps leaf names short (the user's ask).
     state.set_default_registry(Some(ctx.registry.clone()));
@@ -205,6 +213,7 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
             TuiAction::ToggleScope => {
                 if ctx.toggle_scope() {
                     state.set_scope_label(&ctx.scope_label);
+                    state.set_clients(client_names(&ctx));
                     recompute_states(&ctx, &mut state);
                     // The colored MODE box already shows the active scope
                     // — no redundant title-bar status.
@@ -666,6 +675,13 @@ fn merge_and_save_lock(
 /// Split `registry/repository` at the first `/`.
 fn split_repo(repo: &str) -> Option<(String, String)> {
     repo.split_once('/').map(|(r, p)| (r.to_string(), p.to_string()))
+}
+
+/// The display names of the active scope's effective selected clients
+/// (`claude`, `opencode`, …), in [`crate::install::client_target::ClientTarget::ALL`]
+/// order, for the status area.
+fn client_names(ctx: &TuiContext) -> Vec<String> {
+    ctx.clients_selected.iter().map(ToString::to_string).collect()
 }
 
 #[cfg(test)]

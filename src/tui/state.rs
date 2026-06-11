@@ -153,6 +153,10 @@ pub struct TuiState {
     /// The effective default registry; when a row's registry host equals
     /// it the registry root is elided from the tree (shorter names).
     pub default_registry: Option<String>,
+    /// The active scope's effective selected client names (`claude`,
+    /// `opencode`, …), surfaced in the status area. Pure display data — no
+    /// effect on filtering or rows.
+    pub clients: Vec<String>,
 }
 
 impl Default for TuiState {
@@ -172,6 +176,7 @@ impl Default for TuiState {
             view_mode: ViewMode::Flat,
             collapsed: std::collections::BTreeSet::new(),
             default_registry: None,
+            clients: Vec::new(),
         }
     }
 }
@@ -313,6 +318,11 @@ impl TuiState {
     /// Set the active-scope label shown in the title.
     pub fn set_scope_label(&mut self, label: impl Into<String>) {
         self.scope_label = label.into();
+    }
+
+    /// Set the active scope's effective selected client names (display only).
+    pub fn set_clients(&mut self, clients: Vec<String>) {
+        self.clients = clients;
     }
 
     /// Replace the status line.
@@ -589,6 +599,14 @@ mod tests {
         assert_eq!(s.action_targets(), vec![0, 2]);
         s.toggle_mark_all_filtered(); // all marked ⇒ clears them
         assert!(s.marked.is_empty());
+    }
+
+    #[test]
+    fn set_clients_round_trips() {
+        let mut s = TuiState::new();
+        assert!(s.clients.is_empty(), "default is empty");
+        s.set_clients(vec!["claude".to_string(), "opencode".to_string()]);
+        assert_eq!(s.clients, vec!["claude".to_string(), "opencode".to_string()]);
     }
 
     #[test]

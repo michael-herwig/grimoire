@@ -47,6 +47,24 @@ impl Vendor for CopilotVendor {
         COPILOT_RULE_FIELDS
     }
 
+    fn detect(&self, workspace: &Path, scope: ConfigScope) -> bool {
+        match scope {
+            // Project: a Copilot-SPECIFIC marker, NOT bare `.github` —
+            // nearly every repo carries `.github/` for CI with nothing to
+            // do with Copilot, so detection requires a
+            // `.github/copilot-instructions.md` file or a
+            // `.github/instructions/` directory.
+            ConfigScope::Project => {
+                let github = workspace.join(".github");
+                github.join("copilot-instructions.md").is_file() || github.join("instructions").is_dir()
+            }
+            // Global: the native `~/.copilot` skills root (or its
+            // `$COPILOT_HOME` override) being present marks Copilot CLI as a
+            // configured client on this machine.
+            ConfigScope::Global => global_skills_root(env_dir("COPILOT_HOME"), home_dir()).is_some_and(|p| p.exists()),
+        }
+    }
+
     fn skills_root(&self, workspace: &Path, scope: ConfigScope) -> PathBuf {
         match scope {
             ConfigScope::Project => workspace.join(".github").join("skills"),
@@ -130,6 +148,30 @@ mod tests {
 
     fn parsed(doc: &str) -> ParsedRule {
         RuleFrontmatter::parse_doc(doc, Path::new("rust-style.md")).unwrap()
+    }
+
+    #[test]
+    fn detect_project_needs_tighter_marker_than_bare_github() {
+        let tmp = tempfile::tempdir().unwrap();
+        let w = tmp.path();
+        // A bare `.github` dir (CI workflows) must NOT count as Copilot.
+        std::fs::create_dir_all(w.join(".github").join("workflows")).unwrap();
+        assert!(
+            !CopilotVendor.detect(w, ConfigScope::Project),
+            "bare .github is not a Copilot signal"
+        );
+        // The instructions dir IS a Copilot signal.
+        std::fs::create_dir_all(w.join(".github").join("instructions")).unwrap();
+        assert!(CopilotVendor.detect(w, ConfigScope::Project));
+    }
+
+    #[test]
+    fn detect_project_by_copilot_instructions_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let w = tmp.path();
+        std::fs::create_dir_all(w.join(".github")).unwrap();
+        std::fs::write(w.join(".github").join("copilot-instructions.md"), "# x\n").unwrap();
+        assert!(CopilotVendor.detect(w, ConfigScope::Project));
     }
 
     #[test]

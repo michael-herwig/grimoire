@@ -105,6 +105,28 @@ layout under `$GRIM_HOME` for the affected client. The recorded install
 path is always absolute, so uninstall and integrity checking are
 unaffected regardless of which path was chosen at install time.
 
+## Client Detection (default install targets)
+
+When neither `--client` nor the config `[options].clients` selects a
+client, `install` / `update` / TUI target **all detected clients**. A
+client is detected when its vendor directory / config marker is present
+for the active scope:
+
+| Client | Project signal | Global signal |
+|--------|----------------|---------------|
+| **Claude** | `<workspace>/.claude` | native root (`$CLAUDE_CONFIG_DIR` or `~/.claude`) exists |
+| **OpenCode** | `<workspace>/.opencode` | native skills root (`$OPENCODE_CONFIG_DIR` or `$XDG_CONFIG_HOME/opencode/skills`) exists **or** the resolved global `opencode.json` (`$OPENCODE_CONFIG` / XDG default) exists |
+| **Copilot** | a Copilot-specific marker — **not** bare `.github` (nearly every repo carries it for CI): `<workspace>/.github/copilot-instructions.md` or `<workspace>/.github/instructions/` | native skills root (`$COPILOT_HOME` or `~/.copilot`) exists |
+
+Detection lives on the [`Vendor`] trait (`Vendor::detect(workspace,
+scope)`), driven by `install::target::detect_clients`, which iterates
+`ClientTarget::ALL` so the set is deterministic. When **nothing** is
+detected the set falls back to `[claude]` so an install never silently
+targets zero clients. An explicit `[options].clients` and the `--client`
+flag both override detection. The detected set is **not** persisted to
+config — it is recomputed each run. Detection reuses the same vendor env
+overrides documented in the table above.
+
 ## Constraints
 
 - Never assume a path operation crosses filesystems silently — check first.

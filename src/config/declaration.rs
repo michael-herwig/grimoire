@@ -24,12 +24,15 @@ use crate::oci::Identifier;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigOptions {
-    /// Default registry for short identifiers (overrides `GRIM_DEFAULT_REGISTRY`).
+    /// Default registry for short identifiers (lower priority than
+    /// `GRIM_DEFAULT_REGISTRY`; see the registry-precedence chain in
+    /// `command::resolve_default_registry`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_registry: Option<String>,
     /// AI client targets install/update materialize into when `--client` is
     /// absent. A list so one declaration can generate for several clients
-    /// at once (e.g. `["claude", "opencode"]`); empty defaults to `claude`.
+    /// at once (e.g. `["claude", "opencode"]`); empty triggers detection of
+    /// the clients whose vendor dir is present, falling back to `claude`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub clients: Vec<String>,
 }

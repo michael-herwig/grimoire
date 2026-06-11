@@ -53,6 +53,67 @@ def test_add_env_default_registry_persists_fq_name(
     )
 
 
+def test_add_env_default_registry_beats_config_default(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Registry precedence: ``GRIM_DEFAULT_REGISTRY`` wins over the config
+    ``[options].default_registry``.
+
+    The config declares a bogus host; the env names the real registry. The
+    short reference must expand against the env value (so resolution succeeds
+    and the persisted FQ name carries the real host), proving env beats config
+    in the reordered precedence chain.
+    """
+    sk = make_artifact(
+        f"{unique_repo}/code-review",
+        "skill",
+        {"code-review/SKILL.md": "---\nname: code-review\ndescription: d\n---\n# CR\n"},
+        tag="stable",
+    )
+    wrong_host = "wrong-registry.invalid:5000"
+    cfg_path = project_dir / "grimoire.toml"
+    cfg_path.write_text(
+        f'[options]\ndefault_registry = "{wrong_host}"\n\n[skills]\n\n[rules]\n'
+    )
+
+    runner = grim_at(project_dir)
+    # The env names the REAL registry; it must win over the config default.
+    runner.env["GRIM_DEFAULT_REGISTRY"] = REGISTRY_HOST
+
+    short_ref = f"{unique_repo}/code-review:stable"
+    out = runner.json("add", short_ref)
+    assert out["kind"] == "skill"
+    assert out["name"] == "code-review"
+    assert out["status"] == "added"
+
+    # The resolved skill binding must expand against the env (real) host,
+    # proving env beats config. The bogus `default_registry` line still
+    # round-trips in `[options]` (add preserves options), so assert on the
+    # skill ENTRY line, not the whole file.
+    cfg_text = (project_dir / "grimoire.toml").read_text()
+    skill_line = next(
+        (line for line in cfg_text.splitlines() if line.startswith("code-review")),
+        "",
+    )
+    assert f"{REGISTRY_HOST}/" in skill_line, (
+        f"the skill binding must use the env registry host '{REGISTRY_HOST}/', "
+        f"got skill line: {skill_line!r}\nfull config:\n{cfg_text}"
+    )
+    assert wrong_host not in skill_line, (
+        f"the bogus config registry '{wrong_host}' must not win on the skill "
+        f"binding, got skill line: {skill_line!r}"
+    )
+
+    # The lock must record the env (real) host, and never the bogus one.
+    lock_text = (project_dir / "grimoire.lock").read_text()
+    assert f"{REGISTRY_HOST}/" in lock_text, (
+        f"grimoire.lock must use the env registry host '{REGISTRY_HOST}/', got:\n{lock_text}"
+    )
+    assert wrong_host not in lock_text, (
+        f"the bogus config registry '{wrong_host}' must not appear in the lock, got:\n{lock_text}"
+    )
+
+
 def test_add_config_default_registry_persists_fq_name(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:

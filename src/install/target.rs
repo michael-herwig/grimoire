@@ -3,11 +3,16 @@
 
 //! The set of AI client targets an install/update writes to.
 //!
-//! A list of [`ClientTarget`]s (default `[claude]`) rooted at a workspace.
-//! The installer iterates the targets, materializing each artifact into
-//! every selected client's layout, so one install can generate for several
-//! clients at once (e.g. Claude and OpenCode). The Claude-only default path
-//! behaves identically to a single-client install.
+//! A list of [`ClientTarget`]s rooted at a workspace. The installer
+//! iterates the targets, materializing each artifact into every selected
+//! client's layout, so one install can generate for several clients at
+//! once (e.g. Claude and OpenCode).
+//!
+//! When neither `--client` nor the config `[options].clients` selects a
+//! client, the set defaults to **all detected clients** — those whose
+//! vendor directory / marker is present for the scope (see
+//! [`detect_clients`]). Detection finding nothing falls back to `[claude]`
+//! so an install never silently targets zero clients.
 
 use std::path::{Path, PathBuf};
 
@@ -29,11 +34,13 @@ impl InstallTarget {
     /// Build a target for the given clients rooted at `workspace` for
     /// `scope` (global scope resolves vendor-native user-level paths).
     ///
-    /// `clients` defaults to `[Claude]` when empty so call sites with no
-    /// `--client` and no config default keep the single-client behavior.
+    /// An empty `clients` list defaults to the **detected** clients for
+    /// `scope` (see [`detect_clients`]); when none are detected it falls
+    /// back to `[Claude]`, so call sites with no `--client` and no config
+    /// default never produce an empty (silent no-op) target.
     pub fn new(workspace: &Path, scope: ConfigScope, clients: Vec<ClientTarget>) -> Self {
         let clients = if clients.is_empty() {
-            vec![ClientTarget::Claude]
+            detect_clients(workspace, scope)
         } else {
             clients
         };
@@ -46,7 +53,8 @@ impl InstallTarget {
 
     /// Parse a comma-separated / repeated `--client` list into an
     /// [`InstallTarget`]. An empty flag list falls back to the config
-    /// `clients` default, then `claude`. Each value (flag or config) may
+    /// `clients` default; when that is also empty, the detected clients for
+    /// `scope` are used (see [`Self::new`]). Each value (flag or config) may
     /// itself be a comma list.
     ///
     /// # Errors
@@ -64,14 +72,12 @@ impl InstallTarget {
         } else {
             flag_values
         };
-        let raw: Vec<String> = if source.is_empty() {
-            vec!["claude".to_string()]
-        } else {
-            source
-                .iter()
-                .flat_map(|v| v.split(',').map(|s| s.trim().to_string()))
-                .collect()
-        };
+        // Both flag and config empty ⇒ reach `new` with an empty list so
+        // detection runs (do not inject the literal "claude").
+        let raw: Vec<String> = source
+            .iter()
+            .flat_map(|v| v.split(',').map(|s| s.trim().to_string()))
+            .collect();
 
         let mut clients = Vec::new();
         for name in raw {
@@ -107,14 +113,66 @@ impl InstallTarget {
     }
 }
 
+/// The detected AI clients for `workspace` at `scope`, in
+/// [`ClientTarget::ALL`] order: every client whose vendor directory /
+/// marker is present (see [`super::vendor::Vendor::detect`]). When none are
+/// detected the result falls back to `[Claude]` so the install / update /
+/// TUI default set is never empty.
+pub fn detect_clients(workspace: &Path, scope: ConfigScope) -> Vec<ClientTarget> {
+    let detected: Vec<ClientTarget> = ClientTarget::ALL
+        .into_iter()
+        .filter(|c| c.vendor().detect(workspace, scope))
+        .collect();
+    if detected.is_empty() {
+        vec![ClientTarget::Claude]
+    } else {
+        detected
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn empty_defaults_to_claude() {
-        let t = InstallTarget::new(Path::new("/w"), ConfigScope::Project, vec![]);
+    fn empty_defaults_to_claude_when_nothing_detected() {
+        // A bare workspace (no vendor dirs) detects nothing ⇒ [Claude].
+        let tmp = tempfile::tempdir().unwrap();
+        let t = InstallTarget::new(tmp.path(), ConfigScope::Project, vec![]);
         assert_eq!(t.clients(), &[ClientTarget::Claude]);
+    }
+
+    #[test]
+    fn empty_targets_detected_clients_in_all_order() {
+        // `.opencode` + `.github/instructions` present, no `.claude` ⇒ the
+        // detected set is [OpenCode, Copilot] in ClientTarget::ALL order.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".opencode")).unwrap();
+        std::fs::create_dir_all(tmp.path().join(".github").join("instructions")).unwrap();
+        let t = InstallTarget::new(tmp.path(), ConfigScope::Project, vec![]);
+        assert_eq!(t.clients(), &[ClientTarget::OpenCode, ClientTarget::Copilot]);
+        // The same set reaches detection through `parse` (empty flag+config).
+        let p = InstallTarget::parse(tmp.path(), ConfigScope::Project, &[], &[]).unwrap();
+        assert_eq!(p.clients(), &[ClientTarget::OpenCode, ClientTarget::Copilot]);
+    }
+
+    #[test]
+    fn explicit_config_overrides_detection() {
+        // Even with `.opencode` present, an explicit config `clients`
+        // declaration wins over detection.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".opencode")).unwrap();
+        let t = InstallTarget::parse(tmp.path(), ConfigScope::Project, &[], &["claude".to_string()]).unwrap();
+        assert_eq!(t.clients(), &[ClientTarget::Claude]);
+    }
+
+    #[test]
+    fn detect_clients_fallback_is_claude() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            detect_clients(tmp.path(), ConfigScope::Global),
+            vec![ClientTarget::Claude]
+        );
     }
 
     #[test]

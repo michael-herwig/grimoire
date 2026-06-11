@@ -44,8 +44,9 @@ pub struct SearchArgs {
     #[arg(long)]
     pub refresh: bool,
 
-    /// Registry to search. Defaults to `--registry` / the config
-    /// `default_registry` option / `GRIM_DEFAULT_REGISTRY`.
+    /// Registry to search. Precedence (highest first): this flag (or the
+    /// global `--registry`), then `GRIM_DEFAULT_REGISTRY`, then project config
+    /// `default_registry`, then global config.
     #[arg(long)]
     pub registry: Option<String>,
 
@@ -116,23 +117,36 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
     Ok((SearchReport::new(entries), ExitCode::Success))
 }
 
-/// Resolve the registry to search: `--registry` wins, then the config
-/// `default_registry` option, then the context default
-/// (`GRIM_DEFAULT_REGISTRY`).
+/// Resolve the registry to search via the centralized precedence:
+/// `--registry` flag > `GRIM_DEFAULT_REGISTRY` > the resolved scope's
+/// project config `[options].default_registry` > the global config
+/// (consulted as the lowest-priority fallback only for a non-global run).
+/// A miss is a classifiable config error.
 fn resolve_registry(ctx: &Context, args: &SearchArgs) -> anyhow::Result<String> {
+    // `--registry` on the command is the top precedence; fold it into the
+    // helper as the flag-equivalent so the single helper owns the order.
     if let Some(r) = &args.registry {
         return Ok(r.clone());
     }
-    // The config `default_registry` option, when a scope resolves.
-    if let Ok(scope) = scope_resolution::resolve(ctx, args.global, args.config.as_deref())
-        && let Some(r) = scope.options.default_registry
-    {
-        return Ok(r);
+    let project_default = scope_resolution::resolve(ctx, args.global, args.config.as_deref())
+        .ok()
+        .and_then(|scope| scope.options.default_registry);
+    let global_default = global_config_default(ctx, args.global);
+    super::resolve_default_registry(ctx, project_default.as_deref(), global_default.as_deref())
+        .ok_or_else(|| crate::error::Error::from(crate::command::command_error::CommandError::NoRegistry).into())
+}
+
+/// The global config's `[options].default_registry`, loaded best-effort as
+/// the lowest-priority registry fallback for a non-global run (a global run
+/// already resolved the global config as its active scope). Load failures
+/// degrade to `None`.
+fn global_config_default(ctx: &Context, global: bool) -> Option<String> {
+    if global {
+        return None;
     }
-    if let Some(r) = ctx.default_registry() {
-        return Ok(r.to_string());
-    }
-    Err(crate::error::Error::from(crate::command::command_error::CommandError::NoRegistry).into())
+    crate::config::global_config::GlobalConfig::load(&ctx.paths().global_config())
+        .ok()
+        .and_then(|cfg| cfg.options.default_registry)
 }
 
 /// Load the scope's lock + install-state for badge derivation, degrading
@@ -198,5 +212,27 @@ mod tests {
         let ctx = Context::new(&o);
         let a = args();
         assert_eq!(resolve_registry(&ctx, &a).unwrap(), "localhost:5000");
+    }
+
+    #[test]
+    fn flag_beats_project_config_default_registry() {
+        // A project config declaring `default_registry` is the lowest CLI
+        // tier; the `--registry` flag (here folded through the context, the
+        // same precedence the `--registry` arg uses) must win over it. This
+        // pins the reordered chain: flag/env > project config > global config.
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("grimoire.toml");
+        std::fs::write(&cfg, "[options]\ndefault_registry = \"config.example\"\n").unwrap();
+
+        let mut o = opts();
+        o.registry = Some("flag.example".to_string());
+        let ctx = Context::new(&o);
+        let mut a = args();
+        a.config = Some(cfg);
+        assert_eq!(
+            resolve_registry(&ctx, &a).unwrap(),
+            "flag.example",
+            "the registry flag/env tier wins over the project config default"
+        );
     }
 }

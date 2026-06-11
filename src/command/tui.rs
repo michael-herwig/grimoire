@@ -18,6 +18,7 @@ use clap::Args;
 use crate::cli::exit_code::ExitCode;
 use crate::config::scope::ConfigScope;
 use crate::context::Context;
+use crate::install::client_target::ClientTarget;
 use crate::tui::app::{self, ScopeSwap, TuiContext};
 
 use super::scope_resolution;
@@ -33,8 +34,9 @@ fn scope_label(scope: ConfigScope) -> &'static str {
 /// `grim tui` arguments.
 #[derive(Debug, Args)]
 pub struct TuiArgs {
-    /// Registry to browse. Defaults to `--registry` / the config
-    /// `default_registry` option / `GRIM_DEFAULT_REGISTRY`.
+    /// Registry to browse. Precedence (highest first): this flag (or the
+    /// global `--registry`), then `GRIM_DEFAULT_REGISTRY`, then project config
+    /// `default_registry`, then global config.
     #[arg(long)]
     pub registry: Option<String>,
 
@@ -86,6 +88,7 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
             lock_path: other.lock_path.clone(),
             state_path: other.state_path.clone(),
             clients_default: other.options.clients.clone(),
+            clients_selected: selected_clients(&other.workspace, other.scope, &other.options.clients),
             label: scope_label(other.scope).to_string(),
         });
 
@@ -100,6 +103,7 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
         lock_path: scope.lock_path.clone(),
         state_path: scope.state_path.clone(),
         clients_default: scope.options.clients.clone(),
+        clients_selected: selected_clients(&scope.workspace, scope.scope, &scope.options.clients),
         scope_label: scope_label(scope.scope).to_string(),
         alt,
     };
@@ -108,21 +112,50 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::Success)
 }
 
-/// Resolve the registry to browse, mirroring `grim search`: `--registry`
-/// wins, then the config `default_registry`, then the context default.
+/// Resolve the registry to browse via the centralized precedence (mirrors
+/// `grim search`): `--registry` flag > `GRIM_DEFAULT_REGISTRY` > project
+/// config `default_registry` > global config (the global config is the
+/// lowest-priority fallback only for a non-global run).
 fn resolve_registry(ctx: &Context, args: &TuiArgs) -> anyhow::Result<String> {
     if let Some(r) = &args.registry {
         return Ok(r.clone());
     }
-    if let Ok(scope) = scope_resolution::resolve(ctx, args.global, args.config.as_deref())
-        && let Some(r) = scope.options.default_registry
-    {
-        return Ok(r);
+    let project_default = scope_resolution::resolve(ctx, args.global, args.config.as_deref())
+        .ok()
+        .and_then(|scope| scope.options.default_registry);
+    let global_default = global_config_default(ctx, args.global);
+    crate::command::resolve_default_registry(ctx, project_default.as_deref(), global_default.as_deref())
+        .ok_or_else(|| crate::error::Error::from(crate::command::command_error::CommandError::NoRegistry).into())
+}
+
+/// The global config's `[options].default_registry`, loaded best-effort as
+/// the lowest-priority registry fallback for a non-global run. Load failures
+/// degrade to `None`.
+fn global_config_default(ctx: &Context, global: bool) -> Option<String> {
+    if global {
+        return None;
     }
-    if let Some(r) = ctx.default_registry() {
-        return Ok(r.to_string());
+    crate::config::global_config::GlobalConfig::load(&ctx.paths().global_config())
+        .ok()
+        .and_then(|cfg| cfg.options.default_registry)
+}
+
+/// The effective selected clients for a scope's TUI display: the config
+/// `[options].clients` (parsed via [`ClientTarget`]) when non-empty, else
+/// the **detected** clients for the scope (the same logic install / update
+/// use). Unknown client names in the config are skipped (the install path
+/// surfaces the hard error; the display is best-effort).
+fn selected_clients(workspace: &std::path::Path, scope: ConfigScope, config_clients: &[String]) -> Vec<ClientTarget> {
+    let configured: Vec<ClientTarget> = config_clients
+        .iter()
+        .flat_map(|v| v.split(','))
+        .filter_map(|name| name.trim().parse().ok())
+        .collect();
+    if configured.is_empty() {
+        crate::install::target::detect_clients(workspace, scope)
+    } else {
+        configured
     }
-    Err(crate::error::Error::from(crate::command::command_error::CommandError::NoRegistry).into())
 }
 
 #[cfg(test)]

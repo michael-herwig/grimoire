@@ -29,8 +29,10 @@ pub mod update;
 pub use command_error::CommandError;
 
 /// Resolve the registry for `login` / `logout`: an explicit (non-empty)
-/// argument wins, else the context's `default_registry`. A miss is a
-/// classifiable config error, not a panic.
+/// argument wins, else the `--registry` flag, else `$GRIM_DEFAULT_REGISTRY`
+/// (the context's `default_registry`, which folds flag-then-env). A miss is
+/// a classifiable config error, not a panic. The CLI argument stays first;
+/// env beats config because config is not consulted on the login path.
 ///
 /// # Errors
 ///
@@ -45,19 +47,36 @@ pub fn resolve_login_registry(ctx: &crate::context::Context, explicit: Option<&s
         .ok_or_else(|| anyhow::Error::from(crate::error::Error::from(command_error::CommandError::NoLoginRegistry)))
 }
 
-/// The effective default registry for expanding a short identifier: the
-/// resolved scope's config `[options].default_registry` wins, else the
-/// context default (`--registry` / `GRIM_DEFAULT_REGISTRY`).
+/// The single registry-precedence helper: `--registry` flag, then
+/// `$GRIM_DEFAULT_REGISTRY`, then the project config
+/// `[options].default_registry`, then the global config
+/// `[options].default_registry`. The first present value wins.
 ///
 /// The default registry is purely a CLI-input convenience — the expanded
 /// [`crate::oci::Identifier`] is always fully-qualified, so the lock and
 /// config persist the registry host explicitly regardless of which default
-/// was applied. Mirrors the precedence `search` / `tui` already use.
-pub fn effective_default_registry<'a>(
-    config_default: Option<&'a str>,
-    ctx: &'a crate::context::Context,
-) -> Option<&'a str> {
-    config_default.or_else(|| ctx.default_registry())
+/// was applied. Every registry call site (`add` / `release` / `search` /
+/// `tui`) routes through this so the precedence is single-sourced.
+pub fn resolve_default_registry(
+    ctx: &crate::context::Context,
+    project_default: Option<&str>,
+    global_default: Option<&str>,
+) -> Option<String> {
+    ctx.registry_flag()
+        .or_else(|| ctx.registry_env())
+        .or(project_default)
+        .or(global_default)
+        .map(str::to_string)
+}
+
+/// The effective default registry for expanding a short identifier when
+/// only one scope's config is in hand: precedence is `--registry` flag >
+/// `$GRIM_DEFAULT_REGISTRY` > the given config `[options].default_registry`.
+/// A thin wrapper over [`resolve_default_registry`] with no global-config
+/// fallback (callers that can also peek the global config call the helper
+/// directly).
+pub fn effective_default_registry(config_default: Option<&str>, ctx: &crate::context::Context) -> Option<String> {
+    resolve_default_registry(ctx, config_default, None)
 }
 
 /// Build a classifiable usage error (exit 64) for a missing `login`
@@ -109,4 +128,58 @@ fn map_access_io(
             ),
         ))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::options::{GlobalOptions, OutputFormat};
+    use crate::context::Context;
+
+    fn opts(registry: Option<&str>) -> GlobalOptions {
+        GlobalOptions {
+            format: OutputFormat::Plain,
+            offline: false,
+            log_level: None,
+            config: None,
+            global: false,
+            registry: registry.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn precedence_flag_beats_config() {
+        // The `--registry` flag wins over every config default. (The env is
+        // not set in the test environment; the flag is the highest tier.)
+        let ctx = Context::new(&opts(Some("flag.example")));
+        assert_eq!(
+            resolve_default_registry(&ctx, Some("proj.example"), Some("glob.example")),
+            Some("flag.example".to_string())
+        );
+    }
+
+    #[test]
+    fn precedence_project_config_beats_global_config() {
+        // No flag, no env ⇒ project config wins over the global fallback.
+        let ctx = Context::new(&opts(None));
+        assert_eq!(
+            resolve_default_registry(&ctx, Some("proj.example"), Some("glob.example")),
+            Some("proj.example".to_string())
+        );
+    }
+
+    #[test]
+    fn precedence_global_config_is_lowest_fallback() {
+        let ctx = Context::new(&opts(None));
+        assert_eq!(
+            resolve_default_registry(&ctx, None, Some("glob.example")),
+            Some("glob.example".to_string())
+        );
+    }
+
+    #[test]
+    fn no_registry_anywhere_is_none() {
+        let ctx = Context::new(&opts(None));
+        assert_eq!(resolve_default_registry(&ctx, None, None), None);
+    }
 }

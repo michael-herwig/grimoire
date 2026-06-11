@@ -87,7 +87,7 @@ files:
 | Variable | Purpose | Default |
 |---|---|---|
 | `GRIM_HOME` | Root data directory (content store, catalog, global config, install state). Global-scope client output lands in vendor-native dirs, not here — see subsystem-file-structure.md | `~/.grimoire` |
-| `GRIM_DEFAULT_REGISTRY` | Default registry for short identifiers | (unset) |
+| `GRIM_DEFAULT_REGISTRY` | Default registry for short identifiers. Registry precedence: `--registry` flag > `GRIM_DEFAULT_REGISTRY` > project config `[options].default_registry` > global config | (unset) |
 | `GRIM_OFFLINE` | Disable all network access (cache-only; default is always-fresh online resolution) | false |
 | `DOCKER_CONFIG` | Directory holding the docker-compatible `config.json` read/written by `grim login`/`logout` (and the credential read path) | `~/.docker` |
 | `OPENCODE_CONFIG` | OpenCode config file that grim edits for global-scope rule registration (vendor variable, honored read/write). When unset, grim falls back to `$XDG_CONFIG_HOME/opencode/opencode.json` (or `~/.config/opencode/opencode.json` if `XDG_CONFIG_HOME` is also unset). Config-file-only — no effect on skill paths | (unset) |

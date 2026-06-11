@@ -80,6 +80,23 @@ pub trait Vendor {
         &[]
     }
 
+    /// Whether this client is *detected* for `scope` — its vendor
+    /// directory / config marker is present — so a default install (no
+    /// `--client`, no `[options].clients`) should target it. Pure existence
+    /// checks; no I/O beyond `stat`.
+    ///
+    /// The default probes the project root dir (`<workspace>/<root_dir>`)
+    /// for project scope and returns `false` for global scope. Each vendor
+    /// overrides this to own its native user-level discovery knowledge for
+    /// the global scope (and, for Copilot, a tighter project marker than
+    /// the broadly-present `.github` dir).
+    fn detect(&self, workspace: &Path, scope: ConfigScope) -> bool {
+        match scope {
+            ConfigScope::Project => workspace.join(self.root_dir()).exists(),
+            ConfigScope::Global => false,
+        }
+    }
+
     /// The directory skill trees install under for `scope`.
     fn skills_root(&self, workspace: &Path, scope: ConfigScope) -> PathBuf;
 

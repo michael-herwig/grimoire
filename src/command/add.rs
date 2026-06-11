@@ -5,13 +5,13 @@
 //! lock it.
 //!
 //! The reference is the only required argument. A short reference is
-//! expanded against the effective default registry (the config
-//! `[options].default_registry` option, then `--registry` /
-//! `GRIM_DEFAULT_REGISTRY`); the persisted config/lock always carry the
-//! fully-qualified name. The artifact **kind** is inferred from the pulled
-//! manifest's OCI `artifactType` when `--kind` is omitted, and the binding
-//! **name** defaults to the reference's last path segment when `--name` is
-//! omitted.
+//! expanded against the effective default registry — precedence
+//! `--registry` flag > `GRIM_DEFAULT_REGISTRY` > project config
+//! `[options].default_registry` > global config; the persisted config/lock
+//! always carry the fully-qualified name. The artifact **kind** is inferred
+//! from the pulled manifest's OCI `artifactType` when `--kind` is omitted,
+//! and the binding **name** defaults to the reference's last path segment
+//! when `--name` is omitted.
 //!
 //! Edits the discovered config's `[skills]`/`[rules]`/`[bundles]` table
 //! (re-serializing the parsed config is acceptable — minimal formatting
@@ -78,12 +78,20 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
         None => None,
     };
 
-    // Expand the reference against the effective default registry (config
-    // option first, then --registry / env). The expanded identifier is
-    // always fully-qualified, so the config and lock persist the registry
-    // host explicitly — the default is a pure CLI-input convenience.
-    let default_registry = super::effective_default_registry(scope.options.default_registry.as_deref(), ctx);
-    let id = super::grim(parse_reference(&args.reference, default_registry))?;
+    // Expand the reference against the effective default registry —
+    // precedence: --registry flag > GRIM_DEFAULT_REGISTRY > project config >
+    // global config (the global config is consulted as the lowest-priority
+    // fallback only when this is a project-scope run). The expanded
+    // identifier is always fully-qualified, so the config and lock persist
+    // the registry host explicitly — the default is a pure CLI-input
+    // convenience.
+    let global_default = global_config_default(ctx, scope.scope);
+    let default_registry = super::resolve_default_registry(
+        ctx,
+        scope.options.default_registry.as_deref(),
+        global_default.as_deref(),
+    );
+    let id = super::grim(parse_reference(&args.reference, default_registry.as_deref()))?;
     let id = if id.tag().is_none() && id.digest().is_none() {
         id.clone_with_tag("latest")
     } else {
@@ -178,6 +186,20 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     };
 
     Ok((AddReport::new(kind, name, pinned), ExitCode::Success))
+}
+
+/// The global config's `[options].default_registry`, loaded best-effort as
+/// the lowest-priority registry fallback for a **project**-scope `add`. A
+/// global-scope run already has the global config as its active scope, so
+/// `None` is returned to avoid consulting it twice. Load failures degrade
+/// to `None` (the global config is advisory here, never fatal).
+fn global_config_default(ctx: &Context, scope: crate::config::scope::ConfigScope) -> Option<String> {
+    if scope == crate::config::scope::ConfigScope::Global {
+        return None;
+    }
+    crate::config::global_config::GlobalConfig::load(&ctx.paths().global_config())
+        .ok()
+        .and_then(|cfg| cfg.options.default_registry)
 }
 
 /// Parse `<ref>`, expanding a short identifier against `default_registry`
