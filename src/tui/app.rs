@@ -789,21 +789,19 @@ async fn run_batch(ctx: &TuiContext, state: &mut TuiState, rows: &[usize], op: B
             BatchOp::Uninstall => perform_uninstall(ctx, &row),
         };
         match outcome {
-            Ok(()) => {
-                ok += 1;
-                let (lock, install_state) = load_scope_for_badges(ctx);
-                if let Some((registry, repository)) = split_repo(&row.repo)
-                    && let Some(r) = state.rows.get_mut(i)
-                {
-                    r.state = derive_row_state(&r.kind, &registry, &repository, lock.as_ref(), &install_state);
-                }
-            }
+            Ok(()) => ok += 1,
             Err(e) => {
                 failed += 1;
                 last_err = Some(format!("{}: {e}", row.repo));
             }
         }
     }
+
+    // A bundle op also (un)installs the bundle's members, which appear as
+    // separate rows — recompute every row's state against the new lock +
+    // install-state instead of only the acted-on rows (same derivation the
+    // manual refresh uses).
+    recompute_states(ctx, state);
 
     // A completed batch consumes the marks (they describe past intent).
     state.clear_marks();
@@ -1465,6 +1463,52 @@ mod tests {
                 &install_state
             ),
             ArtifactState::NotInstalled
+        );
+    }
+
+    #[tokio::test]
+    async fn run_batch_on_a_bundle_recomputes_member_row_states() {
+        // A bundle batch op also (un)installs the bundle's members. Rows
+        // representing those members must reflect the new lock/install
+        // state immediately — not only after a manual refresh ('r').
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path();
+        std::fs::write(workspace.join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+        let ctx = test_ctx(workspace, registry_with_bundle().await);
+
+        let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
+        bundle_row.kind = "bundle".to_string();
+        bundle_row.state = ArtifactState::NotInstalled;
+        let mut member_row = installed_row("localhost:5050/grimoire/skills/demo");
+        member_row.state = ArtifactState::NotInstalled;
+
+        let mut state = TuiState::new();
+        state.set_rows(vec![bundle_row, member_row]);
+
+        // Installing the bundle pulls the member in: its row must flip too.
+        run_batch(&ctx, &mut state, &[0], BatchOp::Install).await;
+        assert_eq!(
+            state.rows[0].state,
+            ArtifactState::Installed,
+            "bundle row reflects the install"
+        );
+        assert_eq!(
+            state.rows[1].state,
+            ArtifactState::Installed,
+            "member row must be recomputed after a bundle install"
+        );
+
+        // Deleting the bundle removes the member: its row must flip back.
+        run_batch(&ctx, &mut state, &[0], BatchOp::Uninstall).await;
+        assert_eq!(
+            state.rows[0].state,
+            ArtifactState::NotInstalled,
+            "bundle row reflects the uninstall"
+        );
+        assert_eq!(
+            state.rows[1].state,
+            ArtifactState::NotInstalled,
+            "member row must be recomputed after a bundle delete"
         );
     }
 
