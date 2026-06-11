@@ -29,6 +29,7 @@ use crate::lock::grimoire_lock::{GrimoireLock, LockMetadata};
 use crate::lock::lock_io::now_rfc3339;
 use crate::lock::lock_version::LockVersion;
 use crate::lock::locked_artifact::{BundleProvenance, LockedArtifact};
+use crate::lock::locked_bundle::LockedBundle;
 use crate::oci::access::error::AccessErrorKind;
 use crate::oci::access::{OciAccess, Operation};
 use crate::oci::reference::ArtifactRef;
@@ -51,10 +52,10 @@ pub async fn resolve_lock(
     options: &ResolveOptions,
 ) -> Result<GrimoireLock, ResolveError> {
     let _ = scope;
-    let work = build_work(set, access, options).await?;
+    let (work, bundles) = build_work(set, access, options).await?;
     let mut resolved = resolve_work(work, access, options).await?;
     sort_locked(&mut resolved);
-    Ok(build_lock(resolved, set))
+    Ok(build_lock(resolved, set, bundles))
 }
 
 /// Re-resolve only the named subset, carrying every other previous entry
@@ -96,7 +97,7 @@ pub async fn resolve_lock_partial(
     }
 
     // Expand bundles + merge so a requested name can be a bundle member.
-    let all_work = build_work(set, access, options).await?;
+    let (all_work, bundles) = build_work(set, access, options).await?;
 
     // Validate every requested name is an effective artifact (direct or a
     // bundle member).
@@ -133,7 +134,9 @@ pub async fn resolve_lock_partial(
     merged.extend(resolved);
     sort_locked(&mut merged);
 
-    Ok(build_lock(merged, set))
+    // The partial path re-expanded every declared bundle above, so the
+    // cached snapshots are as fresh as a full resolve's.
+    Ok(build_lock(merged, set, bundles))
 }
 
 /// Collect the artifacts to resolve in deterministic `BTreeMap` order:
@@ -199,7 +202,7 @@ async fn build_work(
     set: &DesiredSet,
     access: &Arc<dyn OciAccess>,
     options: &ResolveOptions,
-) -> Result<Vec<WorkItem>, ResolveError> {
+) -> Result<(Vec<WorkItem>, Vec<LockedBundle>), ResolveError> {
     let mut work: Vec<WorkItem> = collect_work(set)
         .into_iter()
         .map(|reference| WorkItem {
@@ -210,7 +213,7 @@ async fn build_work(
 
     // Fast path: no bundles ⇒ no bundle I/O at all.
     if set.bundles.is_empty() {
-        return Ok(work);
+        return Ok((work, Vec::new()));
     }
 
     let direct_keys: HashSet<(ArtifactKind, String)> = work
@@ -218,9 +221,9 @@ async fn build_work(
         .map(|w| (w.reference.kind, w.reference.name.clone()))
         .collect();
 
-    let members = expand_bundles(set, access, options).await?;
+    let (members, snapshots) = expand_bundles(set, access, options).await?;
     work.extend(merge_bundle_members(&direct_keys, members)?);
-    Ok(work)
+    Ok((work, snapshots))
 }
 
 /// Apply the bundle conflict policy to expanded members, returning the work
@@ -300,7 +303,9 @@ fn merge_bundle_members(
     Ok(work)
 }
 
-/// Fetch and parse every declared bundle, returning its flattened members.
+/// Fetch and parse every declared bundle, returning its flattened members
+/// plus one [`LockedBundle`] snapshot per declared binding (the lock's
+/// `[[bundle]]` cache enabling offline effective-set mutations).
 ///
 /// Each bundle is resolved fresh (its tag → digest), its manifest and
 /// single members-layer fetched, and the JSON members document parsed.
@@ -309,8 +314,9 @@ async fn expand_bundles(
     set: &DesiredSet,
     access: &Arc<dyn OciAccess>,
     options: &ResolveOptions,
-) -> Result<Vec<ExpandedMember>, ResolveError> {
+) -> Result<(Vec<ExpandedMember>, Vec<LockedBundle>), ResolveError> {
     let mut out = Vec::new();
+    let mut snapshots = Vec::new();
     for (cfg_name, bundle_id) in &set.bundles {
         let bundle_ref = ArtifactRef {
             kind: ArtifactKind::Bundle,
@@ -321,7 +327,7 @@ async fn expand_bundles(
         // Bound the WHOLE fetch chain (tag resolve + manifest + blob) by the
         // per-artifact timeout, so a hung registry on any leg cannot stall
         // the resolve indefinitely (the per-artifact-timeout contract).
-        let blob = match tokio::time::timeout(
+        let (blob, pinned) = match tokio::time::timeout(
             options.per_artifact_timeout,
             fetch_bundle_layer(&bundle_ref, bundle_id, access, options),
         )
@@ -346,6 +352,16 @@ async fn expand_bundles(
 
         let bundle_repo = bundle_id.registry_repository();
         let bundle_tag = bundle_provenance_tag(bundle_id);
+        // Snapshot BEFORE the member validation loop consumes the list; a
+        // validation failure aborts the whole resolve, so an invalid list
+        // never reaches the lock.
+        snapshots.push(LockedBundle {
+            name: cfg_name.clone(),
+            repo: bundle_repo.clone(),
+            tag: bundle_tag.clone(),
+            pinned,
+            members: bundle_manifest.members.clone(),
+        });
 
         for member in bundle_manifest.members {
             if member.kind == ArtifactKind::Bundle {
@@ -382,19 +398,21 @@ async fn expand_bundles(
             });
         }
     }
-    Ok(out)
+    Ok((out, snapshots))
 }
 
 /// Fetch and integrity-check a bundle's members-layer blob: resolve the tag
 /// to a digest, fetch the manifest, then the single layer — rejecting an
 /// oversized layer by its descriptor before any bytes transfer, and again
-/// after, to bound memory against a hostile registry (CWE-770).
+/// after, to bound memory against a hostile registry (CWE-770). Returns
+/// the blob together with the bundle's pinned identifier (manifest
+/// digest), recorded in the lock's `[[bundle]]` snapshot.
 async fn fetch_bundle_layer(
     bundle_ref: &ArtifactRef,
     bundle_id: &Identifier,
     access: &Arc<dyn OciAccess>,
     options: &ResolveOptions,
-) -> Result<Vec<u8>, ResolveError> {
+) -> Result<(Vec<u8>, PinnedIdentifier), ResolveError> {
     let digest = match retry_chain(bundle_ref, access, options).await {
         Ok(digest) => digest,
         Err(mut e) => {
@@ -439,7 +457,7 @@ async fn fetch_bundle_layer(
     if blob.len() as u64 > BUNDLE_LAYER_SIZE_LIMIT {
         return Err(oversize_error(bundle_ref, blob.len() as u64));
     }
-    Ok(blob)
+    Ok((blob, pinned))
 }
 
 /// The provenance tag recorded for a bundle member: the bundle's own tag,
@@ -594,8 +612,9 @@ fn sort_locked(items: &mut [LockedArtifact]) {
     items.sort_by(|a, b| (a.kind, a.name.as_str()).cmp(&(b.kind, b.name.as_str())));
 }
 
-/// Build a [`GrimoireLock`] from resolved entries and the source set.
-fn build_lock(resolved: Vec<LockedArtifact>, set: &DesiredSet) -> GrimoireLock {
+/// Build a [`GrimoireLock`] from resolved entries, the source set, and the
+/// declared bundles' cached expansion snapshots.
+fn build_lock(resolved: Vec<LockedArtifact>, set: &DesiredSet, bundles: Vec<LockedBundle>) -> GrimoireLock {
     let mut skills = Vec::new();
     let mut rules = Vec::new();
     let mut agents = Vec::new();
@@ -622,6 +641,7 @@ fn build_lock(resolved: Vec<LockedArtifact>, set: &DesiredSet) -> GrimoireLock {
         skills,
         rules,
         agents,
+        bundles,
     }
 }
 
@@ -932,6 +952,7 @@ mod tests {
             skills: vec![],
             rules: vec![],
             agents: vec![],
+            bundles: vec![],
         };
         let mock = MockAccess::new(vec![Scripted::Ok(Some(digest()))]);
         let access = arc(mock.clone());
@@ -987,6 +1008,7 @@ mod tests {
             skills: vec![prev_a, prev_b],
             rules: vec![],
             agents: vec![],
+            bundles: vec![],
         };
 
         let new_a_digest = Algorithm::Sha256.hash(b"new-a");
@@ -1025,6 +1047,7 @@ mod tests {
             skills: vec![],
             rules: vec![],
             agents: vec![],
+            bundles: vec![],
         };
         let mock = MockAccess::new(vec![]);
         let access = arc(mock);

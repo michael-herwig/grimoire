@@ -9,12 +9,14 @@
 //! registry, `chrono` for RFC3339, and the atomic write delegated to the
 //! shared `store::atomic_write` primitive.
 
+pub mod effective_set;
 pub mod file_lock;
 pub mod grimoire_lock;
 pub mod lock_error;
 pub mod lock_io;
 pub mod lock_version;
 pub mod locked_artifact;
+pub mod locked_bundle;
 
 #[allow(unused_imports)]
 pub use file_lock::ConfigFileLock;

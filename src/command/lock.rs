@@ -121,6 +121,7 @@ mod tests {
             skills,
             rules: vec![],
             agents: vec![],
+            bundles: vec![],
         }
     }
 

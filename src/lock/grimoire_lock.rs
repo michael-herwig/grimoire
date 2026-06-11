@@ -53,6 +53,11 @@ pub struct GrimoireLock {
     pub rules: Vec<LockedArtifact>,
     /// Locked agents.
     pub agents: Vec<LockedArtifact>,
+    /// Cached expansion result per declared bundle (`[[bundle]]` on the
+    /// wire, emitted only when non-empty). Enables offline effective-set
+    /// computation for declaration mutations — see
+    /// `adr_effective_set_mutations.md`.
+    pub bundles: Vec<crate::lock::locked_bundle::LockedBundle>,
 }
 
 /// Raw on-disk shape used for deserialization.
@@ -66,6 +71,8 @@ struct RawLock {
     rules: Vec<LockedArtifact>,
     #[serde(default, rename = "agent")]
     agents: Vec<LockedArtifact>,
+    #[serde(default, rename = "bundle")]
+    bundles: Vec<crate::lock::locked_bundle::LockedBundle>,
 }
 
 impl GrimoireLock {
@@ -124,6 +131,7 @@ impl GrimoireLock {
             skills,
             rules,
             agents,
+            bundles: raw.bundles,
         })
     }
 
@@ -152,12 +160,24 @@ impl GrimoireLock {
         rules.sort_by(|a, b| a.name.cmp(&b.name));
         let mut agents: Vec<&LockedArtifact> = self.agents.iter().collect();
         agents.sort_by(|a, b| a.name.cmp(&b.name));
+        // Bundles sort by binding name; pinned strips the advisory tag like
+        // every artifact pin, so output stays byte-stable.
+        let mut bundles: Vec<crate::lock::locked_bundle::LockedBundle> = self
+            .bundles
+            .iter()
+            .map(|b| crate::lock::locked_bundle::LockedBundle {
+                pinned: b.pinned.strip_advisory(),
+                ..b.clone()
+            })
+            .collect();
+        bundles.sort_by(|a, b| a.name.cmp(&b.name));
 
         let view = SerializableView {
             metadata: &self.metadata,
             skill: &skills,
             rule: &rules,
             agent: &agents,
+            bundle: &bundles,
         };
         toml::to_string_pretty(&view)
             .map_err(|e| LockError::new(std::path::PathBuf::new(), LockErrorKind::TomlSerialize(e)))
@@ -177,6 +197,10 @@ struct SerializableView<'a> {
     rule: &'a [&'a LockedArtifact],
     #[serde(rename = "agent", serialize_with = "serialize_artifact_views")]
     agent: &'a [&'a LockedArtifact],
+    /// Emitted only when non-empty so a bundle-free lock stays
+    /// byte-identical to one written before the cache existed.
+    #[serde(rename = "bundle", skip_serializing_if = "<[_]>::is_empty")]
+    bundle: &'a [crate::lock::locked_bundle::LockedBundle],
 }
 
 /// On-wire projection of a [`LockedArtifact`]: borrows `name`, emits a
@@ -355,6 +379,7 @@ generated_at = "2099-01-01T00:00:00Z"
             ],
             rules: vec![],
             agents: vec![],
+            bundles: vec![],
         };
         let out = lock.to_toml_string().expect("serialize");
         let alpha = out.find("name = \"alpha\"").expect("alpha present");
@@ -383,6 +408,7 @@ generated_at = "2099-01-01T00:00:00Z"
                 ArtifactKind::Agent,
                 pinned("acme/code-reviewer", None, 'c'),
             )],
+            bundles: vec![],
         };
         let first = lock.to_toml_string().expect("first");
         let reparsed = GrimoireLock::from_toml_str(&first).expect("reparse");
@@ -422,9 +448,11 @@ pinned = "ghcr.io/acme/code-reviewer@sha256:{a}"
             skills: vec![artifact("s", ArtifactKind::Skill, pinned("acme/s", None, 'a'))],
             rules: vec![],
             agents: vec![],
+            bundles: vec![],
         };
         let out = lock.to_toml_string().expect("serialize");
         assert!(!out.contains("[[agent]]"), "no empty agent array on the wire");
+        assert!(!out.contains("[[bundle]]"), "no empty bundle array on the wire");
     }
 
     #[test]
@@ -434,6 +462,7 @@ pinned = "ghcr.io/acme/code-reviewer@sha256:{a}"
             skills: vec![artifact("s", ArtifactKind::Skill, pinned("acme/s", None, 'a'))],
             rules: vec![artifact("r", ArtifactKind::Rule, pinned("acme/r", None, 'b'))],
             agents: vec![artifact("a", ArtifactKind::Agent, pinned("acme/a", None, 'c'))],
+            bundles: vec![],
         };
         let kinds: Vec<ArtifactKind> = lock.iter_artifacts().map(|a| a.kind).collect();
         assert_eq!(
@@ -455,6 +484,7 @@ pinned = "ghcr.io/acme/code-reviewer@sha256:{a}"
             }],
             rules: vec![],
             agents: vec![],
+            bundles: vec![],
         };
         let out = lock.to_toml_string().expect("serialize");
         // A single provenance keeps the legacy pair shape on the wire.
@@ -468,6 +498,47 @@ pinned = "ghcr.io/acme/code-reviewer@sha256:{a}"
             member.bundles,
             vec![BundleProvenance::new("ghcr.io/acme/stack", "1.0.0")]
         );
+        assert_eq!(
+            out,
+            reparsed.to_toml_string().expect("second"),
+            "second pass byte-identical"
+        );
+    }
+
+    #[test]
+    fn round_trip_preserves_bundle_section() {
+        use crate::oci::Identifier;
+        use crate::oci::bundle::BundleMember;
+
+        let id = Identifier::new_registry("acme/bundles/stack", "ghcr.io")
+            .clone_with_tag("1")
+            .clone_with_digest(Digest::Sha256(sha('e')));
+        let lock = GrimoireLock {
+            metadata: metadata(),
+            skills: vec![artifact("s", ArtifactKind::Skill, pinned("acme/s", None, 'a'))],
+            rules: vec![],
+            agents: vec![],
+            bundles: vec![crate::lock::locked_bundle::LockedBundle {
+                name: "stack".to_string(),
+                repo: "ghcr.io/acme/bundles/stack".to_string(),
+                tag: "1".to_string(),
+                pinned: crate::oci::PinnedIdentifier::try_from(id).unwrap(),
+                members: vec![BundleMember {
+                    kind: ArtifactKind::Skill,
+                    name: "s".to_string(),
+                    id: "ghcr.io/acme/s:1".to_string(),
+                }],
+            }],
+        };
+        let out = lock.to_toml_string().expect("serialize");
+        assert!(out.contains("[[bundle]]"), "{out}");
+        assert!(out.contains("[[bundle.member]]"), "{out}");
+        assert!(!out.contains(":1@"), "bundle pin advisory tag must be stripped: {out}");
+
+        let reparsed = GrimoireLock::from_toml_str(&out).expect("reparse");
+        assert_eq!(reparsed.bundles.len(), 1);
+        assert_eq!(reparsed.bundles[0].name, "stack");
+        assert_eq!(reparsed.bundles[0].members.len(), 1);
         assert_eq!(
             out,
             reparsed.to_toml_string().expect("second"),
@@ -492,6 +563,7 @@ pinned = "ghcr.io/acme/code-reviewer@sha256:{a}"
             }],
             rules: vec![],
             agents: vec![],
+            bundles: vec![],
         };
         let out = lock.to_toml_string().expect("serialize");
         // Two or more contributors emit the `bundles` sub-table array

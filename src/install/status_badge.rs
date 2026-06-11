@@ -123,6 +123,7 @@ mod tests {
             )],
             rules: vec![],
             agents: vec![],
+            bundles: vec![],
         }
     }
 

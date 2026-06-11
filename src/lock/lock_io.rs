@@ -83,6 +83,30 @@ fn content_equal(a: &GrimoireLock, b: &GrimoireLock) -> bool {
     lists_content_equal(&a.skills, &b.skills)
         && lists_content_equal(&a.rules, &b.rules)
         && lists_content_equal(&a.agents, &b.agents)
+        && bundles_content_equal(&a.bundles, &b.bundles)
+}
+
+/// Order-insensitive comparison of the cached bundle snapshots: a changed
+/// bundle digest or member list is a content change (drives the
+/// `generated_at` preservation decision like any artifact pin).
+fn bundles_content_equal(
+    a: &[crate::lock::locked_bundle::LockedBundle],
+    b: &[crate::lock::locked_bundle::LockedBundle],
+) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut a_sorted: Vec<_> = a.iter().collect();
+    let mut b_sorted: Vec<_> = b.iter().collect();
+    a_sorted.sort_by(|x, y| x.name.cmp(&y.name));
+    b_sorted.sort_by(|x, y| x.name.cmp(&y.name));
+    a_sorted.iter().zip(&b_sorted).all(|(x, y)| {
+        x.name == y.name
+            && x.repo == y.repo
+            && x.tag == y.tag
+            && x.pinned.strip_advisory() == y.pinned.strip_advisory()
+            && x.members == y.members
+    })
 }
 
 fn lists_content_equal(a: &[LockedArtifact], b: &[LockedArtifact]) -> bool {
@@ -149,6 +173,7 @@ mod tests {
             skills,
             rules: vec![],
             agents: vec![],
+            bundles: vec![],
         }
     }
 

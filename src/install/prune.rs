@@ -265,6 +265,7 @@ mod tests {
             skills: vec![],
             rules,
             agents: vec![],
+            bundles: vec![],
         }
     }
 
