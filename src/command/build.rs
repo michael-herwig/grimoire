@@ -75,11 +75,13 @@ pub fn detect_kind(path: &Path, forced: Option<&str>) -> anyhow::Result<Artifact
 ///
 /// `version` is the release version used in the annotations (`build`
 /// passes a placeholder; `release` passes the real version).
+/// `fallback_source` is the release reference for the source annotation,
+/// used only when the artifact has no authored `repository` URL.
 pub fn validate_and_pack(
     path: &Path,
     kind: ArtifactKind,
     version: &str,
-    source: Option<&str>,
+    fallback_source: Option<&str>,
 ) -> anyhow::Result<PackedArtifact> {
     match kind {
         // Bundles are packed on a dedicated path (`pack_bundle`); the
@@ -96,8 +98,9 @@ pub fn validate_and_pack(
             for warning in warnings {
                 tracing::warn!("{}: {warning}", path.display());
             }
+            validate_repository(path, fm.metadata.get("repository").map(String::as_str))?;
             let tar = super::grim(pack_skill_dir(path))?;
-            let annotations = annotations_for_skill(&fm, version, source);
+            let annotations = annotations_for_skill(&fm, version, fallback_source);
             Ok(PackedArtifact {
                 kind,
                 name: fm.name.to_string(),
@@ -130,8 +133,12 @@ pub fn validate_and_pack(
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "rule".to_string());
+            validate_repository(
+                path,
+                crate::oci::annotations::string_from_extra(&fm, "repository").as_deref(),
+            )?;
             let tar = super::grim(pack_rule_file(path))?;
-            let annotations = annotations_for_rule(&name, &fm, &parsed.body, version, source);
+            let annotations = annotations_for_rule(&name, &fm, &parsed.body, version, fallback_source);
             Ok(PackedArtifact {
                 kind,
                 name,
@@ -147,8 +154,9 @@ pub fn validate_and_pack(
             for warning in warnings {
                 tracing::warn!("{}: {warning}", path.display());
             }
+            validate_repository(path, fm.metadata.get("repository").map(String::as_str))?;
             let tar = super::grim(pack_agent_file(path))?;
-            let annotations = annotations_for_agent(&fm, version, source);
+            let annotations = annotations_for_agent(&fm, version, fallback_source);
             Ok(PackedArtifact {
                 kind,
                 name: fm.name.to_string(),
@@ -159,10 +167,22 @@ pub fn validate_and_pack(
     }
 }
 
-/// Wrap a projection failure as a path-attributed `SkillError`
+/// Wrap a metadata-validation failure as a path-attributed `SkillError`
 /// (`MetadataInvalid` ⇒ DataError 65).
-fn metadata_invalid(path: &Path) -> impl Fn(crate::install::render::RenderError) -> crate::skill::SkillError + use<'_> {
+fn metadata_invalid<E>(path: &Path) -> impl Fn(E) -> crate::skill::SkillError + use<'_, E>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
     move |e| crate::skill::SkillError::new(path, crate::skill::SkillErrorKind::MetadataInvalid(Box::new(e)))
+}
+
+/// Publish-time gate for an authored `repository` metadata value: present
+/// but not an HTTPS URL ⇒ path-attributed DataError (65). Absent ⇒ Ok.
+fn validate_repository(path: &Path, repository: Option<&str>) -> anyhow::Result<()> {
+    if let Some(url) = repository {
+        super::grim(crate::oci::annotations::validate_repository_url(url).map_err(metadata_invalid(path)))?;
+    }
+    Ok(())
 }
 
 /// Parse a bundle source file (a `grimoire.toml`-shaped document whose
@@ -186,6 +206,9 @@ pub fn read_bundle_members(
         crate::error::Error::from(crate::skill::SkillError::new(path, crate::skill::SkillErrorKind::Io(e)))
     })?;
     let source = super::grim(crate::config::project_config::BundleSource::from_toml_str(&content))?;
+    // Same publish-time gate as skills/rules/agents: a non-HTTPS authored
+    // repository hard-fails before anything can reach a registry.
+    validate_repository(path, source.metadata.repository.as_deref())?;
 
     let mut members = Vec::new();
     for (name, id) in &source.skills {
@@ -347,6 +370,66 @@ mod tests {
         let err = validate_and_pack(&dir, ArtifactKind::Skill, "1.0.0", None).unwrap_err();
         assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
         assert!(format!("{err:#}").contains("claude.user-invocable"), "{err:#}");
+    }
+
+    #[test]
+    fn validate_and_pack_rejects_non_https_repository() {
+        // Skill: authored via the metadata map.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("s");
+        write(
+            &dir.join("SKILL.md"),
+            "---\nname: s\ndescription: d\nmetadata:\n  repository: git@github.com:acme/s.git\n---\n",
+        );
+        let err = validate_and_pack(&dir, ArtifactKind::Skill, "1.0.0", None).unwrap_err();
+        assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
+        assert!(format!("{err:#}").contains("expected an https:// URL"), "{err:#}");
+
+        // Rule: authored as a top-level frontmatter key.
+        let f = tmp.path().join("r.md");
+        write(
+            &f,
+            "---\npaths: [\"a\"]\nrepository: http://github.com/acme/r\n---\nbody\n",
+        );
+        let err = validate_and_pack(&f, ArtifactKind::Rule, "1.0.0", None).unwrap_err();
+        assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
+
+        // Agent: authored via the metadata map.
+        let a = tmp.path().join("rv.md");
+        write(
+            &a,
+            "---\nname: rv\ndescription: d\nmetadata:\n  repository: ssh://git@x/y\n---\nbody\n",
+        );
+        let err = validate_and_pack(&a, ArtifactKind::Agent, "1.0.0", None).unwrap_err();
+        assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
+    }
+
+    #[test]
+    fn validate_and_pack_accepts_https_repository() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("s");
+        write(
+            &dir.join("SKILL.md"),
+            "---\nname: s\ndescription: d\nmetadata:\n  repository: https://github.com/acme/s\n---\n",
+        );
+        let packed = validate_and_pack(&dir, ArtifactKind::Skill, "1.0.0", Some("ghcr.io/acme/s")).unwrap();
+        assert_eq!(
+            packed.annotations["org.opencontainers.image.source"],
+            "https://github.com/acme/s"
+        );
+    }
+
+    #[test]
+    fn read_bundle_members_rejects_non_https_repository() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("stack.toml");
+        write(
+            &f,
+            "repository = \"git@github.com:acme/stack.git\"\n\n[skills]\ncr = \"ghcr.io/acme/cr:1\"\n",
+        );
+        let err = read_bundle_members(&f).unwrap_err();
+        assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
+        assert!(format!("{err:#}").contains("expected an https:// URL"), "{err:#}");
     }
 
     #[test]

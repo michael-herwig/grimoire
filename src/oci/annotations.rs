@@ -18,12 +18,46 @@
 //! drops volatile timestamps for the same reason). Rules have no
 //! description frontmatter, so the title/description are derived from the
 //! rule name and body with a sane default.
+//!
+//! `org.opencontainers.image.source` carries the authored `repository`
+//! metadata value (an HTTPS URL to the artifact's source repository — the
+//! OCI-spec meaning of the key) when present, falling back to the tagless
+//! release reference (`registry/repository`) for continuity. Consumers
+//! distinguish the two by the `https://` prefix.
 
 use std::collections::BTreeMap;
 
+use crate::config::project_config::BundleMetadata;
 use crate::oci::ArtifactKind;
 use crate::oci::manifest::OciManifest;
 use crate::skill::{AgentFrontmatter, RuleFrontmatter, SkillFrontmatter};
+
+/// An authored `repository` metadata value that is not an HTTPS URL.
+///
+/// Raised at publish time (`grim build` / `grim release`) so a bad value
+/// can never reach a registry; classified as DataError (65) through
+/// [`crate::skill::SkillErrorKind::MetadataInvalid`].
+#[derive(thiserror::Error, Debug)]
+#[error("invalid value '{value}' for metadata key 'repository': expected an https:// URL")]
+pub struct RepositoryUrlError {
+    /// The rejected authored value.
+    pub value: String,
+}
+
+/// Validate an authored repository URL (publish-time gate).
+///
+/// # Errors
+///
+/// [`RepositoryUrlError`] when `value` does not start with `https://`.
+pub fn validate_repository_url(value: &str) -> Result<(), RepositoryUrlError> {
+    if value.starts_with("https://") {
+        Ok(())
+    } else {
+        Err(RepositoryUrlError {
+            value: value.to_string(),
+        })
+    }
+}
 
 /// Infer the artifact kind from a pulled manifest's OCI type: the
 /// `artifactType` first, then the config descriptor's media type as a
@@ -45,12 +79,18 @@ pub fn kind_from_manifest(manifest: &OciManifest) -> Option<ArtifactKind> {
 
 /// Build the manifest annotation map for a skill.
 ///
-/// `source` is the optional canonical source reference (e.g. the release
-/// ref). `com.grimoire.keywords` and `com.grimoire.summary` are emitted
-/// only when the frontmatter `metadata.keywords` / `metadata.summary`
-/// keys are present. The map is fully deterministic
-/// (no wall-clock `created`) so re-release is idempotent.
-pub fn annotations_for_skill(fm: &SkillFrontmatter, version: &str, source: Option<&str>) -> BTreeMap<String, String> {
+/// `fallback_source` is the release reference used for
+/// `org.opencontainers.image.source` only when the frontmatter has no
+/// authored `metadata.repository` URL. `com.grimoire.keywords` and
+/// `com.grimoire.summary` are emitted only when the frontmatter
+/// `metadata.keywords` / `metadata.summary` keys are present. The map is
+/// fully deterministic (no wall-clock `created`) so re-release is
+/// idempotent.
+pub fn annotations_for_skill(
+    fm: &SkillFrontmatter,
+    version: &str,
+    fallback_source: Option<&str>,
+) -> BTreeMap<String, String> {
     let mut a = BTreeMap::new();
     a.insert("org.opencontainers.image.title".to_string(), fm.name.to_string());
     a.insert(
@@ -61,7 +101,7 @@ pub fn annotations_for_skill(fm: &SkillFrontmatter, version: &str, source: Optio
     if let Some(license) = &fm.license {
         a.insert("org.opencontainers.image.licenses".to_string(), license.clone());
     }
-    if let Some(src) = source {
+    if let Some(src) = fm.metadata.get("repository").map(String::as_str).or(fallback_source) {
         a.insert("org.opencontainers.image.source".to_string(), src.to_string());
     }
     // `org.opencontainers.image.created` is intentionally OMITTED: a
@@ -85,21 +125,23 @@ pub fn annotations_for_skill(fm: &SkillFrontmatter, version: &str, source: Optio
 /// A rule has no description frontmatter: the title is the rule `name`,
 /// the description is the first heading/paragraph of `body` or a
 /// deterministic default. Keywords come from the rule frontmatter's
-/// `extra` map (`keywords` key, comma-joined if a sequence).
+/// `extra` map (`keywords` key, comma-joined if a sequence). An authored
+/// `repository` URL (also from `extra`) wins over `fallback_source` for
+/// `org.opencontainers.image.source`.
 pub fn annotations_for_rule(
     name: &str,
     fm: &RuleFrontmatter,
     body: &str,
     version: &str,
-    source: Option<&str>,
+    fallback_source: Option<&str>,
 ) -> BTreeMap<String, String> {
     let mut a = BTreeMap::new();
     a.insert("org.opencontainers.image.title".to_string(), name.to_string());
     let description = RuleFrontmatter::derive_description(body).unwrap_or_else(|| format!("grimoire rule {name}"));
     a.insert("org.opencontainers.image.description".to_string(), description);
     a.insert("org.opencontainers.image.version".to_string(), version.to_string());
-    if let Some(src) = source {
-        a.insert("org.opencontainers.image.source".to_string(), src.to_string());
+    if let Some(src) = string_from_extra(fm, "repository").or_else(|| fallback_source.map(str::to_string)) {
+        a.insert("org.opencontainers.image.source".to_string(), src);
     }
     // Omitted for idempotent re-release — see `annotations_for_skill`.
     if let Some(kw) = string_from_extra(fm, "keywords") {
@@ -114,10 +156,15 @@ pub fn annotations_for_rule(
 /// Build the manifest annotation map for an agent.
 ///
 /// Agents carry a real `name`/`description` in their required frontmatter
-/// (like skills); catalog metadata (`keywords`, `summary`) comes from the
-/// `metadata` map. The map stays deterministic (no wall-clock `created`)
-/// so re-release is idempotent — see [`annotations_for_skill`].
-pub fn annotations_for_agent(fm: &AgentFrontmatter, version: &str, source: Option<&str>) -> BTreeMap<String, String> {
+/// (like skills); catalog metadata (`keywords`, `summary`, `repository`)
+/// comes from the `metadata` map. The map stays deterministic (no
+/// wall-clock `created`) so re-release is idempotent — see
+/// [`annotations_for_skill`].
+pub fn annotations_for_agent(
+    fm: &AgentFrontmatter,
+    version: &str,
+    fallback_source: Option<&str>,
+) -> BTreeMap<String, String> {
     let mut a = BTreeMap::new();
     a.insert("org.opencontainers.image.title".to_string(), fm.name.to_string());
     a.insert(
@@ -125,7 +172,7 @@ pub fn annotations_for_agent(fm: &AgentFrontmatter, version: &str, source: Optio
         fm.description.to_string(),
     );
     a.insert("org.opencontainers.image.version".to_string(), version.to_string());
-    if let Some(src) = source {
+    if let Some(src) = fm.metadata.get("repository").map(String::as_str).or(fallback_source) {
         a.insert("org.opencontainers.image.source".to_string(), src.to_string());
     }
     // Omitted `created` for idempotent re-release — see `annotations_for_skill`.
@@ -142,41 +189,44 @@ pub fn annotations_for_agent(fm: &AgentFrontmatter, version: &str, source: Optio
 ///
 /// The title is the bundle `name`. Catalog metadata is authored at the top
 /// of the bundle source file: `summary` / `keywords` emit the Grimoire
-/// annotations (only when present), and `description` overrides the
-/// otherwise-deterministic `grimoire bundle of N members` default. The map
-/// stays deterministic (no wall-clock `created`) so re-release is
-/// idempotent — see [`annotations_for_skill`].
+/// annotations (only when present), `description` overrides the
+/// otherwise-deterministic `grimoire bundle of N members` default, and an
+/// authored `repository` URL wins over `fallback_source` for
+/// `org.opencontainers.image.source`. The map stays deterministic (no
+/// wall-clock `created`) so re-release is idempotent — see
+/// [`annotations_for_skill`].
 pub fn annotations_for_bundle(
     name: &str,
     version: &str,
     member_count: usize,
-    source: Option<&str>,
-    summary: Option<&str>,
-    keywords: Option<&str>,
-    description: Option<&str>,
+    fallback_source: Option<&str>,
+    metadata: &BundleMetadata,
 ) -> BTreeMap<String, String> {
     let mut a = BTreeMap::new();
     a.insert("org.opencontainers.image.title".to_string(), name.to_string());
-    let description = description.map_or_else(|| format!("grimoire bundle of {member_count} members"), str::to_string);
+    let description = metadata
+        .description
+        .clone()
+        .unwrap_or_else(|| format!("grimoire bundle of {member_count} members"));
     a.insert("org.opencontainers.image.description".to_string(), description);
     a.insert("org.opencontainers.image.version".to_string(), version.to_string());
-    if let Some(src) = source {
+    if let Some(src) = metadata.repository.as_deref().or(fallback_source) {
         a.insert("org.opencontainers.image.source".to_string(), src.to_string());
     }
-    if let Some(summary) = summary {
-        a.insert("com.grimoire.summary".to_string(), summary.to_string());
+    if let Some(summary) = &metadata.summary {
+        a.insert("com.grimoire.summary".to_string(), summary.clone());
     }
-    if let Some(keywords) = keywords {
-        a.insert("com.grimoire.keywords".to_string(), keywords.to_string());
+    if let Some(keywords) = &metadata.keywords {
+        a.insert("com.grimoire.keywords".to_string(), keywords.clone());
     }
     a
 }
 
 /// Extract a scalar string `key` from a rule's forward-compat `extra` map.
-/// Catalog metadata (`keywords`, `summary`) is authored as a plain string —
-/// keywords are comma-separated, matching the on-the-wire annotation and the
-/// skill `metadata` map. Non-string values are ignored.
-fn string_from_extra(fm: &RuleFrontmatter, key: &str) -> Option<String> {
+/// Catalog metadata (`keywords`, `summary`, `repository`) is authored as a
+/// plain string — keywords are comma-separated, matching the on-the-wire
+/// annotation and the skill `metadata` map. Non-string values are ignored.
+pub fn string_from_extra(fm: &RuleFrontmatter, key: &str) -> Option<String> {
     fm.extra.get(key)?.as_str().map(str::to_string)
 }
 
@@ -353,15 +403,13 @@ mod tests {
 
     #[test]
     fn bundle_metadata_emits_annotations_and_overrides_description() {
-        let a = annotations_for_bundle(
-            "python-stack",
-            "1.0.0",
-            3,
-            None,
-            Some("Python dev stack"),
-            Some("python,lint"),
-            Some("Skills and rules for Python work"),
-        );
+        let metadata = BundleMetadata {
+            summary: Some("Python dev stack".to_string()),
+            keywords: Some("python,lint".to_string()),
+            description: Some("Skills and rules for Python work".to_string()),
+            repository: None,
+        };
+        let a = annotations_for_bundle("python-stack", "1.0.0", 3, None, &metadata);
         assert_eq!(a["org.opencontainers.image.title"], "python-stack");
         assert_eq!(
             a["org.opencontainers.image.description"],
@@ -373,12 +421,77 @@ mod tests {
 
     #[test]
     fn bundle_without_metadata_uses_default_description() {
-        let a = annotations_for_bundle("python-stack", "1.0.0", 2, None, None, None, None);
+        let a = annotations_for_bundle("python-stack", "1.0.0", 2, None, &BundleMetadata::default());
         assert_eq!(
             a["org.opencontainers.image.description"],
             "grimoire bundle of 2 members"
         );
         assert!(!a.contains_key("com.grimoire.summary"));
         assert!(!a.contains_key("com.grimoire.keywords"));
+    }
+
+    #[test]
+    fn validate_repository_url_requires_https() {
+        assert!(validate_repository_url("https://github.com/acme/x").is_ok());
+        for bad in [
+            "http://github.com/acme/x",
+            "git@github.com:acme/x.git",
+            "ssh://git@x",
+            "",
+        ] {
+            let err = validate_repository_url(bad).unwrap_err();
+            assert!(err.to_string().contains("expected an https:// URL"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn skill_repository_wins_over_fallback_source() {
+        let doc = "---\nname: s\ndescription: d\nmetadata:\n  repository: https://github.com/acme/s\n---\n";
+        let fm = SkillFrontmatter::parse_doc(doc, Path::new("SKILL.md")).unwrap();
+        let a = annotations_for_skill(&fm, "1.0.0", Some("ghcr.io/acme/s"));
+        assert_eq!(a["org.opencontainers.image.source"], "https://github.com/acme/s");
+        // Without an authored repository the fallback ref is kept (continuity).
+        let plain = SkillFrontmatter::parse_doc("---\nname: s\ndescription: d\n---\n", Path::new("SKILL.md")).unwrap();
+        let b = annotations_for_skill(&plain, "1.0.0", Some("ghcr.io/acme/s"));
+        assert_eq!(b["org.opencontainers.image.source"], "ghcr.io/acme/s");
+    }
+
+    #[test]
+    fn rule_repository_wins_over_fallback_source() {
+        let doc = "---\npaths: [\"a\"]\nrepository: https://gitlab.com/acme/r\n---\nbody\n";
+        let parsed = RuleFrontmatter::parse_doc(doc, Path::new("r.md")).unwrap();
+        let a = annotations_for_rule("r", &parsed.frontmatter, &parsed.body, "1.0.0", Some("ghcr.io/acme/r"));
+        assert_eq!(a["org.opencontainers.image.source"], "https://gitlab.com/acme/r");
+        // Non-string `repository` (string-only convention) is ignored ⇒ fallback.
+        let seq = "---\npaths: [\"a\"]\nrepository:\n  - https://gitlab.com/acme/r\n---\nbody\n";
+        let parsed = RuleFrontmatter::parse_doc(seq, Path::new("r.md")).unwrap();
+        let b = annotations_for_rule("r", &parsed.frontmatter, &parsed.body, "1.0.0", Some("ghcr.io/acme/r"));
+        assert_eq!(b["org.opencontainers.image.source"], "ghcr.io/acme/r");
+    }
+
+    #[test]
+    fn agent_repository_wins_over_fallback_source() {
+        let doc = "---\nname: a\ndescription: d\nmetadata:\n  repository: https://github.com/acme/a\n---\nbody\n";
+        let parsed = AgentFrontmatter::parse_doc(doc, Path::new("a.md")).unwrap();
+        let a = annotations_for_agent(&parsed.frontmatter, "1.0.0", Some("ghcr.io/acme/a"));
+        assert_eq!(a["org.opencontainers.image.source"], "https://github.com/acme/a");
+    }
+
+    #[test]
+    fn bundle_repository_wins_over_fallback_source() {
+        let metadata = BundleMetadata {
+            repository: Some("https://github.com/acme/stack".to_string()),
+            ..BundleMetadata::default()
+        };
+        let a = annotations_for_bundle("stack", "1.0.0", 2, Some("ghcr.io/acme/stack"), &metadata);
+        assert_eq!(a["org.opencontainers.image.source"], "https://github.com/acme/stack");
+        let b = annotations_for_bundle(
+            "stack",
+            "1.0.0",
+            2,
+            Some("ghcr.io/acme/stack"),
+            &BundleMetadata::default(),
+        );
+        assert_eq!(b["org.opencontainers.image.source"], "ghcr.io/acme/stack");
     }
 }

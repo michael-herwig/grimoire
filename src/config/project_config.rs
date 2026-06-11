@@ -166,6 +166,9 @@ pub struct BundleMetadata {
     pub keywords: Option<String>,
     /// Overrides the default `grimoire bundle of N members` description.
     pub description: Option<String>,
+    /// HTTPS URL to the source repository → `org.opencontainers.image.source`
+    /// (validated `https://` at publish time).
+    pub repository: Option<String>,
 }
 
 /// A parsed bundle source: validated members plus catalog metadata.
@@ -214,6 +217,8 @@ struct RawBundleSource {
     keywords: Option<String>,
     #[serde(default)]
     description: Option<String>,
+    #[serde(default)]
+    repository: Option<String>,
 }
 
 /// Parse + validate a bundle source: members through [`parse_artifact_map`],
@@ -232,6 +237,7 @@ fn parse_bundle_source(s: &str, path: PathBuf) -> Result<BundleSource, ConfigErr
             summary: raw.summary,
             keywords: raw.keywords,
             description: raw.description,
+            repository: raw.repository,
         },
     })
 }
@@ -533,6 +539,7 @@ x = "ghcr.io/acme/x:1"
 summary = "Python dev stack"
 keywords = "python,lint,test"
 description = "Skills and rules for Python work"
+repository = "https://github.com/acme/python-stack"
 
 [skills]
 code-review = "ghcr.io/acme/code-review:1"
@@ -549,6 +556,10 @@ rust-style = "ghcr.io/acme/rust-style:2"
         assert_eq!(
             src.metadata.description.as_deref(),
             Some("Skills and rules for Python work")
+        );
+        assert_eq!(
+            src.metadata.repository.as_deref(),
+            Some("https://github.com/acme/python-stack")
         );
     }
 

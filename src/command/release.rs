@@ -164,15 +164,9 @@ async fn release_bundle(
         .to_layer_bytes()
         .map_err(|e| anyhow::anyhow!("failed to serialize bundle layer: {e}"))?;
     let layer_digest = Algorithm::Sha256.hash(&layer);
-    let annotations = annotations_for_bundle(
-        &name,
-        version,
-        manifest.members.len(),
-        Some(source),
-        metadata.summary.as_deref(),
-        metadata.keywords.as_deref(),
-        metadata.description.as_deref(),
-    );
+    // An authored `repository` URL wins over the release-ref fallback
+    // inside `annotations_for_bundle`.
+    let annotations = annotations_for_bundle(&name, version, manifest.members.len(), Some(source), &metadata);
     let oci_manifest = OciManifest {
         media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
         artifact_type: Some(ArtifactKind::Bundle.artifact_type().to_string()),
