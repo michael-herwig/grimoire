@@ -22,6 +22,7 @@ use crate::api::search_report::{SearchEntry, SearchReport};
 use crate::catalog::SearchQuery;
 use crate::catalog::registry_catalog::Catalog;
 use crate::cli::exit_code::ExitCode;
+use crate::config::scope::ConfigScope;
 use crate::context::Context;
 use crate::install::install_state::InstallState;
 use crate::install::status_badge::derive_badge;
@@ -75,10 +76,11 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
     // Parse the raw query once: the in-memory matcher reuses it per row.
     let parsed = SearchQuery::parse(args.query.as_deref().unwrap_or(""));
     // The build's repository-name prefilter is derived from the parsed query,
-    // not the raw string: a single text term scopes the build cheaply; a
-    // multi-term or kind-keyword query yields an empty prefilter (no single
-    // substring can AND across terms) and builds the capped browse window,
-    // then narrows in memory below.
+    // not the raw string: the longest text term scopes the build by name
+    // (sound, since matching ANDs every term), so even a multi-term query
+    // narrows the walk. A kind-only / empty query has no term to scope by and
+    // builds the capped browse window. Either way the in-memory matcher below
+    // re-applies the full AND.
     let catalog = super::grim(
         Catalog::load_or_refresh(
             &catalog_path,
@@ -90,6 +92,19 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
         )
         .await,
     )?;
+
+    // A non-empty query against a build that hit the repository cap may be
+    // missing matches past the window: the catalog walked only the first
+    // `MAX_CATALOG_REPOS` candidates and a multi-term / kind-only query
+    // narrows in memory over that prefix. Surface it so a short or empty
+    // result set is not read as exhaustive. (An empty query is an explicit
+    // browse and the cap is the documented cut-line — no warning.)
+    if catalog.truncated() && !parsed.is_empty() {
+        tracing::warn!(
+            "catalog listing capped at {} repositories; results may be incomplete — narrow the query or use a more specific term",
+            crate::catalog::registry_catalog::MAX_CATALOG_REPOS
+        );
+    }
 
     // Scope badges are best-effort: `search` is not scope-bound, so a
     // missing project config just means "nothing installed" rather than a
@@ -131,22 +146,16 @@ fn resolve_registry(ctx: &Context, args: &SearchArgs) -> anyhow::Result<String> 
     let project_default = scope_resolution::resolve(ctx, args.global, args.config.as_deref())
         .ok()
         .and_then(|scope| scope.options.default_registry);
-    let global_default = global_config_default(ctx, args.global);
+    // `--global` maps to the global scope; the centralized helper gates the
+    // global-config fallback on it (same mapping `scope_resolution` applies).
+    let scope = if args.global {
+        ConfigScope::Global
+    } else {
+        ConfigScope::Project
+    };
+    let global_default = super::global_config_default(ctx, scope);
     super::resolve_default_registry(ctx, project_default.as_deref(), global_default.as_deref())
         .ok_or_else(|| crate::error::Error::from(crate::command::command_error::CommandError::NoRegistry).into())
-}
-
-/// The global config's `[options].default_registry`, loaded best-effort as
-/// the lowest-priority registry fallback for a non-global run (a global run
-/// already resolved the global config as its active scope). Load failures
-/// degrade to `None`.
-fn global_config_default(ctx: &Context, global: bool) -> Option<String> {
-    if global {
-        return None;
-    }
-    crate::config::global_config::GlobalConfig::load(&ctx.paths().global_config())
-        .ok()
-        .and_then(|cfg| cfg.options.default_registry)
 }
 
 /// Load the scope's lock + install-state for badge derivation, degrading

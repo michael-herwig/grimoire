@@ -127,6 +127,11 @@ struct CatalogFile {
     /// rebuilt online, but still served (filtered) offline.
     #[serde(default)]
     scope: String,
+    /// Whether the build hit [`MAX_CATALOG_REPOS`] with candidates left over
+    /// — i.e. this window is incomplete and a non-empty query may be missing
+    /// matches past the cap. Persisted so an offline-served cache still warns.
+    #[serde(default)]
+    truncated: bool,
     /// RFC3339 UTC timestamp of the last (re)build.
     built_at: String,
     /// Entries keyed by repository path for stable, deduplicated output.
@@ -139,6 +144,9 @@ pub struct Catalog {
     registry: String,
     /// The lowercased name-prefilter this catalog was built under.
     scope: String,
+    /// Whether the build was truncated at [`MAX_CATALOG_REPOS`] (see
+    /// [`Self::truncated`]).
+    truncated: bool,
     built_at: String,
     entries: BTreeMap<String, CatalogEntry>,
 }
@@ -149,6 +157,7 @@ impl Catalog {
         Self {
             registry: registry.to_string(),
             scope: String::new(),
+            truncated: false,
             built_at: now_rfc3339(),
             entries: BTreeMap::new(),
         }
@@ -162,6 +171,16 @@ impl Catalog {
     /// When this catalog was last fully built (RFC3339).
     pub fn built_at(&self) -> &str {
         &self.built_at
+    }
+
+    /// Whether the build hit [`MAX_CATALOG_REPOS`] with more candidates left
+    /// unwalked. When `true` the window is a *prefix* of the matching
+    /// repositories, so a non-empty query filtered in memory may be missing
+    /// matches that live past the cap — callers should surface a truncation
+    /// hint (the `search` report / TUI status line) so results are not read as
+    /// exhaustive. `false` means the whole candidate set fit within the cap.
+    pub fn truncated(&self) -> bool {
+        self.truncated
     }
 
     /// Entries sorted by repository path.
@@ -199,6 +218,7 @@ impl Catalog {
         Ok(Some(Self {
             registry: file.registry,
             scope: file.scope,
+            truncated: file.truncated,
             built_at: file.built_at,
             entries: file.entries,
         }))
@@ -214,6 +234,7 @@ impl Catalog {
             version: CatalogVersion::V1,
             registry: self.registry.clone(),
             scope: self.scope.clone(),
+            truncated: self.truncated,
             built_at: self.built_at.clone(),
             entries: self.entries.clone(),
         };
@@ -293,6 +314,11 @@ impl Catalog {
     /// sequential is unusable). Output is keyed by repository in a
     /// `BTreeMap`, so the result is deterministic regardless of completion
     /// order (quality-rust `JoinSet` rule).
+    ///
+    /// When the post-prefilter candidate list exceeds the cap the window is
+    /// only a prefix of the matches; the build records that on
+    /// [`Self::truncated`] so a non-empty query can warn that results past the
+    /// cap are not shown.
     async fn build(
         registry: &str,
         scope: &str,
@@ -308,13 +334,19 @@ impl Catalog {
         // identifiers parse `registry/repository`).
         let (host, namespace) = split_host_namespace(registry);
         let repos = access.list_catalog(registry).await?;
-        // Namespace scope (no network) + cheap name prefilter + hard cap.
-        let selected: Vec<String> = repos
+        // Namespace scope (no network) + cheap name prefilter, then the hard
+        // cap. Take one past the cap so an overflow is detectable without
+        // materializing a (potentially 60k-repo) list.
+        let mut selected: Vec<String> = repos
             .into_iter()
             .filter(|r| namespace.is_none_or(|ns| r == ns || r.starts_with(&format!("{ns}/"))))
             .filter(|r| scope.is_empty() || r.to_lowercase().contains(scope))
-            .take(MAX_CATALOG_REPOS)
+            .take(MAX_CATALOG_REPOS + 1)
             .collect();
+        // More candidates than the cap ⇒ the window is a prefix; drop the
+        // probe element and flag the build as truncated.
+        let truncated = selected.len() > MAX_CATALOG_REPOS;
+        selected.truncate(MAX_CATALOG_REPOS);
 
         let mut entries = BTreeMap::new();
         let mut iter = selected.into_iter();
@@ -339,6 +371,7 @@ impl Catalog {
         Ok(Self {
             registry: registry.to_string(),
             scope: scope.to_string(),
+            truncated,
             built_at: now_rfc3339(),
             entries,
         })
@@ -636,12 +669,14 @@ mod tests {
         let cat = Catalog {
             registry: "localhost:5000".to_string(),
             scope: String::new(),
+            truncated: true,
             built_at: ts(10),
             entries,
         };
         cat.save(&path).unwrap();
         let loaded = Catalog::load(&path, "localhost:5000").unwrap().expect("present");
         assert_eq!(loaded.entries().count(), 1);
+        assert!(loaded.truncated(), "truncated flag round-trips through disk");
         let e = loaded.entries().next().unwrap();
         assert_eq!(e.kind.as_deref(), Some("skill"));
         assert_eq!(e.keywords, vec!["review", "quality"]);
@@ -881,6 +916,53 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cat.entries().count(), MAX_CATALOG_REPOS, "build is capped");
+        assert!(cat.truncated(), "a build that hit the cap reports truncation");
+    }
+
+    #[tokio::test]
+    async fn build_under_cap_is_not_truncated() {
+        // A candidate set that fits within the cap leaves the window
+        // exhaustive, so a non-empty query can be read as complete.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let reg: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(seed_many(MAX_CATALOG_REPOS - 1).await);
+        let cat = Catalog::load_or_refresh(&path, "localhost:5000", "", &reg, false, true)
+            .await
+            .unwrap();
+        assert_eq!(cat.entries().count(), MAX_CATALOG_REPOS - 1);
+        assert!(!cat.truncated(), "an under-cap build is not truncated");
+    }
+
+    #[tokio::test]
+    async fn build_exactly_at_cap_is_not_truncated() {
+        // Boundary: exactly MAX_CATALOG_REPOS candidates fit — the probe
+        // element (cap + 1) never materializes, so this is not truncation.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let reg: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(seed_many(MAX_CATALOG_REPOS).await);
+        let cat = Catalog::load_or_refresh(&path, "localhost:5000", "", &reg, false, true)
+            .await
+            .unwrap();
+        assert_eq!(cat.entries().count(), MAX_CATALOG_REPOS);
+        assert!(
+            !cat.truncated(),
+            "a build whose candidate count equals the cap is exhaustive, not truncated"
+        );
+    }
+
+    #[tokio::test]
+    async fn prefilter_scope_keeps_build_within_cap_untruncated() {
+        // A name prefilter that selects a small candidate set must not flag
+        // truncation even when the registry holds far more than the cap.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let reg: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(seed_many(MAX_CATALOG_REPOS + 50).await);
+        // Only `skill-0007` contains "0007".
+        let cat = Catalog::load_or_refresh(&path, "localhost:5000", "0007", &reg, false, true)
+            .await
+            .unwrap();
+        assert_eq!(cat.entries().count(), 1);
+        assert!(!cat.truncated(), "a narrow prefilter is not truncated");
     }
 
     #[test]
