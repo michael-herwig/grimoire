@@ -36,12 +36,13 @@ tasks:
       NEXT_VERSION:
         sh: git-cliff --bumped-version
     cmds:
+      - task verify
       - echo "Next version:{{.NEXT_VERSION}}"
       - cargo set-version "{{.NEXT_VERSION | trimPrefix "v"}}"
       - git-cliff --tag "{{.NEXT_VERSION}}" -o CHANGELOG.md
-      - task verify
       - |
         echo ""
         echo "Release prepared ({{.NEXT_VERSION}}). Review changes, then:"
         echo "  git add -A && git commit -m 'release: {{.NEXT_VERSION}}'"
         echo "  git tag {{.NEXT_VERSION}}"
+        echo "  git push --atomic origin main {{.NEXT_VERSION}}"
