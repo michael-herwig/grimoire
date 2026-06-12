@@ -74,7 +74,8 @@ to publish a skill once and install or upgrade it across many projects.
 grim install some/skill:1            # Fetch + install an AI config artifact
 grim list                            # Show installed skills/rules
 grim update                          # Pull newer versions
-grim publish ./my-skill some/skill:1 # Push an artifact to a registry
+grim release ./my-skill some/skill:1 # Push a single artifact to a registry
+grim publish                         # Batch-release packages from publish.toml
 grim remove some/skill               # Uninstall
 ```
 

@@ -5,16 +5,16 @@ paths:
 
 # CLI API Data Layer Patterns
 
-Standards for the API reporting layer (`api/data/`, `api.rs`). Rules ensure
-a consistent output format across all commands.
-
-> **Status: provisional.** The API layer is not implemented yet (only
-> `src/main.rs` exists). Treat the structure below as the intended shape;
-> adjust as real modules land.
+Standards for the API reporting layer: flat report modules
+`src/api/{name}_report.rs`, re-exported from `src/api.rs`. Rules ensure
+a consistent output format across all commands. No `Api` facade, no
+`api/data/` subdirectory — commands return report values; the dispatch
+arm in `src/app.rs` renders them via the `Printable` trait (plain or
+`--format json`).
 
 ## Data Type Structure
 
-Every file in `api/data/` follow this structure:
+Every report file in `src/api/` follow this structure:
 
 1. **Doc comments** on all public types — describe purpose, plain format, JSON format:
    ```rust
@@ -28,7 +28,9 @@ Every file in `api/data/` follow this structure:
 3. **`Printable` impl** with single `print_table` call — no conditional empty-checks, no multiple tables
 4. **Static `&str` headers** in `print_table` — never `format!()` for dynamic headers; add data columns instead
 
-Reference impls: `api/data/paths.rs`, `api/data/env.rs`.
+Reference impls: `src/api/install_report.rs` (multi-item, bare-array
+JSON), `src/api/release_report.rs` (single-item),
+`src/api/publish_report.rs` (multi-item batch with typed status enum).
 
 ## Single-Table Rule
 
@@ -79,15 +81,17 @@ pub enum RemovedStatus {
 
 ## Adding a New Report Type
 
-1. Create `api/data/{name}.rs` with struct + doc comments + `Printable` impl
-2. Add `pub mod {name};` to `api/data.rs`
-3. Add `report_{name}()` method to `Api` in `api.rs` (delegates to `self.report()`)
-4. Call from `command/{name}.rs` with data built from task results
+1. Create `src/api/{name}_report.rs` with struct + doc comments +
+   `Printable` impl
+2. Add `pub mod {name}_report;` (+ re-export) to `src/api.rs`
+3. Return the report from `command/{name}.rs` built from operation
+   results; render it in the matching dispatch arm in `src/app.rs`
 
 ## Commands That Exec a Child Process
 
 A command whose job is to replace/spawn a child process is exempt from the
-`Printable` / `api/data/` path: it does not emit structured output because
-execution diverges into the child. Keep any CLI-shaped error for such a
-command local to its `command/{name}.rs` file rather than in `api/data/` —
-it carries CLI wording and exits before any structured payload exists.
+`Printable` / report-module path: it does not emit structured output
+because execution diverges into the child. Keep any CLI-shaped error for
+such a command local to its `command/{name}.rs` file rather than in a
+report module — it carries CLI wording and exits before any structured
+payload exists.
