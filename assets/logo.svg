@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">Grimoire</title>
+  <desc id="desc">An open spellbook with a magical AI spark rising from its pages.</desc>
+
+  <!-- main spark (AI / magic) -->
+  <path fill="#FFB02E" d="M64 5
+    Q68.5 25.5 90 30
+    Q68.5 34.5 64 55
+    Q59.5 34.5 38 30
+    Q59.5 25.5 64 5 Z"/>
+
+  <!-- small spark, right -->
+  <path fill="#FFB02E" d="M99 8
+    Q100.8 15.2 108 17
+    Q100.8 18.8 99 26
+    Q97.2 18.8 90 17
+    Q97.2 15.2 99 8 Z"/>
+
+  <!-- small spark, left -->
+  <path fill="#FFB02E" d="M29 16
+    Q30.2 20.8 35 22
+    Q30.2 23.2 29 28
+    Q27.8 23.2 23 22
+    Q27.8 20.8 29 16 Z"/>
+
+  <!-- book cover -->
+  <path fill="#6D52F4" d="M16 60
+    C32 54 50 58 64 68
+    C78 58 96 54 112 60
+    L112 98
+    C96 92 78 96 64 106
+    C50 96 32 92 16 98 Z"/>
+
+  <!-- pages -->
+  <path fill="#DCD2FC" d="M24 66
+    C36 62 50 65 64 74
+    C78 65 92 62 104 66
+    L104 92
+    C92 88 78 90 64 98
+    C50 90 36 88 24 92 Z"/>
+
+  <!-- center spine groove -->
+  <path d="M64 78 V94" stroke="#6D52F4" stroke-width="3.5" stroke-linecap="round" fill="none"/>
+</svg>
