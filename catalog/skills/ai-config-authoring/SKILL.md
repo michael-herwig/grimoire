@@ -75,8 +75,15 @@ not copy-paste — versioning, provenance, and an update path matter as
 much for config as for code. This skill itself is distributed as an OCI
 artifact via [grim][grimoire]. To package and publish your artifact with
 grim — frontmatter schemas, validation, vendor metadata — read the
-companion skill [`../grim-authoring/SKILL.md`](../grim-authoring/SKILL.md)
-(if installed; both ship together in the `grim-essentials` bundle).
+companion skill `grim-authoring` at
+[`../grim-authoring/SKILL.md`](../grim-authoring/SKILL.md); both ship
+together in the `grim-essentials` bundle. If that file is missing,
+install it by identifier:
+
+```sh
+grim add grim.ocx.sh/skills/grim-authoring:1 && grim install
+# fresh project (no grimoire.toml yet): run `grim init` first
+```
 
 ## Further Reading
 

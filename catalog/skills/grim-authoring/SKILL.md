@@ -61,10 +61,16 @@ must be an `https://` URL (anything else fails the release with 65).
 This skill covers grim **packaging and validation** only. For the craft of
 the content itself — progressive disclosure, context budgets, description
 triggering, choosing skill vs rule vs agent — read the companion skill
-[`../ai-config-authoring/SKILL.md`](../ai-config-authoring/SKILL.md) (if
-installed; both ship together in the `grim-essentials` bundle). When
-creating a new artifact from scratch, read it FIRST — write good content,
-then package it here.
+`ai-config-authoring` at
+[`../ai-config-authoring/SKILL.md`](../ai-config-authoring/SKILL.md);
+both ship together in the `grim-essentials` bundle. When creating a new
+artifact from scratch, read it FIRST — write good content, then package
+it here. If that file is missing, install it by identifier:
+
+```sh
+grim add grim.ocx.sh/skills/ai-config-authoring:1 && grim install
+# fresh project (no grimoire.toml yet): run `grim init` first
+```
 
 ## Routing Table
 
