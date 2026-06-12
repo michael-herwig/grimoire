@@ -49,7 +49,8 @@ tags up and corrupt `--bumped-version`).
 Registry refs are kind-segmented: `grim.ocx.sh/skills/<name>:<version>`,
 `grim.ocx.sh/bundles/<name>:<version>`. Semver releases cascade (`1.2.3`
 also moves `1.2`, `1`, `latest`). Bundle members reference the floating
-major tag (`:1`) and bundles publish without `--pin`, so skill patches
+major tag (`:0` while on the 0.x line) and bundles publish without
+`--pin`, so skill patches
 reach bundle consumers via plain `grim update`.
 
 ## Local loop

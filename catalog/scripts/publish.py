@@ -120,6 +120,11 @@ def main() -> int:
             cmd.append("--dry-run")
         if args.force:
             cmd.append("--force")
+        else:
+            # Blanket re-runs only push bumped versions: an already-
+            # published exact version is skipped (grim flag; conflicts
+            # with --force, hence the else).
+            cmd.append("--skip-existing")
         print(f"==> {' '.join(cmd)}")
         result = subprocess.run(cmd)
         if result.returncode != 0:

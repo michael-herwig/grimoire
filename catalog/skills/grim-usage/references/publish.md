@@ -49,8 +49,10 @@ cascade. A reference with no tag at all is an error.
 An exact-version tag is immutable by default: if `1.2.3` already exists
 and points at different bytes, the release refuses (exit 65) rather than
 rewrite history. Pass `--force` only when you deliberately mean to move
-it. Floating tags (`1.2`, `1`, `latest`) move freely on every cascade —
-that is their job.
+it. For scripted blanket publishing, `--skip-existing` (conflicts with
+`--force`) makes an already-published version a success no-op instead —
+only bumped versions push. Floating tags (`1.2`, `1`, `latest`) move
+freely on every cascade — that is their job.
 
 ## Bundles
 

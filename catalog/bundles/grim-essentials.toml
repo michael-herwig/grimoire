@@ -1,10 +1,10 @@
 # First-party starter bundle: install all three grim knowledge skills at once.
 #
-#   grim add --kind bundle grim.ocx.sh/bundles/grim-essentials:1
+#   grim add --kind bundle grim.ocx.sh/bundles/grim-essentials:0
 #
-# Members reference the floating major tag (:1) so skill patch releases
-# reach consumers via cascade tags + `grim update` without a bundle
-# re-release. Published without --pin for the same reason.
+# Members reference the floating major tag (:0 for the 0.x line) so skill
+# patch releases reach consumers via cascade tags + `grim update` without
+# a bundle re-release. Published without --pin for the same reason.
 
 summary = "Grimoire first-party starter pack"
 keywords = "grimoire,grim,skills,authoring,ai-config,oci,starter"
@@ -12,6 +12,6 @@ description = "First-party skills: using the grim CLI, vendor-neutral AI-config 
 repository = "https://github.com/michael-herwig/grimoire"
 
 [skills]
-grim-usage = "grim.ocx.sh/skills/grim-usage:1"
-ai-config-authoring = "grim.ocx.sh/skills/ai-config-authoring:1"
-grim-authoring = "grim.ocx.sh/skills/grim-authoring:1"
+grim-usage = "grim.ocx.sh/skills/grim-usage:0"
+ai-config-authoring = "grim.ocx.sh/skills/ai-config-authoring:0"
+grim-authoring = "grim.ocx.sh/skills/grim-authoring:0"
