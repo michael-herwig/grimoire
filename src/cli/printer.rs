@@ -34,19 +34,24 @@ pub trait Printable {
 /// static `&str` slices; callers add columns rather than formatting
 /// dynamic headers.
 ///
+/// Widths are measured in *chars*, not bytes — multi-byte cells (the `…`
+/// from [`truncate_ellipsis`], accented text) would otherwise inflate
+/// their column and skew every following column off the header grid.
+///
 /// # Errors
 ///
 /// Returns any I/O error from writing to `w`.
 pub fn print_table(w: &mut impl Write, headers: &[&str], rows: &[Vec<String>]) -> io::Result<()> {
     const GAP: &str = "  ";
 
-    let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
+    let mut widths: Vec<usize> = headers.iter().map(|h| h.chars().count()).collect();
     for row in rows {
         for (i, cell) in row.iter().enumerate() {
+            let cell_width = cell.chars().count();
             if i < widths.len() {
-                widths[i] = widths[i].max(cell.len());
+                widths[i] = widths[i].max(cell_width);
             } else {
-                widths.push(cell.len());
+                widths.push(cell_width);
             }
         }
     }
@@ -71,7 +76,8 @@ fn write_row<'a>(
         }
         let width = widths.get(i).copied().unwrap_or(0);
         line.push_str(cell);
-        for _ in cell.len()..width {
+        // Pad by display chars (not bytes) to match the width measurement.
+        for _ in cell.chars().count()..width {
             line.push(' ');
         }
     }
@@ -132,6 +138,33 @@ mod tests {
         assert_eq!(lines[0], "Name         Kind");
         assert_eq!(lines[1], "code-review  skill");
         assert_eq!(lines[2], "rust-style   rule");
+    }
+
+    #[test]
+    fn print_table_aligns_multibyte_cells() {
+        // Regression: widths were computed in *bytes*, so a cell holding
+        // multi-byte chars — most visibly the `…` appended by
+        // `truncate_ellipsis` — over-allocated its column and under-padded
+        // itself, skewing every following column off the header grid.
+        let mut buf = Vec::new();
+        print_table(
+            &mut buf,
+            &["Summary", "Status"],
+            &[
+                vec!["a véry long descr…".to_string(), "ok".to_string()],
+                vec!["plain summary".to_string(), "ok".to_string()],
+            ],
+        )
+        .unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        let col = |l: &str, needle: &str| {
+            let byte_pos = l.find(needle).unwrap();
+            l[..byte_pos].chars().count()
+        };
+        let header_col = col(lines[0], "Status");
+        assert_eq!(col(lines[1], "ok"), header_col, "ellipsis row aligns with header");
+        assert_eq!(col(lines[2], "ok"), header_col, "plain row aligns with header");
     }
 
     #[test]
