@@ -62,6 +62,8 @@ jobs:
         continue-on-error: true
       - name: Build
         run: task rust:build
+      - name: Validate catalog
+        run: task catalog:verify
       - name: Test
         run: task rust:test:unit -- --profile ci
       - name: Upload Binary

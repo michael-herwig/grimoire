@@ -1,0 +1,123 @@
+name: Publish Catalog
+
+# Publish first-party catalog packages (catalog/) to grim.ocx.sh with the
+# released grim binary — dogfooding `grim release` end to end.
+#
+# Manual dispatch only: humans trigger publishes, never auto-on-main.
+# Versions come from catalog/publish.toml (bumped via PR); the driver
+# (catalog/scripts/publish.py) publishes skills/rules/agents before bundles
+# so bundle members always resolve.
+#
+# Cost: one Linux job, ~2-3 min (released binary download, no Rust build).
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Plan only — validate + pack, no push
+        type: boolean
+        default: false
+      force:
+        description: Move existing exact-version tags
+        type: boolean
+        default: false
+      grim_version:
+        description: grim release tag to publish with (latest or vX.Y.Z)
+        type: string
+        default: latest
+
+permissions:
+  contents: read
+
+concurrency:
+  # Serialize publishes — never cancel a half-finished registry push.
+  group: publish-catalog
+  cancel-in-progress: false
+
+env:
+  REGISTRY: grim.ocx.sh
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: grim.ocx.sh
+    env:
+      # Per-job credential store; never the runner's shared docker config.
+      DOCKER_CONFIG: ${{ runner.temp }}/docker
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Task
+        uses: go-task/setup-task@3be4020d41929789a01026e0e427a4321ce0ad44 # v2.0.0
+
+      - name: Install released grim
+        shell: bash
+        env:
+          # Pass via env — never interpolate ${{ }} into the script body
+          # (blocks script injection from the free-form dispatch input).
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GRIM_VERSION: ${{ inputs.grim_version }}
+        run: |
+          set -euo pipefail
+          if [[ "$GRIM_VERSION" != "latest" && ! "$GRIM_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::grim_version '$GRIM_VERSION' must be 'latest' or vX.Y.Z"
+            exit 1
+          fi
+          args=()
+          if [[ "$GRIM_VERSION" != "latest" ]]; then
+            args+=("$GRIM_VERSION")
+          fi
+          gh release download "${args[@]}" --repo "$GITHUB_REPOSITORY" \
+            -p 'grimoire-x86_64-unknown-linux-musl.tar.xz' -D dl
+          stage="$(mktemp -d)"
+          tar -xf dl/grimoire-x86_64-unknown-linux-musl.tar.xz -C "$stage"
+          found="$(find "$stage" -name grim -type f | head -1)"
+          if [[ -z "$found" ]]; then
+            echo "::error::no grim binary in release archive"
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/bin"
+          install -m 0755 "$found" "$RUNNER_TEMP/bin/grim"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/bin/grim" --version
+
+      - name: grim login
+        env:
+          # env intermediary — never ${{ }} secrets in the script body.
+          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "$REGISTRY_TOKEN" | grim login "$REGISTRY" -u "$REGISTRY_USER" \
+            --password-stdin --allow-insecure-store
+
+      - name: Dry-run smoke
+        # Always runs: full validate + pack + plan against the live
+        # registry with zero writes, gating the real push below.
+        env:
+          SKIP_BUILD: "true"
+          GRIM_COMMAND: grim
+        run: task catalog:release -- --dry-run
+
+      - name: Publish
+        if: ${{ !inputs.dry_run }}
+        env:
+          SKIP_BUILD: "true"
+          GRIM_COMMAND: grim
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [[ "$FORCE" == "true" ]]; then
+            args+=(--force)
+          fi
+          task catalog:release -- "${args[@]}"
+
+      - name: grim logout
+        if: always()
+        # Cleanup glue: tolerate a missing binary when an early step failed;
+        # logout itself is idempotent by design.
+        run: command -v grim >/dev/null 2>&1 && grim logout "$REGISTRY" || true
