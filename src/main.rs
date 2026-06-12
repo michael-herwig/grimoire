@@ -47,6 +47,7 @@ use crate::command::install::InstallArgs;
 use crate::command::lock::LockArgs;
 use crate::command::login::LoginArgs;
 use crate::command::logout::LogoutArgs;
+use crate::command::publish::PublishArgs;
 use crate::command::release::ReleaseArgs;
 use crate::command::remove::RemoveArgs;
 use crate::command::search::SearchArgs;
@@ -87,6 +88,8 @@ pub enum Command {
     Build(BuildArgs),
     /// Validate, pack, and push a skill/rule with cascade tags.
     Release(ReleaseArgs),
+    /// Publish a set of skills/rules/agents/bundles from a manifest.
+    Publish(PublishArgs),
     /// Declare a skill/rule in the config and lock it.
     Add(AddArgs),
     /// Undeclare a skill/rule from the config and lock.

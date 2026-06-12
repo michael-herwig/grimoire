@@ -7,7 +7,7 @@ command serves humans and scripts.
 
 Run `grim <command> --help` for the authoritative, always-current flag list.
 
-## Global options
+## Global options {#global-options}
 
 These apply to every subcommand:
 
@@ -36,6 +36,7 @@ These apply to every subcommand:
 | [`grim tui`](#tui) | Browse the catalog interactively. |
 | [`grim build`](#build) | Validate and pack a local artifact. |
 | [`grim release`](#release) | Validate, pack, and push an artifact. |
+| [`grim publish`](#publish) | Validate and batch-release all packages from a manifest. |
 | [`grim login`](#login) | Authenticate to a registry and store the credential. |
 | [`grim logout`](#logout) | Remove a stored registry credential. |
 
@@ -241,10 +242,55 @@ bumped versions pushed. A `.toml` path publishes a
 [bundle](./concepts.md#bundles); `--pin` then freezes its floating members to
 digests. See [Publishing](./publishing.md) for the full workflow.
 
+Pointing `grim release` at a `publish.toml` (a file with a top-level
+`registry` key) produces a hint to use `grim publish` instead. The mirror
+also holds: pointing `grim publish` at a bundle TOML (flat `name = "reference"`
+entries) produces a hint to use `grim release --kind bundle`.
+
 ```sh
 grim release ./code-review ghcr.io/acme/code-review:1.2.3 --dry-run
 grim release ./python-stack.toml ghcr.io/acme/python-stack:1.0.0 --pin
 ```
+
+## grim publish {#publish}
+
+`grim publish` reads a `publish.toml` manifest and releases every declared
+package in kind order (skills → rules → agents → bundles, alphabetical
+within kind). It validates the whole manifest before any push, then
+composes [`grim release`](#release) per entry.
+
+The default behavior skips entries whose exact-version tag already exists,
+making the command idempotent: re-running after a partial failure pushes only
+the remaining entries. Pass `--force` to move existing exact-version tags
+instead. The two modes are mutually exclusive.
+
+`--dry-run` validates the manifest and prints the full push plan without
+touching the registry. `--only <name>` (repeatable) filters to a single
+entry; a name absent from the manifest exits 65. `--tag <tag>` overrides
+the published tag with a movable channel tag (e.g. `canary`); semver values
+are rejected with exit 65, keeping all semver releases in the manifest. A
+channel tag always moves on re-publish — no skip, no `--force` needed.
+`--manifest <path>` selects a manifest other than the default `./publish.toml`.
+The [global `--registry` flag][global-options] overrides the manifest's
+`registry` value for staging runs or acceptance tests without editing the file.
+`GRIM_DEFAULT_REGISTRY` and the config-file `default_registry` do **not**
+override the manifest — the manifest's `registry` field is explicit input, and
+only the flag tier wins.
+
+Exit codes from the release path propagate per entry. Validation failures
+exit 65 (data error). The report renders for all completed entries plus
+the first failed entry; re-run with `--only` for surgical recovery.
+
+```sh
+grim publish --dry-run
+grim publish
+grim publish --only grim-usage
+grim publish --tag canary
+```
+
+See [Batch publishing with a manifest](./publishing.md#batch-publish) for
+the manifest schema, source layout conventions, and disambiguation from
+bundle files.
 
 ## grim login {#login}
 
@@ -271,3 +317,6 @@ same way [`grim login`](#login) does.
 ```sh
 grim logout ghcr.io
 ```
+
+<!-- internal -->
+[global-options]: #global-options

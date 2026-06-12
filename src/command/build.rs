@@ -185,6 +185,20 @@ fn validate_repository(path: &Path, repository: Option<&str>) -> anyhow::Result<
     Ok(())
 }
 
+/// Whether a TOML document is shaped like a `grim publish` manifest
+/// rather than a bundle: a publish manifest carries a top-level
+/// `registry` string key, which no bundle source file has (ADR D7
+/// disambiguation guard, `adr_grim_publish.md`).
+fn looks_like_publish_manifest(content: &str) -> bool {
+    // Cheap parse: check for a top-level `registry` string key without
+    // loading the full manifest schema. A bundle source file never carries
+    // a `registry` key at the top level; a publish manifest requires it.
+    let Ok(val) = toml::from_str::<toml::Value>(content) else {
+        return false;
+    };
+    val.get("registry").is_some_and(|v| v.as_str().is_some())
+}
+
 /// Parse a bundle source file (a `grimoire.toml`-shaped document whose
 /// `[skills]`/`[rules]` tables are the members, with optional top-level
 /// `summary`/`keywords`/`description`) into its name, member list, and
@@ -205,6 +219,20 @@ pub fn read_bundle_members(
     let content = std::fs::read_to_string(path).map_err(|e| {
         crate::error::Error::from(crate::skill::SkillError::new(path, crate::skill::SkillErrorKind::Io(e)))
     })?;
+    // D7 guard: a TOML with a top-level `registry` key is shaped like a
+    // `grim publish` manifest, not a bundle source file. Emit a friendly
+    // hint before the bundle parse produces a cryptic type-mismatch error.
+    if looks_like_publish_manifest(&content) {
+        let inner: Box<dyn std::error::Error + Send + Sync> =
+            Box::<dyn std::error::Error + Send + Sync>::from(format!(
+                "'{}' looks like a publish manifest (has a top-level 'registry' key); \
+                 use `grim publish` to publish from a manifest",
+                path.display()
+            ));
+        return Err(anyhow::Error::from(crate::error::Error::from(
+            crate::skill::SkillError::new(path, crate::skill::SkillErrorKind::MetadataInvalid(inner)),
+        )));
+    }
     let source = super::grim(crate::config::project_config::BundleSource::from_toml_str(&content))?;
     // Same publish-time gate as skills/rules/agents: a non-HTTPS authored
     // repository hard-fails before anything can reach a registry.
@@ -481,5 +509,69 @@ mod tests {
         assert_eq!(detect_kind(&f, None).unwrap(), ArtifactKind::Rule);
         // forced to agent => kind is agent
         assert_eq!(detect_kind(&f, Some("agent")).unwrap(), ArtifactKind::Agent);
+    }
+
+    // ── ADR D7 guard: read_bundle_members rejects publish-manifest-shaped TOML ──
+
+    #[test]
+    fn read_bundle_members_rejects_publish_manifest_shaped_toml_with_hint() {
+        // A TOML with a top-level `registry` key is shaped like a `grim publish`
+        // manifest, not a bundle source file. The D7 guard in read_bundle_members
+        // must catch this before the bundle parse and emit a hint toward
+        // `grim publish`. (ADR D7 "guard rail in read_bundle_members")
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("publish.toml");
+        write(
+            &f,
+            // Publish-manifest shape: top-level registry key
+            "registry = \"grim.ocx.sh\"\n\n[skills.grim-usage]\nversion = \"0.1.1\"\n",
+        );
+        let err = read_bundle_members(&f)
+            .expect_err("publish-manifest-shaped TOML must be rejected by read_bundle_members (ADR D7)");
+        let msg = format!("{:#}", err);
+        assert!(
+            msg.contains("grim publish") || msg.contains("publish"),
+            "error must hint at `grim publish` (ADR D7 guard), got: {msg}"
+        );
+    }
+
+    #[test]
+    fn looks_like_publish_manifest_true_for_registry_keyed_doc() {
+        // A document with a top-level `registry = "..."` string key is a
+        // publish manifest (ADR D7 structural disambiguation)
+        let content = "registry = \"grim.ocx.sh\"\n\n[skills.grim-usage]\nversion = \"0.1.1\"\n";
+        assert!(
+            looks_like_publish_manifest(content),
+            "document with registry key must be detected as publish manifest (ADR D7)"
+        );
+    }
+
+    #[test]
+    fn looks_like_publish_manifest_false_for_bundle_shaped_doc() {
+        // A bundle source TOML (flat name=ref string values, no registry key)
+        // must NOT be detected as a publish manifest (ADR D7)
+        let content = "[skills]\ncr = \"ghcr.io/acme/cr:1\"\n\n[rules]\nrs = \"ghcr.io/acme/rs:1\"\n";
+        assert!(
+            !looks_like_publish_manifest(content),
+            "bundle-shaped document must NOT be detected as publish manifest (ADR D7)"
+        );
+    }
+
+    #[test]
+    fn looks_like_publish_manifest_false_for_empty_doc() {
+        assert!(
+            !looks_like_publish_manifest(""),
+            "empty document must not look like a publish manifest"
+        );
+    }
+
+    #[test]
+    fn looks_like_publish_manifest_false_for_doc_without_registry_key() {
+        // A document with other top-level keys but no `registry` is not a publish manifest
+        let content = "summary = \"A bundle\"\n\n[skills]\ncr = \"ghcr.io/acme/cr:1\"\n";
+        assert!(
+            !looks_like_publish_manifest(content),
+            "document without registry key must not be detected as publish manifest"
+        );
     }
 }

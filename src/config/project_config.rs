@@ -202,6 +202,10 @@ impl BundleSource {
 /// Raw bundle-source shape: members plus optional catalog metadata. Strict
 /// (`deny_unknown_fields`) so a typo'd key in the small bundle file is a hard
 /// error rather than silently dropped metadata.
+///
+/// MUST NOT gain a top-level `registry` key — D7 disambiguation in
+/// `grim publish` / `grim release` guards depend on its absence; see
+/// `.claude/artifacts/adr_grim_publish.md` D7.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawBundleSource {

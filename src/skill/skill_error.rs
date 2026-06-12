@@ -79,6 +79,14 @@ pub enum SkillErrorKind {
     #[error("invalid tool metadata")]
     MetadataInvalid(#[source] Box<dyn std::error::Error + Send + Sync>),
 
+    /// A manifest or input validation failed with a user-visible message.
+    ///
+    /// Used by `grim publish` for manifest-level validation errors (bad
+    /// semver, missing entries, etc.) so the formatted message reads
+    /// cleanly as `{path}: {message}` without extra noise prefixes.
+    #[error("{0}")]
+    ValidationFailed(String),
+
     /// A filesystem operation failed.
     #[error("I/O error")]
     Io(#[source] io::Error),

@@ -16,6 +16,7 @@ pub mod install;
 pub mod lock;
 pub mod login;
 pub mod logout;
+pub mod publish;
 pub mod release;
 pub mod remove;
 pub mod scope_resolution;

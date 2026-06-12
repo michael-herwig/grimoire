@@ -182,7 +182,8 @@ fn classify_skill(err: &SkillError) -> ExitCode {
         | SkillErrorKind::DescriptionInvalid(_)
         | SkillErrorKind::FrontmatterParse(_)
         | SkillErrorKind::MissingFrontmatter
-        | SkillErrorKind::MetadataInvalid(_) => ExitCode::DataError,
+        | SkillErrorKind::MetadataInvalid(_)
+        | SkillErrorKind::ValidationFailed(_) => ExitCode::DataError,
         SkillErrorKind::Io(io) => classify_io(io),
     }
 }

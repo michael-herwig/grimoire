@@ -23,12 +23,14 @@ use crate::store::{BlobStore, GrimPaths};
 ///
 /// Fields are resolved eagerly but cheaply (env reads only). The OCI
 /// client / local store seam is deferred to Phase 3.
+///
+/// Uses manual `Debug` + `Clone` impls to accommodate the test-only
+/// `test_access` field (`dyn OciAccess` is not `Debug`).
 //
 // TODO(phase-3): add the resolved OCI-access client + local store here,
 // constructed lazily so commands that don't touch the registry pay
 // nothing. No stub trait in Phase 1 — the seam lands with the access
 // subsystem so its shape is driven by real call sites.
-#[derive(Debug, Clone)]
 pub struct Context {
     grim_home: PathBuf,
     /// The `--registry` flag value only (highest registry precedence).
@@ -36,6 +38,37 @@ pub struct Context {
     /// `$GRIM_DEFAULT_REGISTRY`, captured once at construction.
     registry_env: Option<String>,
     offline: bool,
+    /// Test-only injected `OciAccess` override.  When `Some`, `access()`
+    /// returns this instead of constructing a real `CachedAccess`.  Only
+    /// compiled in test builds (`#[cfg(test)]`).
+    #[cfg(test)]
+    test_access: Option<Arc<dyn OciAccess>>,
+}
+
+impl std::fmt::Debug for Context {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut d = f.debug_struct("Context");
+        d.field("grim_home", &self.grim_home)
+            .field("registry_flag", &self.registry_flag)
+            .field("registry_env", &self.registry_env)
+            .field("offline", &self.offline);
+        #[cfg(test)]
+        d.field("test_access", &self.test_access.as_ref().map(|_| "<injected>"));
+        d.finish()
+    }
+}
+
+impl Clone for Context {
+    fn clone(&self) -> Self {
+        Self {
+            grim_home: self.grim_home.clone(),
+            registry_flag: self.registry_flag.clone(),
+            registry_env: self.registry_env.clone(),
+            offline: self.offline,
+            #[cfg(test)]
+            test_access: self.test_access.clone(),
+        }
+    }
 }
 
 impl Context {
@@ -52,6 +85,8 @@ impl Context {
             registry_flag: options.registry.clone(),
             registry_env: env::default_registry(),
             offline: options.offline || env::offline(),
+            #[cfg(test)]
+            test_access: None,
         }
     }
 
@@ -106,12 +141,20 @@ impl Context {
     /// `ensure_layout` is called here so the cache directories exist (and
     /// the single-volume invariant is asserted) before the first lookup.
     ///
+    /// In test builds (`#[cfg(test)]`), when a `test_access` override was
+    /// injected via [`Self::with_access`], that instance is returned
+    /// directly — no filesystem layout or real registry client is created.
+    ///
     /// # Errors
     ///
     /// Returns an [`std::io::Error`] if the `$GRIM_HOME` layout cannot be
     /// created. Callers route it through the install-tier `TargetIo` error
     /// so it classifies as an I/O exit code, not the generic fall-through.
     pub fn access(&self) -> std::io::Result<Arc<dyn OciAccess>> {
+        #[cfg(test)]
+        if let Some(ref injected) = self.test_access {
+            return Ok(Arc::clone(injected));
+        }
         self.access_with_mode(self.access_mode())
     }
 
@@ -146,6 +189,44 @@ impl Context {
             registry_flag: None,
             registry_env: None,
             offline: false,
+            test_access: None,
+        }
+    }
+
+    /// Test-only constructor that injects a custom [`OciAccess`] override.
+    /// Commands that call `access_seam(ctx)` will receive this instance
+    /// instead of a real `CachedAccess`, enabling unit tests that exercise
+    /// full `run()` paths against an in-memory registry double.
+    ///
+    /// Example:
+    /// ```ignore
+    /// let reg = MemoryRegistry::new();
+    /// let ctx = Context::with_access(tmp.path().to_path_buf(), reg);
+    /// ```
+    pub fn with_access(grim_home: std::path::PathBuf, access: impl OciAccess + 'static) -> Self {
+        Self {
+            grim_home,
+            registry_flag: None,
+            registry_env: None,
+            offline: false,
+            test_access: Some(Arc::new(access)),
+        }
+    }
+
+    /// Test-only constructor that injects both a custom [`OciAccess`]
+    /// override and a `--registry` flag value. Used to test that the flag
+    /// registry wins over the manifest registry (ADR D1).
+    pub fn with_access_and_registry(
+        grim_home: std::path::PathBuf,
+        access: impl OciAccess + 'static,
+        registry_flag: String,
+    ) -> Self {
+        Self {
+            grim_home,
+            registry_flag: Some(registry_flag),
+            registry_env: None,
+            offline: false,
+            test_access: Some(Arc::new(access)),
         }
     }
 }

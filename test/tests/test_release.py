@@ -223,7 +223,7 @@ def test_release_skip_existing_skips_published_version(
 ) -> None:
     """--skip-existing: an existing exact-version tag is a success no-op.
 
-    The manifest-driven publisher pattern (catalog/scripts/publish.py):
+    The manifest-driven publisher pattern (grim publish):
     blanket re-runs must skip unbumped versions — even when local content
     changed — and push bumped ones.
     """
