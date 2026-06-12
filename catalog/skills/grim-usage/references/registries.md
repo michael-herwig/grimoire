@@ -19,6 +19,8 @@ wins:
 2. `GRIM_DEFAULT_REGISTRY` environment variable
 3. project config `[options].default_registry`
 4. global config `[options].default_registry`
+5. the built-in default `grim.ocx.sh` (applies only when nothing above
+   is set)
 
 Whatever default applied, the expanded reference is persisted **fully
 qualified** in `grimoire.toml` and the lock — so a config never depends
@@ -106,7 +108,9 @@ grim search --refresh --registry ghcr.io/acme --format json
 
 `grim tui` browses the same catalog interactively: kind-grouped list,
 live install state, multi-select with batch install/update/delete, and a
-detail pane per entry. Its install, update, and delete actions go
+detail pane per entry. When the active scope has no `grimoire.toml` yet
+it offers to create one before starting (registry prompt pre-filled from
+`GRIM_DEFAULT_REGISTRY`; cancelling closes the TUI). Its install, update, and delete actions go
 through the same seams as `grim add`/`install`/`uninstall`, so nothing
 the TUI does is special. Press `?` inside for the full key map rather
 than memorizing keys from any guide.

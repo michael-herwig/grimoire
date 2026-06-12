@@ -10,7 +10,7 @@
 registry = "grim.ocx.sh"
 
 [skills]
-grim-usage = "0.1.0"
+grim-usage = "0.1.1"
 ai-config-authoring = "0.1.0"
 grim-authoring = "0.1.0"
 

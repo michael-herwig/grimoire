@@ -53,7 +53,8 @@ An artifact is named `registry/repository:tag` (a floating tag — `:1`
 follows the newest `1.x` release) or `registry/repository@sha256:…` (an
 immutable digest). A bare reference defaults to `:latest`. A short
 reference with no registry resolves against the default registry —
-`--registry` flag, then `GRIM_DEFAULT_REGISTRY`, then config; full
+`--registry` flag, then `GRIM_DEFAULT_REGISTRY`, then config, then the
+built-in default `grim.ocx.sh`; full
 precedence in [references/registries.md](references/registries.md).
 
 ## Routing Table

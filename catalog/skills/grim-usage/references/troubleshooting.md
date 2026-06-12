@@ -24,7 +24,7 @@ no stderr parsing needed:
 | 74 | I/O error | filesystem read/write failure (non-permission) |
 | 75 | Temporary failure | another grim process holds the lock; credential-helper timeout — retry |
 | 77 | No permission | permission denied anywhere in the chain |
-| 78 | Config error | malformed `grimoire.toml`/lock, no registry resolvable, bundle conflict, unsupported client, credential helper missing |
+| 78 | Config error | malformed `grimoire.toml`/lock, no registry for `grim login`/`logout`, bundle conflict, unsupported client, credential helper missing |
 | 79 | Not found | tag/manifest/blob 404, no config discovered, lock missing |
 | 80 | Auth error | registry authentication failed |
 | 81 | Offline blocked | `--offline`/`GRIM_OFFLINE` blocked a network operation (deliberate policy, distinct from 69) |
