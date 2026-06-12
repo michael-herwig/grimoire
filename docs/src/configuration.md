@@ -131,11 +131,11 @@ the result, so a floating tag never serves a stale pin. Pass `--offline` (or set
 `GRIM_OFFLINE`) to work from the cache alone and fail rather than reach the
 network.
 
-A command-line flag always wins. Where a setting also has a config option, the
-config option wins over the environment variable: the registry resolves as
-`--registry`, then the `default_registry` option, then `GRIM_DEFAULT_REGISTRY`.
-The `--offline` toggle has no config-file counterpart — the flag or its
-`GRIM_OFFLINE` variable applies.
+A command-line flag always wins. For the registry, the environment variable
+wins over the config options: the registry resolves as `--registry`, then
+`GRIM_DEFAULT_REGISTRY`, then the project config's `default_registry` option,
+then the global config's. The `--offline` toggle has no config-file
+counterpart — the flag or its `GRIM_OFFLINE` variable applies.
 
 ## Data layout
 
