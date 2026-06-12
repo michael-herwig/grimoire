@@ -5,38 +5,20 @@ All items from the 2026-06-11 sweep are addressed (see
 
 ## Open
 
-### Nested Errors
+### Republish grim-essentials bundle
 
-In a project without gimoire.toml the same error is nested three times.
-Reads very akward, maybe just the case if no grimoire.toml is found.
-Maybe subject to the error reporting as is, and other failures produce same kind.
-
-### TUI Init
-
-Running the TUI without a grimoire.toml in local or global mode should prompt
-before starting if the ./grimoire.toml or ~/.grimoire.toml is missing respectively.
-Should ask for initialization for a specfic repository.
-The default value of the prompt should be the configured GRIM_DEFAULT_REGSITRY, if none set, let it empty.
-On cancel close the TUI.
-
-### Search inquivelance
-
-Search results via TUI and grim search are different.
-grim search should yield the same results as TUI search.
-TUI search works fine, but grim search is missing results.
-
-### Snapshot default registry
-
-On init, snapshot the default registry GRIM_DEFAULT_REGISTRY into the toml config default_registry.
-ATM this is only set if --registry is explicilty set.
+The registry copy of `grim.ocx.sh/bundles/grim-essentials:latest` still
+references members at the floating `:1` tag (`skill … :1: tag not found`
+on install); the repo's bundle TOML already references `:0`. Needs a
+`task catalog:release` by a maintainer with registry credentials.
 
 ## Follow-ups (deferred from review, warn/suggest tier)
 
-- Search: multi-term queries whose terms only match summary/description/
-  keywords can still miss repos beyond the 500-repo browse window (the
-  longest-term prefilter is name-scoped). Truncation is now visible in CLI
-  (stderr warning) and TUI (legend hint); a pagination/multi-fetch rework
-  would close the gap fully.
+- Search/TUI: both now build the same unscoped browse window (equivalent
+  results), so any query can miss repos past the 500-repo cap. Truncation
+  is visible in CLI (stderr warning) and TUI (legend hint); a namespaced
+  `--registry host/namespace` scopes the build deterministically, and a
+  pagination/multi-fetch rework would close the gap fully.
 - Search JSON report: add a machine-readable `truncated` field (currently
   stderr-only) so scripts can detect incomplete results.
 - TUI: background task panics are reaped but deliberately swallowed
