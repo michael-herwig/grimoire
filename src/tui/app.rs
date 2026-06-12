@@ -6,8 +6,8 @@
 //!
 //! Everything decision-shaped is delegated to the pure
 //! [`super::state`] / [`super::event`] / [`super::render`] modules; this
-//! file only does the impure work: enter/leave raw mode (via an RAII
-//! guard that restores the terminal even on panic), read crossterm
+//! file only does the impure work: enter/leave raw mode (via the shared
+//! [`super::terminal_guard`] RAII guard), read crossterm
 //! events, map them to the abstract [`TuiInput`], apply the pure
 //! transition, and on `Install` / `Update` reuse the **same** resolve →
 //! lock → materialize path the `install`/`update` commands use (no forked
@@ -20,7 +20,6 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
-use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
@@ -46,6 +45,7 @@ use crate::oci::{ArtifactKind, Identifier};
 use super::event::{BatchOp, TuiAction, TuiInput, handle};
 use super::render::{draw, frame};
 use super::state::{ArtifactState, Mode, TuiRow, TuiState};
+use super::terminal_guard::TerminalGuard;
 use super::update_check::{CheckMsg, RowCheck, UpdateChecker, eligible_for_recheck};
 
 use std::time::Instant;
@@ -139,25 +139,6 @@ impl TuiContext {
         self.scope = alt.scope;
         self.alt = Some(now_alt);
         true
-    }
-}
-
-/// Restores the terminal on drop — even if the body panics or returns an
-/// error — so a crash never leaves the user's shell in raw mode.
-struct TerminalGuard;
-
-impl TerminalGuard {
-    fn enter() -> io::Result<Self> {
-        enable_raw_mode()?;
-        crossterm::execute!(io::stdout(), EnterAlternateScreen)?;
-        Ok(Self)
-    }
-}
-
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        let _ = crossterm::execute!(io::stdout(), LeaveAlternateScreen);
-        let _ = disable_raw_mode();
     }
 }
 

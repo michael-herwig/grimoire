@@ -185,9 +185,12 @@ the selected entry's repository URL in the browser, `g` to switch scope,
 and `space` to mark rows.
 
 When the active scope has no `grimoire.toml` yet, the TUI offers to create
-one before starting: confirm the init, then enter the registry to seed
-`default_registry` with (pre-filled from `GRIM_DEFAULT_REGISTRY`, empty when
-unset — leaving it empty seeds nothing). Cancelling closes the TUI.
+one before starting, as popup dialogs: confirm the init, then accept or
+edit the registry to seed `default_registry` with. The input is pre-filled
+with the effective default — the `--registry` flag, then
+`GRIM_DEFAULT_REGISTRY`, then the global config, then the built-in
+`grim.ocx.sh` fallback — and the accepted value is persisted in the new
+config (clearing the input seeds nothing). Cancelling closes the TUI.
 
 `enter` opens the detail pane for the selected row: the centered artifact
 reference, its `Summary:` and `Description:` sections, and a `Metadata:`

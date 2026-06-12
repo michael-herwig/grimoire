@@ -18,12 +18,20 @@
 //! (eligibility, outdated derivation, debounce) are pure and headlessly
 //! tested, while its spawn helpers — the only impure surface besides
 //! [`app`] — run the bounded background tasks.
+//!
+//! [`init_dialog`] is the missing-config init prompt: a small popup-style
+//! modal session (confirm + registry input) that runs before the main
+//! browser when the scope has no `grimoire.toml` yet. Its state machine
+//! is pure; its runner shares the raw-mode [`terminal_guard`] with
+//! [`app`].
 
 pub mod app;
 pub mod detail;
 pub mod event;
+pub mod init_dialog;
 pub mod render;
 pub mod state;
+pub mod terminal_guard;
 pub mod update_check;
 
 #[allow(unused_imports)]

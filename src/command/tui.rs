@@ -13,9 +13,12 @@
 //!
 //! When the requested scope has no `grimoire.toml` yet (project discovery
 //! misses, or the global config file is absent), the command offers to
-//! initialize one before the session starts: a confirm prompt plus a
-//! registry prompt pre-filled from `$GRIM_DEFAULT_REGISTRY` (empty when
-//! unset). Cancelling closes the TUI cleanly with exit 0.
+//! initialize one before the session starts via the popup-style
+//! [`crate::tui::init_dialog`]: a confirm popup plus a registry input
+//! pre-filled with the effective default registry (flag > env > config >
+//! the built-in fallback), so plain Enter accepts — and persists — a
+//! working `[options].default_registry`. Cancelling closes the TUI
+//! cleanly with exit 0.
 
 use std::io::IsTerminal;
 
@@ -26,6 +29,7 @@ use crate::config::scope::ConfigScope;
 use crate::context::Context;
 use crate::install::client_target::ClientTarget;
 use crate::tui::app::{self, ScopeSwap, TuiContext};
+use crate::tui::init_dialog::{InitDialog, InitDialogOutcome};
 
 use super::scope_resolution;
 
@@ -155,18 +159,23 @@ fn config_missing(ctx: &Context, args: &TuiArgs) -> bool {
     }
 }
 
-/// Interactive missing-config prompt: confirm initialization, ask for the
-/// default registry (pre-filled from `$GRIM_DEFAULT_REGISTRY`, empty when
-/// unset), and create the scope's `grimoire.toml` via `grim init`.
-/// Prompts go to stderr (mirroring `auth::prompt`) so stdout stays clean.
+/// Interactive missing-config prompt, run as a popup-style modal TUI
+/// session ([`crate::tui::init_dialog`]): confirm initialization, edit
+/// the default registry — pre-filled with the **effective** default
+/// (`--registry` flag > `$GRIM_DEFAULT_REGISTRY` > global config > the
+/// built-in fallback), so plain Enter persists a working registry — and
+/// create the scope's `grimoire.toml` via `grim init`.
+///
+/// Accepting the pre-filled fallback deliberately snapshots it into
+/// `[options].default_registry`: the dialog's accepted value is an
+/// explicit user choice, unlike bare `grim init` (which keeps the
+/// fallback floating — see `command/init.rs`).
 ///
 /// # Errors
 ///
-/// Propagates prompt I/O failures and any `grim init` error (e.g. a config
-/// racing into existence maps to the usual exit-64 error).
+/// Propagates dialog I/O failures and any `grim init` error (e.g. a
+/// config racing into existence maps to the usual exit-64 error).
 async fn prompt_init(ctx: &Context, args: &TuiArgs) -> anyhow::Result<InitPrompt> {
-    use std::io::Write as _;
-
     if !std::io::stdin().is_terminal() {
         eprintln!("no grimoire.toml found and stdin is not a terminal; run `grim init` first");
         return Ok(InitPrompt::Cancelled);
@@ -182,28 +191,16 @@ async fn prompt_init(ctx: &Context, args: &TuiArgs) -> anyhow::Result<InitPrompt
     } else {
         ConfigScope::Project
     };
-    eprintln!("no grimoire.toml found for the {} scope", scope_label(scope));
 
-    let mut stderr = std::io::stderr();
-    write!(stderr, "Initialize {label}? [Y/n] ")?;
-    stderr.flush()?;
-    let Some(answer) = read_prompt_line()? else {
-        return Ok(InitPrompt::Cancelled);
+    // The same precedence the session itself browses with — including the
+    // built-in fallback — so the dialog's default and the browsed registry
+    // can never diverge.
+    let default_registry = resolve_registry(ctx, args);
+    let mut dialog = InitDialog::new(&label, scope_label(scope), default_registry);
+    let registry = match crate::tui::init_dialog::run(&mut dialog)? {
+        InitDialogOutcome::Cancelled => return Ok(InitPrompt::Cancelled),
+        InitDialogOutcome::Confirmed { registry } => registry,
     };
-    if !matches!(answer.to_lowercase().as_str(), "" | "y" | "yes") {
-        return Ok(InitPrompt::Cancelled);
-    }
-
-    // Registry to seed `[options].default_registry`; Enter accepts the
-    // env-derived default, a blank final value seeds nothing.
-    let env_default = ctx.registry_env().unwrap_or("");
-    write!(stderr, "Default registry [{env_default}]: ")?;
-    stderr.flush()?;
-    let Some(typed) = read_prompt_line()? else {
-        return Ok(InitPrompt::Cancelled);
-    };
-    let value = if typed.is_empty() { env_default } else { typed.as_str() };
-    let registry = (!value.is_empty()).then(|| value.to_string());
 
     let init_args = crate::command::init::InitArgs {
         global: args.global,
@@ -212,16 +209,6 @@ async fn prompt_init(ctx: &Context, args: &TuiArgs) -> anyhow::Result<InitPrompt
     let (report, _) = crate::command::init::run(ctx, &init_args).await?;
     eprintln!("initialized {}", report.path.display());
     Ok(InitPrompt::Ready)
-}
-
-/// Read one trimmed line from stdin; `None` on EOF (= cancel).
-fn read_prompt_line() -> std::io::Result<Option<String>> {
-    let mut line = String::new();
-    let n = std::io::stdin().read_line(&mut line)?;
-    if n == 0 {
-        return Ok(None);
-    }
-    Ok(Some(line.trim().to_string()))
 }
 
 /// Resolve the registry to browse via the centralized precedence (mirrors

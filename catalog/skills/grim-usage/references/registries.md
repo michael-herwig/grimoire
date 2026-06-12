@@ -109,8 +109,10 @@ grim search --refresh --registry ghcr.io/acme --format json
 `grim tui` browses the same catalog interactively: kind-grouped list,
 live install state, multi-select with batch install/update/delete, and a
 detail pane per entry. When the active scope has no `grimoire.toml` yet
-it offers to create one before starting (registry prompt pre-filled from
-`GRIM_DEFAULT_REGISTRY`; cancelling closes the TUI). Its install, update, and delete actions go
+it offers to create one before starting via popup dialogs (the registry
+input is pre-filled with the effective default registry — flag, env,
+global config, or the built-in fallback — and the accepted value is
+persisted as `default_registry`; cancelling closes the TUI). Its install, update, and delete actions go
 through the same seams as `grim add`/`install`/`uninstall`, so nothing
 the TUI does is special. Press `?` inside for the full key map rather
 than memorizing keys from any guide.
