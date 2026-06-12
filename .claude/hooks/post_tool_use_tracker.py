@@ -69,6 +69,31 @@ CONFIG_REMINDERS: list[tuple[str, str, str]] = [
         "a CI workflow",
     ),
     (
+        "catalog/taskfile.yml",
+        "- .claude/rules/subsystem-taskfiles.md (File Layout + Two-Phase Verify)\n- catalog/README.md (local loop)",
+        "the catalog Taskfile",
+    ),
+    (
+        "docs/src/artifacts.md",
+        "- catalog/skills/grim-authoring (per-kind spec references)\n- catalog/skills/grim-usage (if command surface changed)",
+        "the artifact schema docs — review first-party catalog skills for drift",
+    ),
+    (
+        "docs/src/commands.md",
+        "- catalog/skills/grim-usage (command map + lifecycle references)",
+        "the CLI command docs — review grim-usage skill for drift",
+    ),
+    (
+        "docs/src/vendor-metadata.md",
+        "- catalog/skills/grim-authoring/references/vendor-metadata.md",
+        "the vendor-metadata docs — review grim-authoring skill for drift",
+    ),
+    (
+        "docs/src/publishing.md",
+        "- catalog/skills/grim-usage/references/publish.md\n- catalog/skills/grim-authoring/references/release-checklist.md",
+        "the publishing docs — review catalog skills for drift",
+    ),
+    (
         "Cargo.toml",
         "- CLAUDE.md (Architecture section, if the crate structure changed)",
         "Cargo.toml",

@@ -21,13 +21,14 @@ paths:
 | `taskfiles/release.taskfile.yml` | cross-cutting | `release:` |
 | `.claude/taskfile.yml` | `.claude/` subsystem | `claude:` |
 | `test/taskfile.yml` | acceptance tests | `test:` |
+| `catalog/taskfile.yml` | first-party catalog packages | `catalog:` -- verify (`grim build` per package), release (publish.toml-driven driver) |
 
 ## Two-Phase Verify
 
 `task verify` run as two-phase pipeline via internal `.verify:lint` + `.verify:build-test` tasks:
 
 1. **Phase 1 (parallel `deps:`)**: `rust:format:check`, `rust:clippy:check`, `shell:verify`, `claude:verify`
-2. **Phase 2 (sequential `cmds:`)**: `rust:build`, `rust:test:unit`, `test:parallel`
+2. **Phase 2 (sequential `cmds:`)**: `rust:build`, `catalog:verify`, `rust:test:unit`, `test:parallel`
 
 ## AI Quality Gate Pattern
 
