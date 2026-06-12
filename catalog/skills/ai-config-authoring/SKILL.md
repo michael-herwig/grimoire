@@ -68,6 +68,16 @@ lives in `references/`, loaded only when a row below matches your task.
 | [references/checklist.md](references/checklist.md) | Reviewing a config package before publishing or installing it |
 | [references/updating.md](references/updating.md) | Maintaining this guide itself — re-research protocol and search terms |
 
+## Distributing Config
+
+Config worth sharing across repositories belongs in a package manager,
+not copy-paste — versioning, provenance, and an update path matter as
+much for config as for code. This skill itself is distributed as an OCI
+artifact via [grim][grimoire]. To package and publish your artifact with
+grim — frontmatter schemas, validation, vendor metadata — read the
+companion skill [`../grim-authoring/SKILL.md`](../grim-authoring/SKILL.md)
+(if installed; both ship together in the `grim-essentials` bundle).
+
 ## Further Reading
 
 - [Agent Skills specification][spec] — the cross-vendor SKILL.md standard:
@@ -81,6 +91,7 @@ lives in `references/`, loaded only when a row below matches your task.
 - [OpenCode skills documentation][oc] — OpenCode's skill discovery paths
   and activation model.
 
+[grimoire]: https://github.com/michael-herwig/grimoire
 [spec]: https://agentskills.io/specification
 [bp]: https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices
 [ctx]: https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents

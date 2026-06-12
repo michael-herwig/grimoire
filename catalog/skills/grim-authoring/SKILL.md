@@ -56,6 +56,16 @@ not errors, they just silently never reach the catalog:
 In every kind, `keywords` is one comma-separated string and `repository`
 must be an `https://` URL (anything else fails the release with 65).
 
+## Companion: Content Craft
+
+This skill covers grim **packaging and validation** only. For the craft of
+the content itself — progressive disclosure, context budgets, description
+triggering, choosing skill vs rule vs agent — read the companion skill
+[`../ai-config-authoring/SKILL.md`](../ai-config-authoring/SKILL.md) (if
+installed; both ship together in the `grim-essentials` bundle). When
+creating a new artifact from scratch, read it FIRST — write good content,
+then package it here.
+
 ## Routing Table
 
 | Read… | …when |
