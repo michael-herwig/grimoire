@@ -65,8 +65,8 @@ layout. `grim install` and `grim update` choose targets by precedence:
 2. config `[options].clients` (TOML array of client names)
 3. auto-detection — every client whose marker exists for the active
    scope (e.g. a `.claude/` directory in the project)
-4. fallback to `claude` when nothing is detected, so an install never
-   silently targets zero clients
+4. fallback to **all** clients when nothing is detected, so an install
+   never silently targets zero clients or prefers one
 
 The detected set is recomputed each run, never written back to config.
 Pin `[options].clients` when you want deterministic targets in CI.

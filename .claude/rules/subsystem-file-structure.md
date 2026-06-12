@@ -121,8 +121,8 @@ for the active scope:
 Detection lives on the [`Vendor`] trait (`Vendor::detect(workspace,
 scope)`), driven by `install::target::detect_clients`, which iterates
 `ClientTarget::ALL` so the set is deterministic. When **nothing** is
-detected the set falls back to `[claude]` so an install never silently
-targets zero clients. An explicit `[options].clients` and the `--client`
+detected the set falls back to **all** clients so an install never
+silently targets zero clients or prefers one. An explicit `[options].clients` and the `--client`
 flag both override detection. The detected set is **not** persisted to
 config — it is recomputed each run. Detection reuses the same vendor env
 overrides documented in the table above.
