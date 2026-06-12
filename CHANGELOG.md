@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-06-12
+
+### Added
+
+- Add first-party skills and starter bundle *(catalog)*
+- Add validation and release tooling *(catalog)*
+- Cross-link companion skills bidirectionally *(catalog)*
+- Add install-by-identifier fallback to companion links *(catalog)*
+- Selective publish flags and release-triggered publishing *(catalog)*
+- Add --skip-existing for manifest-driven publishing *(release)*
+- Skip published versions and start the 0.x line *(catalog)*
+- Document the scripted-publishing pattern in grim-usage *(catalog)*
+- Default to grim.ocx.sh when nothing is configured *(registry)*
+- Snapshot the default registry into the seed config *(init)*
+- Offer config init when the scope has no grimoire.toml *(tui)*
+
+### Fixed
+
+- Correct registry resolution precedence *(docs)*
+- Render error chains once *(error)*
+- Degrade to anonymous when the credential store fails *(oci)*
+- Remove the lock sidecar on drop *(lock)*
+- Open repository URLs on all platforms *(tui)*
+- Build the same catalog window the TUI loads *(search)*
+- Fall back to all clients when none are detected *(install)*
+
+### Release
+
+- Catalog
+
 ## [0.4.0] - 2026-06-11
 
 ### Added
@@ -66,6 +96,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Recompute all row states after a batch operation *(tui)*
 - Hold the config flock on a sidecar, not the file itself *(lock)*
 
+### Release
+
+- V0.4.0
+
 ## [0.3.0] - 2026-06-04
 
 ### Added
@@ -125,6 +159,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Make release-update.sh executable; add rolling-release regression tests
 - Contact loopback registries over plain HTTP on any port
+[0.4.1]: https://github.com/michael-herwig/grimoire/compare/v0.4.0..v0.4.1
 [0.4.0]: https://github.com/michael-herwig/grimoire/compare/v0.3.0..v0.4.0
 [0.3.0]: https://github.com/michael-herwig/grimoire/compare/v0.2.0..v0.3.0
 [0.2.0]: https://github.com/michael-herwig/grimoire/compare/v0.1.0..v0.2.0
