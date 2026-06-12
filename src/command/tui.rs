@@ -251,7 +251,7 @@ fn resolve_registry(ctx: &Context, args: &TuiArgs) -> String {
 /// the **same** resolution the install / update path uses:
 /// [`InstallTarget::parse`] with no `--client` flag and the config
 /// `[options].clients` as the default. That folds in detection (empty
-/// config ⇒ detected clients for the scope, falling back to `[claude]`),
+/// config ⇒ detected clients for the scope, falling back to all clients),
 /// so the status line never shows a target set that diverges from what an
 /// install would actually write to.
 ///
@@ -363,14 +363,14 @@ mod tests {
     #[test]
     fn selected_clients_empty_config_uses_detection() {
         // An empty config `clients` list folds into detection (and the
-        // `[claude]` fallback when nothing is detected) — identical to the
+        // all-clients fallback when nothing is detected) — identical to the
         // install path's behavior for an unconfigured scope.
         let tmp = tempfile::tempdir().unwrap();
         let display = selected_clients(tmp.path(), ConfigScope::Project, &[]);
         let detected = crate::install::target::detect_clients(tmp.path(), ConfigScope::Project);
         assert_eq!(display, detected);
-        // A bare workspace detects nothing ⇒ the shared `[claude]` fallback.
-        assert_eq!(display, vec![ClientTarget::Claude]);
+        // A bare workspace detects nothing ⇒ the shared all-clients fallback.
+        assert_eq!(display, ClientTarget::ALL.to_vec());
     }
 
     #[test]

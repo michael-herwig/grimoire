@@ -86,9 +86,11 @@ already locks what it declares.
 
 Materializes every locked artifact into your AI clients' configuration
 directories. `--client <list>` selects AI clients (`claude`, `opencode`,
-`copilot`, comma-separated), overriding the config `clients` option (default
-`["claude"]`). `--force` overwrites a locally modified artifact instead of
-refusing it.
+`copilot`, comma-separated), overriding the config `clients` option. When
+neither selects a client, the **detected** clients for the scope are
+targeted — every client whose vendor directory or marker is present —
+falling back to all clients when none are detected. `--force` overwrites a
+locally modified artifact instead of refusing it.
 
 ```sh
 grim install

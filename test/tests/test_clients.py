@@ -96,11 +96,11 @@ def test_no_clients_config_installs_to_detected_clients(
     assert_not_exists(project_dir / ".claude/rules/rust-style.md")
 
 
-def test_no_detected_clients_falls_back_to_claude(
+def test_no_detected_clients_falls_back_to_all_clients(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
     """No ``--client``, no ``[options].clients``, and no vendor dirs present
-    falls back to ``[claude]``."""
+    falls back to **all** clients — no client is silently preferred."""
     sk, ru = _publish_skill_and_rule(unique_repo)
     _build_toml(project_dir, sk.fq, ru.fq, clients=None)
 
@@ -109,12 +109,13 @@ def test_no_detected_clients_falls_back_to_claude(
     rows = runner.json("install")
     assert rows, "install must return a non-empty result set"
 
-    # The Claude fallback received the artifacts.
+    # Every client layout received the artifacts.
     assert_path_exists(project_dir / ".claude/skills/code-review/SKILL.md")
     assert_path_exists(project_dir / ".claude/rules/rust-style.md")
-    # No other client layout was written.
-    assert_not_exists(project_dir / ".opencode/skills/code-review")
-    assert_not_exists(project_dir / ".github/instructions/rust-style.instructions.md")
+    assert_path_exists(project_dir / ".opencode/skills/code-review/SKILL.md")
+    assert_path_exists(project_dir / ".opencode/rules/rust-style.md")
+    assert_path_exists(project_dir / ".github/skills/code-review/SKILL.md")
+    assert_path_exists(project_dir / ".github/instructions/rust-style.instructions.md")
 
 
 def test_config_clients_array_installs_to_all_declared_clients(

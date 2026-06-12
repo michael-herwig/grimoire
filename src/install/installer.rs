@@ -307,7 +307,7 @@ async fn install_one<M: ArtifactMaterializer>(
     let primary = client_records
         .first()
         .cloned()
-        .expect("InstallTarget always has at least one client (defaults to claude)");
+        .expect("InstallTarget always has at least one client (detection falls back to all clients)");
     state.record(InstallRecord {
         kind,
         name: artifact.name.clone(),

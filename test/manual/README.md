@@ -116,7 +116,7 @@ open it and scroll (`↑`/`↓` or `j`/`k`), or page it from the list with
 cd test/manual/project
 grim lock                         # floating :1 -> pinned @sha256
 cat grimoire.lock                 # byte-stable, digest-pinned
-grim install                      # default client: claude
+grim install                      # targets the detected clients (all when none detected)
 ls -R .claude/skills .claude/rules .claude/agents
 grim status                       # every artifact 'installed'
 ```
