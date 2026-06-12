@@ -1,0 +1,18 @@
+# Publish manifest for first-party catalog packages.
+#
+# NOT a grim bundle — this file drives catalog/scripts/publish.py.
+# Versions are independent per package and bumped via PR (no git tags;
+# cliff.toml's unanchored tag_pattern would pick catalog tags up).
+#
+# Bump rules: patch = content fix; minor = new sections/reference files;
+# major = restructure or renamed reference files.
+
+registry = "grim.ocx.sh"
+
+[skills]
+grim-usage = "1.0.0"
+ai-config-authoring = "1.0.0"
+grim-authoring = "1.0.0"
+
+[bundles]
+grim-essentials = "1.0.0"

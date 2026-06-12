@@ -16,6 +16,9 @@ includes:
   test:
     taskfile: ./test/taskfile.yml
     dir: ./test
+  catalog:
+    taskfile: ./catalog/taskfile.yml
+    dir: ./catalog
 
 tasks:
   check:
@@ -87,5 +90,6 @@ tasks:
     internal: true
     cmds:
       - task: rust:build
+      - task: catalog:verify
       - task: rust:test:unit
       - task: test:parallel

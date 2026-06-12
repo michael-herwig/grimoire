@@ -1,0 +1,66 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+vars:
+  # Workflow/CI override: set GRIM_COMMAND env (e.g. a released binary on PATH)
+  # together with SKIP_BUILD=true to skip the local cargo build entirely.
+  GRIM_BINARY: '{{.GRIM_COMMAND | default (printf "%s/target/release/grim%s" .ROOT_DIR exeExt)}}'
+  SKIP_BUILD: '{{.SKIP_BUILD | default "false"}}'
+
+tasks:
+  # Mirrors test/taskfile.yml's build-skip pattern: status short-circuits the
+  # rust build when the caller injects a prebuilt binary.
+  .ensure-grim:
+    internal: true
+    cmds:
+      - task: ':rust:build'
+    status:
+      - '{{eq .SKIP_BUILD "true"}}'
+
+  verify:
+    desc: Validate every catalog package with grim build (real parser = schema gate)
+    deps: [.ensure-grim]
+    sources:
+      - 'skills/**/*'
+      - 'rules/**/*'
+      - 'agents/**/*'
+      - 'bundles/*.toml'
+      - '{{.ROOT_DIR}}/target/release/grim{{exeExt}}'
+    cmds:
+      - |
+        set -eu
+        found=0
+        for d in skills/*/; do
+          [ -f "${d}SKILL.md" ] || continue
+          echo "==> grim build ${d%/}"
+          "{{.GRIM_BINARY}}" build "${d%/}"
+          found=1
+        done
+        for r in rules/*.md; do
+          [ -e "$r" ] || continue
+          echo "==> grim build ${r}"
+          "{{.GRIM_BINARY}}" build "$r" --kind rule
+          found=1
+        done
+        for a in agents/*.md; do
+          [ -e "$a" ] || continue
+          echo "==> grim build ${a}"
+          "{{.GRIM_BINARY}}" build "$a" --kind agent
+          found=1
+        done
+        for b in bundles/*.toml; do
+          [ -e "$b" ] || continue
+          echo "==> grim build ${b}"
+          "{{.GRIM_BINARY}}" build "$b" --kind bundle
+          found=1
+        done
+        [ "$found" -eq 1 ] || { echo "no catalog packages found" >&2; exit 1; }
+
+  release:
+    desc: Publish catalog packages per publish.toml (pass flags after -- e.g. -- --dry-run)
+    deps: [.ensure-grim]
+    env:
+      GRIM_COMMAND: '{{.GRIM_BINARY}}'
+    cmds:
+      - python3 scripts/publish.py {{.CLI_ARGS}}
