@@ -20,8 +20,10 @@ unix-archive = ".tar.xz"
 windows-archive = ".zip"
 # Which actions to run on pull requests
 pr-run-mode = "skip"
-# Post-announce jobs: publish the freshly built archives to the OCX registry.
-post-announce-jobs = ["./publish-ocx"]
+# Post-announce jobs: publish the freshly built archives to the OCX registry,
+# then republish the first-party catalog with the freshly released grim
+# (idempotent when catalog versions are unchanged).
+post-announce-jobs = ["./publish-ocx", "./publish-catalog"]
 # Generate and dist a source tarball
 source-tarball = false
 # Whether to embed dependency information using cargo-auditable

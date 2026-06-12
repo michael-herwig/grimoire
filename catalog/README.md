@@ -55,15 +55,24 @@ reach bundle consumers via plain `grim update`.
 ## Local loop
 
 ```sh
-task catalog:verify                  # grim build every package (builds grim if stale)
-grim login grim.ocx.sh -u <user>     # once, interactive
-task catalog:release -- --dry-run    # preview full publish plan, zero writes
-task catalog:release                 # actual publish — human-triggered
+task catalog:verify                       # grim build every package (builds grim if stale)
+grim login grim.ocx.sh -u <user>          # once, interactive
+task catalog:release -- --dry-run         # preview full publish plan, zero writes
+task catalog:release                      # publish everything per publish.toml
+task catalog:release -- --only grim-usage # publish one package by hand
+task catalog:release -- --tag canary      # ad-hoc movable tag, manifest untouched
 ```
 
-CI publishes only via the manually dispatched `Publish Catalog` workflow
-(environment `grim.ocx.sh`); skills/rules/agents publish before bundles so
-bundle members always resolve. Never auto-publish on main.
+Semver always comes from `publish.toml` — there is no version argument, so
+the repo records exactly what was published. `--tag` rejects semver values.
+
+CI publishes two ways, both via `publish-catalog.yml` (environment
+`grim.ocx.sh`): the manually dispatched `Publish Catalog` workflow, and a
+cargo-dist post-announce job on every grim release — idempotent when
+catalog versions are unchanged (same digest re-push is a no-op), loud
+failure when content changed without a `publish.toml` bump. Skills publish
+before bundles so bundle members always resolve. Never auto-publish on
+plain pushes to main.
 
 ## Keeping content honest
 

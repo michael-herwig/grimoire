@@ -3,14 +3,26 @@ name: Publish Catalog
 # Publish first-party catalog packages (catalog/) to grim.ocx.sh with the
 # released grim binary — dogfooding `grim release` end to end.
 #
-# Manual dispatch only: humans trigger publishes, never auto-on-main.
-# Versions come from catalog/publish.toml (bumped via PR); the driver
+# Two triggers:
+# - workflow_dispatch: humans publish on demand (version bumps via PR).
+# - workflow_call: cargo-dist post-announce job — every grim release
+#   republishes the catalog with the freshly released binary. Idempotent:
+#   unchanged versions re-push the same digest (a no-op); changed content
+#   without a publish.toml bump fails loudly (bump discipline).
+#
+# Versions come from catalog/publish.toml; the driver
 # (catalog/scripts/publish.py) publishes skills/rules/agents before bundles
 # so bundle members always resolve.
 #
 # Cost: one Linux job, ~2-3 min (released binary download, no Rust build).
 
 on:
+  workflow_call:
+    inputs:
+      plan:
+        # Forwarded by cargo-dist; required by the custom-job contract, unused here.
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       dry_run:
@@ -62,6 +74,9 @@ jobs:
           GRIM_VERSION: ${{ inputs.grim_version }}
         run: |
           set -euo pipefail
+          # workflow_call provides no grim_version input — default to latest
+          # (the release that just triggered the post-announce job).
+          GRIM_VERSION="${GRIM_VERSION:-latest}"
           if [[ "$GRIM_VERSION" != "latest" && ! "$GRIM_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::grim_version '$GRIM_VERSION' must be 'latest' or vX.Y.Z"
             exit 1

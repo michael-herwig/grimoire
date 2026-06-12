@@ -40,25 +40,43 @@ def load_manifest(path: Path) -> dict:
         return tomllib.load(fh)
 
 
-def plan_releases(manifest: dict) -> list[tuple[Path, str, list[str]]]:
-    """Return (source_path, reference, extra_args) per package, in publish order."""
+def plan_releases(
+    manifest: dict,
+    only: list[str],
+    tag: str | None,
+) -> list[tuple[Path, str, list[str]]]:
+    """Return (source_path, reference, extra_args) per package, in publish order.
+
+    ``only`` filters by package name (empty = all). ``tag`` overrides the
+    manifest version with a movable non-semver tag (e.g. ``canary``) —
+    semver releases always come from the manifest so the repo records
+    exactly what was published.
+    """
     registry = manifest.get("registry")
     if not isinstance(registry, str) or not registry:
         sys.exit("publish.toml: missing or empty 'registry'")
 
     releases: list[tuple[Path, str, list[str]]] = []
+    matched: set[str] = set()
     for table, path_template, namespace, extra in KINDS:
         entries = manifest.get(table, {})
         if not isinstance(entries, dict):
             sys.exit(f"publish.toml: [{table}] must be a table of name = version")
         for name in sorted(entries):
+            if only and name not in only:
+                continue
+            matched.add(name)
             version = entries[name]
             if not isinstance(version, str) or not SEMVER.match(version):
                 sys.exit(f"publish.toml: [{table}] {name}: bad version {version!r} (want X.Y.Z)")
             source = CATALOG_DIR / path_template.format(name=name)
             if not source.exists():
                 sys.exit(f"publish.toml: [{table}] {name}: source missing at {source}")
-            releases.append((source, f"{registry}/{namespace}/{name}:{version}", extra))
+            releases.append((source, f"{registry}/{namespace}/{name}:{tag or version}", extra))
+    if only:
+        unknown = set(only) - matched
+        if unknown:
+            sys.exit(f"--only: not in publish.toml: {', '.join(sorted(unknown))}")
     if not releases:
         sys.exit("publish.toml: no packages declared")
     return releases
@@ -74,10 +92,25 @@ def main() -> int:
         default=CATALOG_DIR / "publish.toml",
         help="publish manifest path (default: catalog/publish.toml)",
     )
+    parser.add_argument(
+        "--only",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="publish only this package (repeatable; default: all)",
+    )
+    parser.add_argument(
+        "--tag",
+        default=None,
+        help="movable non-semver tag (e.g. canary) instead of manifest versions",
+    )
     args = parser.parse_args()
 
+    if args.tag and SEMVER.match(args.tag):
+        sys.exit("--tag must not be semver — version releases come from publish.toml")
+
     grim = os.environ.get("GRIM_COMMAND", "grim")
-    releases = plan_releases(load_manifest(args.manifest))
+    releases = plan_releases(load_manifest(args.manifest), args.only, args.tag)
 
     mode = "dry-run" if args.dry_run else "publish"
     print(f"{mode}: {len(releases)} package(s) via {grim}")

@@ -323,3 +323,12 @@ jobs:
     with:
       plan: ${{ needs.plan.outputs.val }}
     secrets: inherit
+
+  custom-publish-catalog:
+    needs:
+      - plan
+      - announce
+    uses: ./.github/workflows/publish-catalog.yml
+    with:
+      plan: ${{ needs.plan.outputs.val }}
+    secrets: inherit
