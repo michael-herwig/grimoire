@@ -6,8 +6,8 @@ loop, version tagging, and registry authentication.
 
 Contents: [Build, Then Release](#build-then-release) ·
 [Cascade Tags](#cascade-tags) · [Immutability](#immutability) ·
-[Bundles](#bundles) · [Catalog Metadata](#catalog-metadata) ·
-[Authentication](#authentication)
+[Scripted Publishing](#scripted-publishing) · [Bundles](#bundles) ·
+[Catalog Metadata](#catalog-metadata) · [Authentication](#authentication)
 
 Flags shown here are grim 0.4.x; confirm with `grim <cmd> --help` before
 relying on one.
@@ -49,10 +49,26 @@ cascade. A reference with no tag at all is an error.
 An exact-version tag is immutable by default: if `1.2.3` already exists
 and points at different bytes, the release refuses (exit 65) rather than
 rewrite history. Pass `--force` only when you deliberately mean to move
-it. For scripted blanket publishing, `--skip-existing` (conflicts with
-`--force`) makes an already-published version a success no-op instead —
-only bumped versions push. Floating tags (`1.2`, `1`, `latest`) move
-freely on every cascade — that is their job.
+it. Floating tags (`1.2`, `1`, `latest`) move freely on every cascade —
+that is their job.
+
+## Scripted Publishing
+
+Publishing several packages from one repository? Keep their versions in
+a reviewed manifest file (versions change only via commits, so the repo
+records exactly what was published), then blanket-rerun the release for
+every package with `--skip-existing` (conflicts with `--force`):
+
+```sh
+grim release ./skills/code-review reg.example.com/skills/code-review:1.3.0 --skip-existing
+```
+
+An already-published version is a success no-op — nothing pushes, no
+tags move — so only the packages whose version you bumped go out. The
+maintenance loop becomes: change content, bump that package's version,
+rerun the whole publish. Two rules keep it sound: bump on every content
+change (an unbumped change is silently never published), and release
+bundle members before the bundle that references them.
 
 ## Bundles
 
