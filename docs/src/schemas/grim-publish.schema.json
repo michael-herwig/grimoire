@@ -1,0 +1,73 @@
+{
+  "$defs": {
+    "PublishEntrySpec": {
+      "additionalProperties": false,
+      "description": "A single entry in a kind table (`[skills.name]`, `[rules.name]`,\n`[agents.name]`, `[bundles.name]`).",
+      "properties": {
+        "path": {
+          "description": "Source path override. When absent, the conventional path relative\nto the manifest directory is used:\n`skills/{name}/`, `rules/{name}.md`, `agents/{name}.md`,\n`bundles/{name}.toml`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pin": {
+          "default": false,
+          "description": "For bundle entries only: freeze every floating member tag to a\ndigest in the published bundle (reproducible, tunnel-safe).\nA `pin = true` on a non-bundle entry is a data error (exit 65).",
+          "type": "boolean"
+        },
+        "version": {
+          "description": "Strict semantic version (`X.Y.Z`). Required.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "version"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://michael-herwig.github.io/grimoire/schemas/grim-publish.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The deserialized content of a `publish.toml` manifest.\n\nTop-level `registry` is required. Each kind table holds\n`name = { version, [path], [pin] }` sub-tables.",
+  "properties": {
+    "agents": {
+      "additionalProperties": {
+        "$ref": "#/$defs/PublishEntrySpec"
+      },
+      "description": "Agent entries, keyed by name.",
+      "type": "object"
+    },
+    "bundles": {
+      "additionalProperties": {
+        "$ref": "#/$defs/PublishEntrySpec"
+      },
+      "description": "Bundle entries, keyed by name.",
+      "type": "object"
+    },
+    "registry": {
+      "description": "The OCI registry host to publish to (e.g. `grim.ocx.sh`). May be\noverridden by the `--registry` flag.",
+      "type": "string"
+    },
+    "rules": {
+      "additionalProperties": {
+        "$ref": "#/$defs/PublishEntrySpec"
+      },
+      "description": "Rule entries, keyed by name.",
+      "type": "object"
+    },
+    "skills": {
+      "additionalProperties": {
+        "$ref": "#/$defs/PublishEntrySpec"
+      },
+      "description": "Skill entries, keyed by name.",
+      "type": "object"
+    }
+  },
+  "required": [
+    "registry"
+  ],
+  "title": "publish.toml — Grimoire publish manifest",
+  "type": "object"
+}

@@ -265,6 +265,7 @@ kind tables. Each table entry is a sub-table keyed by name with a required
 `version` field:
 
 ```toml
+#:schema https://michael-herwig.github.io/grimoire/schemas/grim-publish.schema.json
 registry = "grim.ocx.sh"          # required; overridden by --registry
 
 [skills.grim-usage]
@@ -292,6 +293,15 @@ produce an invalid OCI repository segment or a path traversal hazard. Unknown
 fields in the manifest or in any entry sub-table are a hard parse error
 (`deny_unknown_fields`): a typo like `versions` instead of `version` exits
 immediately rather than silently using a default.
+
+The first line above is a [Taplo](https://taplo.tamasfe.dev/) /
+[Even Better TOML](https://marketplace.visualstudio.com/items?itemName=tamasfe.even-better-toml)
+`#:schema` directive that binds the manifest to its published [JSON
+Schema](https://michael-herwig.github.io/grimoire/schemas/grim-publish.schema.json),
+so a supporting editor autocompletes keys and flags a typo before you ever run
+`grim publish`. The schema is generated from grim's own manifest parser — see
+[Editor schema support](./configuration.md#editor-schema) for both schema URLs
+and [`grim schema`](./commands.md#schema) to print one locally.
 
 ### Conventional source layout {#batch-publish-layout}
 

@@ -47,6 +47,7 @@ full reference is `--help` plus the docs site linked below.
 | `grim release` | Validate, pack, push with cascade tags | [publish](references/publish.md) |
 | `grim publish` | Batch-release packages from a `publish.toml` manifest | [publish](references/publish.md) |
 | `grim login` / `logout` | Manage registry credentials | [publish](references/publish.md) |
+| `grim schema` | Emit the JSON Schema for `grimoire.toml` / `publish.toml` | [publish](references/publish.md) |
 
 ## Reference Syntax
 

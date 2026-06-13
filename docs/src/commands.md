@@ -39,6 +39,7 @@ These apply to every subcommand:
 | [`grim publish`](#publish) | Validate and batch-release all packages from a manifest. |
 | [`grim login`](#login) | Authenticate to a registry and store the credential. |
 | [`grim logout`](#logout) | Remove a stored registry credential. |
+| [`grim schema`](#schema) | Print the JSON Schema for `grimoire.toml` or `publish.toml`. |
 
 ## grim init {#init}
 
@@ -320,6 +321,23 @@ same way [`grim login`](#login) does.
 ```sh
 grim logout ghcr.io
 ```
+
+## grim schema {#schema}
+
+`grim schema --kind <config|publish>` prints a [JSON
+Schema](https://json-schema.org/) for one of the two author-facing TOML files
+to stdout. `--kind config` describes `grimoire.toml`; `--kind publish`
+describes `publish.toml`. The schema is generated from grim's own parser, so it
+accepts exactly what grim accepts.
+
+```sh
+grim schema --kind config > grimoire-config.schema.json
+grim schema --kind publish | jq .title
+```
+
+The same schemas are published to the docs site; see [Editor schema
+support](./configuration.md#editor-schema) for the hosted URLs and the
+`#:schema` directive that wires an editor up to them.
 
 <!-- internal -->
 [global-options]: #global-options

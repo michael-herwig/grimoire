@@ -1,0 +1,22 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+tasks:
+  generate:
+    desc: Regenerate the committed JSON Schemas for grimoire.toml and publish.toml
+    summary: |
+      Runs the compiled `grim schema` for each kind and writes the pretty
+      JSON into docs/src/schemas/. mdBook copies those files verbatim into
+      the published site; the Rust drift test fails if they go stale.
+    deps:
+      - :rust:build
+    sources:
+      - '{{.ROOT_DIR}}/target/release/grim'
+    generates:
+      - '{{.ROOT_DIR}}/docs/src/schemas/grimoire-config.schema.json'
+      - '{{.ROOT_DIR}}/docs/src/schemas/grim-publish.schema.json'
+    cmds:
+      - mkdir -p {{.ROOT_DIR}}/docs/src/schemas
+      - '{{.ROOT_DIR}}/target/release/grim schema --kind config > {{.ROOT_DIR}}/docs/src/schemas/grimoire-config.schema.json'
+      - '{{.ROOT_DIR}}/target/release/grim schema --kind publish > {{.ROOT_DIR}}/docs/src/schemas/grim-publish.schema.json'

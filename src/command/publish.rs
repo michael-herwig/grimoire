@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use clap::Args;
+use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crate::api::publish_report::{PublishEntry, PublishReport, PublishStatus};
@@ -58,7 +59,7 @@ pub struct PublishArgs {
 
 /// A single entry in a kind table (`[skills.name]`, `[rules.name]`,
 /// `[agents.name]`, `[bundles.name]`).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PublishEntrySpec {
     /// Strict semantic version (`X.Y.Z`). Required.
@@ -81,7 +82,7 @@ pub struct PublishEntrySpec {
 ///
 /// Top-level `registry` is required. Each kind table holds
 /// `name = { version, [path], [pin] }` sub-tables.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PublishManifest {
     /// The OCI registry host to publish to (e.g. `grim.ocx.sh`). May be

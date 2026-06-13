@@ -12,6 +12,7 @@
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::config::hash;
@@ -21,7 +22,7 @@ use crate::oci::Identifier;
 ///
 /// `#[serde(deny_unknown_fields)]` so schema drift surfaces as a parse
 /// error rather than a silent ignore.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigOptions {
     /// Default registry for short identifiers (lower priority than

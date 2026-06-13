@@ -19,6 +19,7 @@ pub mod logout;
 pub mod publish;
 pub mod release;
 pub mod remove;
+pub mod schema;
 pub mod scope_resolution;
 pub mod search;
 pub mod status;

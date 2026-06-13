@@ -123,6 +123,16 @@ grim publish --manifest staging/publish.toml  # alternate manifest
 See [Batch publishing with a manifest][batch-publish] for the full schema,
 source layout conventions, and disambiguation from bundle TOML files.
 
+## Editor schema support {#editor-schema}
+
+`grim schema --kind config|publish` prints a JSON Schema for `grimoire.toml`
+or `publish.toml` (generated from grim's own parser, so it accepts exactly
+what grim accepts). The same schemas are published to the docs site; adding a
+`#:schema` directive on the first line of a TOML file gives a supporting editor
+(Taplo, Even Better TOML) autocomplete and typo-flagging. Confirm the flags
+with `grim schema --help`; see the [Editor schema support][editor-schema] docs
+for the hosted URLs.
+
 ## Bundles
 
 A bundle is a small `.toml` whose `[skills]` / `[rules]` / `[agents]`
@@ -204,5 +214,6 @@ With no positional registry, `login`/`logout` resolve `--registry`, then
 [publishing]: https://michael-herwig.github.io/grimoire/publishing.html
 [metadata]: https://michael-herwig.github.io/grimoire/publishing.html#metadata
 [batch-publish]: https://michael-herwig.github.io/grimoire/publishing.html#batch-publish
+[editor-schema]: https://michael-herwig.github.io/grimoire/configuration.html#editor-schema
 [auth]: https://michael-herwig.github.io/grimoire/authentication.html
 [commands]: https://michael-herwig.github.io/grimoire/commands.html#build

@@ -10,6 +10,7 @@ includes:
   shell: ./taskfiles/shell.taskfile.yml
   coverage: ./taskfiles/coverage.taskfile.yml
   release: ./taskfiles/release.taskfile.yml
+  schema: ./taskfiles/schema.taskfile.yml
   claude:
     taskfile: ./.claude/taskfile.yml
     dir: ./.claude

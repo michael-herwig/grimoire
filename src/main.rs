@@ -50,6 +50,7 @@ use crate::command::logout::LogoutArgs;
 use crate::command::publish::PublishArgs;
 use crate::command::release::ReleaseArgs;
 use crate::command::remove::RemoveArgs;
+use crate::command::schema::SchemaArgs;
 use crate::command::search::SearchArgs;
 use crate::command::status::StatusArgs;
 use crate::command::tui::TuiArgs;
@@ -99,6 +100,8 @@ pub enum Command {
     Uninstall(UninstallArgs),
     /// Search the registry catalog for skills and rules.
     Search(SearchArgs),
+    /// Print the JSON Schema for grimoire.toml or publish.toml.
+    Schema(SchemaArgs),
     /// Browse the registry catalog in an interactive TUI.
     Tui(TuiArgs),
     /// Authenticate to a registry and store the credential.

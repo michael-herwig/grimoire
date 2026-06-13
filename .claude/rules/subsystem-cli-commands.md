@@ -27,6 +27,7 @@ column formats.
 | `grim publish` | Batch-release all packages declared in a `publish.toml` manifest; validates whole manifest before any push; fixed kind order (skills → rules → agents → bundles), skip-existing by default |
 | `grim login [<registry>]` | Authenticate to a registry; store the credential via the docker-compatible credential store (helper or, with `--allow-insecure-store`, plaintext) |
 | `grim logout [<registry>]` | Remove a stored registry credential (idempotent — exits 0 when nothing is stored) |
+| `grim schema --kind <config\|publish>` | Print the JSON Schema for `grimoire.toml` or `publish.toml` to stdout (generated from the real parse structs); emits a document, not a `Printable` report |
 | `grim version` | Print the compiled version |
 
 Global flags (illustrative): `--offline`, `--remote`, `--format json`.

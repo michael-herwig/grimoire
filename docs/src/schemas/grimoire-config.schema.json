@@ -1,0 +1,65 @@
+{
+  "$defs": {
+    "ConfigOptions": {
+      "additionalProperties": false,
+      "description": "Optional config options shared by both scopes.\n\n`#[serde(deny_unknown_fields)]` so schema drift surfaces as a parse\nerror rather than a silent ignore.",
+      "properties": {
+        "clients": {
+          "description": "AI client targets install/update materialize into when `--client` is\nabsent. A list so one declaration can generate for several clients\nat once (e.g. `[\"claude\", \"opencode\"]`); empty triggers detection of\nthe clients whose vendor dir is present, falling back to `claude`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "default_registry": {
+          "description": "Default registry for short identifiers (lower priority than\n`GRIM_DEFAULT_REGISTRY`; see the registry-precedence chain in\n`command::resolve_default_registry`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$id": "https://michael-herwig.github.io/grimoire/schemas/grimoire-config.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Raw first-pass shape — string values, validated in the second pass so\nthe diagnostic can name both the binding key and the offending value\n(a value-position visitor cannot see the key).",
+  "properties": {
+    "agents": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "default": {},
+      "type": "object"
+    },
+    "bundles": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "default": {},
+      "type": "object"
+    },
+    "options": {
+      "$ref": "#/$defs/ConfigOptions",
+      "default": {}
+    },
+    "rules": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "default": {},
+      "type": "object"
+    },
+    "skills": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "default": {},
+      "type": "object"
+    }
+  },
+  "title": "grimoire.toml — Grimoire declaration file",
+  "type": "object"
+}

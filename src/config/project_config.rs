@@ -12,6 +12,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crate::config;
@@ -65,7 +66,7 @@ pub fn lock_path_for(config_path: &Path) -> PathBuf {
 /// Raw first-pass shape — string values, validated in the second pass so
 /// the diagnostic can name both the binding key and the offending value
 /// (a value-position visitor cannot see the key).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
     #[serde(default)]
@@ -78,6 +79,16 @@ struct RawConfig {
     agents: BTreeMap<String, String>,
     #[serde(default)]
     bundles: BTreeMap<String, String>,
+}
+
+/// The JSON Schema (schemars) for the on-disk `grimoire.toml` shape.
+///
+/// Built from the private [`RawConfig`] parse target so the published
+/// schema and the parser can never describe different shapes. Lives here,
+/// not in the `schema` command, because `RawConfig` is private to this
+/// module (the on-disk shape is an implementation detail of parsing).
+pub fn config_json_schema() -> schemars::Schema {
+    schemars::schema_for!(RawConfig)
 }
 
 impl ProjectConfig {

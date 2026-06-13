@@ -10,6 +10,7 @@ The declaration file. An `[options]` table holds defaults, and `[skills]` /
 `[rules]` / `[agents]` map each binding name to a reference:
 
 ```toml
+#:schema https://michael-herwig.github.io/grimoire/schemas/grimoire-config.schema.json
 [options]
 default_registry = "ghcr.io/acme"
 clients = ["claude", "opencode"]
@@ -110,6 +111,30 @@ on the *effective* declaration: before applying an edit they compute the set
 of artifacts the declaration implies before and after, drop only what no
 remaining declaration holds, and keep everything else. A bundle-free lock
 carries no `[[bundle]]` section at all.
+
+## Editor schema support {#editor-schema}
+
+Both author-facing files ship a published [JSON Schema](https://json-schema.org/),
+so an editor can autocomplete keys and flag a mistyped table name the moment
+you save — instead of surfacing the error at the next `grim` run. The schemas
+are generated from grim's own parser, so they accept exactly what grim accepts.
+
+| File | Schema URL |
+|------|------------|
+| `grimoire.toml` | `https://michael-herwig.github.io/grimoire/schemas/grimoire-config.schema.json` |
+| `publish.toml` | `https://michael-herwig.github.io/grimoire/schemas/grim-publish.schema.json` |
+
+[Taplo](https://taplo.tamasfe.dev/) and the
+[Even Better TOML](https://marketplace.visualstudio.com/items?itemName=tamasfe.even-better-toml)
+VS Code extension bind a file to its schema through a first-line directive:
+
+```toml
+#:schema https://michael-herwig.github.io/grimoire/schemas/grimoire-config.schema.json
+```
+
+To regenerate or inspect a schema locally, use [`grim schema`](./commands.md#schema):
+`grim schema --kind config` prints the `grimoire.toml` schema and
+`grim schema --kind publish` prints the `publish.toml` one.
 
 ## Scopes on disk
 
