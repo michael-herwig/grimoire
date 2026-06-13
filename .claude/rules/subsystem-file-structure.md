@@ -75,17 +75,37 @@ Per-client rule transforms:
 Support directory files are copied verbatim for all three clients. Only
 the index is ever transformed.
 
-### Global-scope paths
+### Agents {#install-layout-agents}
+
+An **agent** materializes as a single Markdown file in the client's agents
+directory. No support directory, no transform — the file is written
+verbatim.
+
+Per-client agent paths:
+
+| Client | Global agent path |
+|--------|-------------------|
+| **Claude** | `<claude_root>/agents/<name>.md` |
+| **Copilot** | `<copilot_root>/agents/<name>.md` |
+| **OpenCode** | `<opencode_root>/agents/<name>.md` |
+
+`opencode_root` is the parent of the OpenCode skills directory (i.e. the
+directory one level above the `skills/` subdir resolved from
+`$OPENCODE_CONFIG_DIR` or the XDG default). `claude_root` and
+`copilot_root` are the vendor roots described in the global-scope table
+below.
+
+### Global-scope paths {#global-scope-paths}
 
 For a **global-scope** install (`--global`), grim writes into each
 client's **native** user-level discovery directory rather than under
 `$GRIM_HOME`, so the files are found without extra configuration:
 
-| Client | Skills root | Rules path |
-|--------|-------------|------------|
-| **Claude** | `~/.claude/skills/<name>/` | `~/.claude/rules/<name>.md` |
-| **OpenCode** | `$XDG_CONFIG_HOME/opencode/skills/<name>/` | `$GRIM_HOME/.opencode/rules/<name>.md` (absolute glob registered in global `opencode.json`) |
-| **Copilot** | `~/.copilot/skills/<name>/` | `$GRIM_HOME/.github/instructions/<name>.instructions.md` (inert — no documented user-level instructions path; grim warns) |
+| Client | Skills root | Rules path | Agents path |
+|--------|-------------|------------|-------------|
+| **Claude** | `~/.claude/skills/<name>/` | `~/.claude/rules/<name>.md` | `~/.claude/agents/<name>.md` |
+| **OpenCode** | `$XDG_CONFIG_HOME/opencode/skills/<name>/` | `$GRIM_HOME/.opencode/rules/<name>.md` (absolute glob registered in global `opencode.json`) | `$XDG_CONFIG_HOME/opencode/agents/<name>.md` |
+| **Copilot** | `~/.copilot/skills/<name>/` | `$GRIM_HOME/.github/instructions/<name>.instructions.md` (inert — no documented user-level instructions path; grim warns) | `~/.copilot/agents/<name>.md` |
 
 `$XDG_CONFIG_HOME` falls back to `~/.config` when unset.
 
@@ -95,17 +115,135 @@ variables are honored read-only, `OPENCODE_CONFIG` names a file grim reads
 
 | Variable | Effect on global paths |
 |----------|------------------------|
-| `CLAUDE_CONFIG_DIR` | Replaces the entire `~/.claude` tree — Claude skills **and** rules root there |
-| `COPILOT_HOME` | Replaces `~/.copilot` — Copilot skills land in `$COPILOT_HOME/skills/` |
-| `OPENCODE_CONFIG_DIR` | OpenCode's additive scan dir — preferred over the XDG default for skills when set |
-| `OPENCODE_CONFIG` | Config **file** path only (global `opencode.json` edit target); no effect on skill paths |
+| `CLAUDE_CONFIG_DIR` | Replaces the entire `~/.claude` tree — Claude skills, rules, and agents root there |
+| `COPILOT_HOME` | Replaces `~/.copilot` — Copilot skills and agents land under `$COPILOT_HOME/` |
+| `OPENCODE_CONFIG_DIR` | OpenCode's additive scan dir — preferred over the XDG default for skills and agents when set |
+| `OPENCODE_CONFIG` | Config **file** path only (global `opencode.json` edit target); no effect on skill/agent paths |
 
 **Fallback**: env override → native default (`$HOME`-derived) → workspace
-layout under `$GRIM_HOME` for the affected client. The recorded install
-path is always absolute, so uninstall and integrity checking are
-unaffected regardless of which path was chosen at install time.
+layout under `$GRIM_HOME` for the affected client.
 
-## Client Detection (default install targets)
+## Install State {#install-state}
+
+Grimoire records what it installed, where, and at what content hash. The
+record location differs by scope.
+
+### Project state {#install-state-project}
+
+Project install state lives at `<workspace>/.grimoire/state.json` — inside
+a `.grimoire/` directory co-located with `grimoire.toml`. The workspace
+directory is the key; there is no content hash of the config path in the
+filename. Each project has exactly one state file at this fixed location,
+so two projects sharing a common ancestor (or a shared `GRIM_HOME` volume)
+cannot collide.
+
+**Self-managed `.gitignore`**: the first time grim creates the `.grimoire/`
+directory it writes `.grimoire/.gitignore` with contents `*` (if absent —
+never overwrites a user-edited one). The consumer's root `.gitignore` is
+never touched. This mirrors the convention used by [uv] (`.venv/.gitignore`)
+and [pixi] (`.pixi/.gitignore`): the tool owns its dot-dir and excludes
+its own contents from version control.
+
+**Devcontainer named-volume caution**: if a devcontainer mounts a named
+Docker volume at `<workspace>/.grimoire`, that volume shadows the
+bind-mounted workspace state. A `grim install` inside the container writes
+to the named volume, which is invisible to the host and to other containers
+that bind-mount the same workspace directory. Use a bind-mount (not a
+named volume) at `<workspace>/.grimoire` if you need state to be shared.
+
+**Non-UTF-8 path components**: any path component that is not valid UTF-8
+is rejected at store time with `UnknownAnchor`. All anchor roots must be
+representable as UTF-8.
+
+**Reap window**: between the read-only `load()` in a first post-upgrade
+`status` call and the mutating `save()` in the next mutating command, the
+old legacy state file (`$GRIM_HOME/state/projects/<sha>.json`) still
+exists. A concurrent observer looking at the legacy path during this window
+may see the old file even though the in-memory view is already migrated.
+This is transient; the next mutating command reaps the legacy file.
+
+**Nesting constraint**: `GRIM_HOME` must not be nested inside a workspace
+directory. If it is, `from_target` may match `GrimHome` as the anchor for
+a path that should classify as `Workspace`, producing an incorrect record.
+
+### Global state {#install-state-global}
+
+Global install state lives at `$GRIM_HOME/state/global.json`. This
+location is unchanged from previous versions.
+
+**Residual risk under a shared GRIM_HOME**: when two machines or containers
+share the same `GRIM_HOME` volume, both read and write the same
+`global.json`. Anchoring makes the stored *paths* portable (each machine
+resolves anchor roots from its own environment), but the *record set* in
+the file is shared. Concurrent or serial `grim install --global` calls
+from different machines are last-writer-wins on the record set — the same
+class of collision that project state now avoids. **v1 stance: single
+writer at a time.** Per-host segmentation (keyed by a machine identity
+such as `devcontainerId`) is a tracked follow-up, not part of this change.
+`atomic_write` prevents partial-file corruption; only record-set
+last-writer-wins is a residual risk.
+
+### PathAnchor set {#path-anchor-set}
+
+Stored paths are anchor-relative rather than absolute, so a state file
+written on one machine resolves correctly on another (portable `$HOME`,
+devcontainer portability). Every stored path carries an `anchor` tag and a
+`relative` string (forward-slash UTF-8, Normal components only — no `.`,
+`..`, leading `/`, or drive prefix).
+
+| Anchor | Resolved root |
+|--------|---------------|
+| `Workspace` | The workspace directory passed to the CLI |
+| `ClaudeRoot` | `$CLAUDE_CONFIG_DIR` else `~/.claude` |
+| `CopilotRoot` | `$COPILOT_HOME` else `~/.copilot` |
+| `OpenCodeSkills` | `$OPENCODE_CONFIG_DIR/skills` else `$XDG_CONFIG_HOME/opencode/skills` |
+| `OpenCodeRoot` | Parent of the `OpenCodeSkills` root (the directory one level above `skills/`) |
+| `GrimHome` | `$GRIM_HOME` |
+
+All roots are resolved once at scope-resolution time and passed as an
+`AnchorRoots` struct so every downstream operation is a pure table-lookup
+with no ambient environment access.
+
+### Anchor root/remainder table {#anchor-remainder-table}
+
+Authoritative mapping from `(scope, client, kind)` to `(anchor, stored relative)`:
+
+| Scope · client · kind | Anchor | Stored `relative` |
+|---|---|---|
+| project · any · any | `Workspace` | `.claude/…`, `.opencode/…`, `.github/…` (full sub-path from workspace) |
+| global · claude · skill | `ClaudeRoot` | `skills/<name>` |
+| global · claude · rule | `ClaudeRoot` | `rules/<name>.md` |
+| global · claude · agent | `ClaudeRoot` | `agents/<name>.md` |
+| global · copilot · skill | `CopilotRoot` | `skills/<name>` |
+| global · copilot · agent | `CopilotRoot` | `agents/<name>.md` |
+| global · opencode · skill | `OpenCodeSkills` | `<name>` (root already ends `/skills`) |
+| global · opencode · agent | `OpenCodeRoot` | `agents/<name>.md` |
+| global · opencode · rule | `GrimHome` | `.opencode/rules/<name>.md` |
+| global · copilot · rule | `GrimHome` | `.github/instructions/<name>…` (inert) |
+
+### Path containment guard {#path-containment-guard}
+
+`AnchoredPath::resolve` enforces containment through two layers before any
+filesystem operation runs on the joined path:
+
+**Layer 1 (always, works for absent paths)**: every component of `relative`
+must be `Normal`. Any `ParentDir` (`..`), `CurDir` (`.`), `RootDir`, or
+`Prefix` component causes an immediate `TraversalAttempt` error without
+touching the filesystem.
+
+**Layer 2 (only when the candidate path exists)**: `dunce::canonicalize`
+resolves both the candidate path and the anchor root, then asserts
+`candidate.starts_with(anchor_root)` at the component boundary. A symlink
+inside the anchor pointing outside it yields `EscapedAnchor`.
+
+No consumer joins anchor + relative manually. Every filesystem operation
+(read, hash, delete) receives the result of `resolve()`, never the raw
+`relative` string.
+
+See `quality-security.md` for the path-traversal and symlink-escape guard
+principles that this two-layer pattern implements.
+
+## Client Detection (default install targets) {#client-detection}
 
 When neither `--client` nor the config `[options].clients` selects a
 client, `install` / `update` / TUI target **all detected clients**. A
@@ -138,4 +276,8 @@ overrides documented in the table above.
 ## Cross-References
 
 - `arch-principles.md` — overall architecture and utility discipline
-- `quality-security.md` — path traversal / symlink-escape guards
+- `quality-security.md` — path traversal / symlink-escape guards (two-layer containment pattern)
+
+<!-- external -->
+[uv]: https://docs.astral.sh/uv/
+[pixi]: https://pixi.sh/

@@ -147,7 +147,7 @@ applies.
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `GRIM_HOME` | Root data directory (cache, global config, state). | `~/.grimoire` |
+| `GRIM_HOME` | Root data directory (cache, global config, global install state at `$GRIM_HOME/state/global.json`). Project install state lives at `<workspace>/.grimoire/state.json`, not here. | `~/.grimoire` |
 | `GRIM_DEFAULT_REGISTRY` | Default registry for short references. | unset |
 | `GRIM_OFFLINE` | Disable all network access (same as `--offline`). | `false` |
 | `GRIM_INSECURE_REGISTRIES` | Comma-separated registries reachable over plain HTTP — for local or in-cluster registries without TLS. | unset |
@@ -167,8 +167,16 @@ config-file counterpart — the flag or its `GRIM_OFFLINE` variable applies.
 
 ## Data layout
 
-Everything Grimoire caches or records lives under a single `GRIM_HOME` root:
-the resolved-artifact content store, the catalog cache that
+The resolved-artifact content store, the catalog cache that
 [`grim search`](./commands.md#search) and the [TUI](./commands.md#tui) read, and
-the per-scope install state. Keeping it under one directory means installs can
-use atomic, same-filesystem operations.
+the **global** install state (`$GRIM_HOME/state/global.json`) all live under
+`GRIM_HOME`. Keeping cache and global state under one directory means installs
+can use atomic, same-filesystem operations.
+
+**Project install state** is separate: it lives at
+`<workspace>/.grimoire/state.json`, co-located with `grimoire.toml`. The
+workspace directory is the key, so two projects sharing the same `GRIM_HOME`
+volume cannot collide. Grim writes a self-managed `.grimoire/.gitignore`
+(contents: `*`) the first time it creates the `.grimoire/` directory, so the
+state file is kept out of version control without touching your root
+`.gitignore`.

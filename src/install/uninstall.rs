@@ -18,6 +18,7 @@
 use std::path::PathBuf;
 
 use crate::install::install_state::InstallState;
+use crate::install::path_anchor::{AnchorError, AnchorRoots};
 use crate::oci::ArtifactKind;
 
 /// What [`uninstall`] did.
@@ -43,6 +44,21 @@ pub struct UninstallResult {
     pub removed: Vec<PathBuf>,
 }
 
+/// A failure during uninstall: either resolving an anchored target failed
+/// (a corrupt/tampered `relative`) or deleting a present file did.
+///
+/// `thiserror`, `#[non_exhaustive]` (error-enum convention).
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum UninstallError {
+    /// Resolving/validating an anchored target failed.
+    #[error(transparent)]
+    Anchor(#[from] AnchorError),
+    /// Deleting a present target failed.
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
 /// Remove every recorded client output for `(kind, name)` from disk and
 /// drop its install-state record.
 ///
@@ -53,9 +69,17 @@ pub struct UninstallResult {
 ///
 /// # Errors
 ///
-/// An [`std::io::Error`] from deleting a target that *is* present (other
-/// than not-found). A symlinked target is unlinked, never followed.
-pub fn uninstall(state: &mut InstallState, kind: ArtifactKind, name: &str) -> std::io::Result<UninstallResult> {
+/// A [`UninstallError`] from resolving a corrupt anchored target, or from
+/// deleting a target that *is* present (other than not-found). A present
+/// target is operated on through its resolved (canonicalized) path,
+/// guaranteed contained within its anchor root; a missing target is operated
+/// on via the raw anchor join.
+pub fn uninstall(
+    state: &mut InstallState,
+    kind: ArtifactKind,
+    name: &str,
+    roots: &AnchorRoots,
+) -> Result<UninstallResult, UninstallError> {
     let Some(record) = state.get(kind, name).cloned() else {
         return Ok(UninstallResult {
             outcome: UninstallOutcome::NotInstalled,
@@ -64,12 +88,13 @@ pub fn uninstall(state: &mut InstallState, kind: ArtifactKind, name: &str) -> st
     };
 
     let mut removed = Vec::new();
-    for out in record.client_outputs() {
+    for out in &record.outputs {
         // The index/target first, then a multi-file rule's sibling support
         // directory (`<parent>/<name>/`) so the whole footprint is reaped.
-        remove_output(&out.target, &mut removed)?;
-        if let Some(support_dir) = &out.support_dir {
-            remove_output(support_dir, &mut removed)?;
+        let target = out.resolved_target(roots)?;
+        remove_output(&target, &mut removed)?;
+        if let Some(support_dir) = out.resolved_support_dir(roots)? {
+            remove_output(&support_dir, &mut removed)?;
         }
     }
 
@@ -104,7 +129,8 @@ fn remove_output(path: &std::path::Path, removed: &mut Vec<PathBuf>) -> std::io:
 mod tests {
     use super::*;
     use crate::install::content_hash::content_hash;
-    use crate::install::install_state::{ClientRecord, InstallRecord};
+    use crate::install::install_state::{ClientOutput, InstallRecord};
+    use crate::install::path_anchor::{AnchorRoots, AnchoredPath, PathAnchor};
     use crate::oci::pinned_identifier::PinnedIdentifier;
     use crate::oci::{Digest, Identifier};
 
@@ -113,17 +139,59 @@ mod tests {
         PinnedIdentifier::try_from(id).unwrap()
     }
 
+    /// Build `AnchorRoots` rooted at `workspace` so `Workspace`-anchored paths
+    /// resolve to absolute paths under `workspace`. Other anchors absent.
+    fn roots(workspace: &std::path::Path) -> AnchorRoots {
+        AnchorRoots {
+            workspace: workspace.to_path_buf(),
+            grim_home: workspace.to_path_buf(),
+            claude_root: None,
+            copilot_root: None,
+            opencode_skills: None,
+        }
+    }
+
+    /// Build a `ClientOutput` with a `Workspace`-anchored target at `relative`.
+    fn client_output_at(relative: &str, content_hash: Digest) -> ClientOutput {
+        ClientOutput {
+            client: "claude".to_string(),
+            target: AnchoredPath {
+                anchor: PathAnchor::Workspace,
+                relative: relative.to_string(),
+            },
+            content_hash,
+            support_dir: None,
+        }
+    }
+
+    /// Build a `ClientOutput` with a `Workspace`-anchored target + support dir.
+    fn client_output_with_support(target_rel: &str, support_rel: &str, content_hash: Digest) -> ClientOutput {
+        ClientOutput {
+            client: "claude".to_string(),
+            target: AnchoredPath {
+                anchor: PathAnchor::Workspace,
+                relative: target_rel.to_string(),
+            },
+            content_hash,
+            support_dir: Some(AnchoredPath {
+                anchor: PathAnchor::Workspace,
+                relative: support_rel.to_string(),
+            }),
+        }
+    }
+
     #[test]
     fn removes_skill_dir_and_rule_file_then_drops_records() {
         let dir = tempfile::tempdir().unwrap();
-        let state_path = dir.path().join("state.json");
+        let ws = dir.path();
+        let state_path = ws.join("state.json");
 
         // A skill materializes to a directory tree.
-        let skill_dir = dir.path().join(".claude/skills/hello");
+        let skill_dir = ws.join(".claude/skills/hello");
         std::fs::create_dir_all(&skill_dir).unwrap();
         std::fs::write(skill_dir.join("SKILL.md"), b"hi\n").unwrap();
         // A rule materializes to a single file.
-        let rule_file = dir.path().join(".claude/rules/style.md");
+        let rule_file = ws.join(".claude/rules/style.md");
         std::fs::create_dir_all(rule_file.parent().unwrap()).unwrap();
         std::fs::write(&rule_file, b"rule\n").unwrap();
 
@@ -132,31 +200,29 @@ mod tests {
             kind: ArtifactKind::Skill,
             name: "hello".to_string(),
             pinned: pinned("acme/hello"),
-            content_hash: content_hash(&skill_dir).unwrap(),
-            target: skill_dir.clone(),
-            clients: vec![ClientRecord {
-                client: "claude".to_string(),
-                target: skill_dir.clone(),
-                content_hash: content_hash(&skill_dir).unwrap(),
-                support_dir: None,
-            }],
+            outputs: vec![client_output_at(
+                ".claude/skills/hello",
+                content_hash(&skill_dir).unwrap(),
+            )],
         });
         st.record(InstallRecord {
             kind: ArtifactKind::Rule,
             name: "style".to_string(),
             pinned: pinned("acme/style"),
-            content_hash: content_hash(&rule_file).unwrap(),
-            target: rule_file.clone(),
-            clients: vec![],
+            outputs: vec![client_output_at(
+                ".claude/rules/style.md",
+                content_hash(&rule_file).unwrap(),
+            )],
         });
 
-        let r = uninstall(&mut st, ArtifactKind::Skill, "hello").unwrap();
+        let roots = roots(ws);
+        let r = uninstall(&mut st, ArtifactKind::Skill, "hello", &roots).unwrap();
         assert_eq!(r.outcome, UninstallOutcome::Removed);
         assert_eq!(r.removed, vec![skill_dir.clone()]);
         assert!(!skill_dir.exists());
         assert!(st.get(ArtifactKind::Skill, "hello").is_none());
 
-        let r = uninstall(&mut st, ArtifactKind::Rule, "style").unwrap();
+        let r = uninstall(&mut st, ArtifactKind::Rule, "style", &roots).unwrap();
         assert_eq!(r.outcome, UninstallOutcome::Removed);
         assert!(!rule_file.exists());
         assert!(st.get(ArtifactKind::Rule, "style").is_none());
@@ -165,11 +231,12 @@ mod tests {
     #[test]
     fn removes_multi_file_rule_index_and_support_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let state_path = dir.path().join("state.json");
+        let ws = dir.path();
+        let state_path = ws.join("state.json");
 
         // A multi-file rule: index file + sibling support directory.
-        let index = dir.path().join(".claude/rules/my-rule.md");
-        let support = dir.path().join(".claude/rules/my-rule");
+        let index = ws.join(".claude/rules/my-rule.md");
+        let support = ws.join(".claude/rules/my-rule");
         std::fs::create_dir_all(&support).unwrap();
         std::fs::write(&index, b"# index\n").unwrap();
         std::fs::write(support.join("examples.md"), b"# ex\n").unwrap();
@@ -179,17 +246,15 @@ mod tests {
             kind: ArtifactKind::Rule,
             name: "my-rule".to_string(),
             pinned: pinned("acme/my-rule"),
-            content_hash: content_hash(&index).unwrap(),
-            target: index.clone(),
-            clients: vec![ClientRecord {
-                client: "claude".to_string(),
-                target: index.clone(),
-                content_hash: content_hash(&index).unwrap(),
-                support_dir: Some(support.clone()),
-            }],
+            outputs: vec![client_output_with_support(
+                ".claude/rules/my-rule.md",
+                ".claude/rules/my-rule",
+                content_hash(&index).unwrap(),
+            )],
         });
 
-        let r = uninstall(&mut st, ArtifactKind::Rule, "my-rule").unwrap();
+        let roots = roots(ws);
+        let r = uninstall(&mut st, ArtifactKind::Rule, "my-rule", &roots).unwrap();
         assert_eq!(r.outcome, UninstallOutcome::Removed);
         assert_eq!(r.removed, vec![index.clone(), support.clone()]);
         assert!(!index.exists(), "index file removed");
@@ -197,15 +262,17 @@ mod tests {
         assert!(st.get(ArtifactKind::Rule, "my-rule").is_none());
 
         // Idempotent: a second uninstall reports nothing left to do.
-        let again = uninstall(&mut st, ArtifactKind::Rule, "my-rule").unwrap();
+        let again = uninstall(&mut st, ArtifactKind::Rule, "my-rule", &roots).unwrap();
         assert_eq!(again.outcome, UninstallOutcome::NotInstalled);
     }
 
     #[test]
     fn absent_record_is_not_installed() {
         let dir = tempfile::tempdir().unwrap();
-        let mut st = InstallState::empty(&dir.path().join("s.json"));
-        let r = uninstall(&mut st, ArtifactKind::Skill, "nope").unwrap();
+        let ws = dir.path();
+        let mut st = InstallState::empty(&ws.join("s.json"));
+        let roots = roots(ws);
+        let r = uninstall(&mut st, ArtifactKind::Skill, "nope", &roots).unwrap();
         assert_eq!(r.outcome, UninstallOutcome::NotInstalled);
         assert!(r.removed.is_empty());
     }
@@ -213,21 +280,60 @@ mod tests {
     #[test]
     fn already_gone_files_still_removed_record() {
         let dir = tempfile::tempdir().unwrap();
-        let st_path = dir.path().join("s.json");
-        let gone = dir.path().join(".claude/skills/ghost");
+        let ws = dir.path();
+        let st_path = ws.join("s.json");
         let mut st = InstallState::empty(&st_path);
+        // Record with a path that never existed on disk.
         st.record(InstallRecord {
             kind: ArtifactKind::Skill,
             name: "ghost".to_string(),
             pinned: pinned("acme/ghost"),
-            content_hash: Digest::Sha256("b".repeat(64)),
-            target: gone.clone(),
-            clients: vec![],
+            outputs: vec![client_output_at(".claude/skills/ghost", Digest::Sha256("b".repeat(64)))],
         });
         // Files never existed on disk; record still drops cleanly.
-        let r = uninstall(&mut st, ArtifactKind::Skill, "ghost").unwrap();
+        let roots = roots(ws);
+        let r = uninstall(&mut st, ArtifactKind::Skill, "ghost", &roots).unwrap();
         assert_eq!(r.outcome, UninstallOutcome::Removed);
         assert!(r.removed.is_empty());
         assert!(st.get(ArtifactKind::Skill, "ghost").is_none());
+    }
+
+    // T10 spec: unresolvable AnchoredPath (anchor root absent) during uninstall
+    // propagates as UninstallError::Anchor (never silently drops the record).
+    // This tests the contract that mutating paths return Err on AnchorError.
+    #[test]
+    fn unresolvable_anchor_root_propagates_anchor_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let st_path = ws.join("s.json");
+        let mut st = InstallState::empty(&st_path);
+        // Record with ClaudeRoot anchor but roots has claude_root = None.
+        st.record(InstallRecord {
+            kind: ArtifactKind::Rule,
+            name: "orphan".to_string(),
+            pinned: pinned("acme/orphan"),
+            outputs: vec![ClientOutput {
+                client: "claude".to_string(),
+                target: AnchoredPath {
+                    anchor: PathAnchor::ClaudeRoot,
+                    relative: "rules/orphan.md".to_string(),
+                },
+                content_hash: Digest::Sha256("c".repeat(64)),
+                support_dir: None,
+            }],
+        });
+        // Roots with no claude_root: resolving ClaudeRoot → AnchorRootAbsent.
+        let roots = AnchorRoots {
+            workspace: ws.to_path_buf(),
+            grim_home: ws.to_path_buf(),
+            claude_root: None,
+            copilot_root: None,
+            opencode_skills: None,
+        };
+        let result = uninstall(&mut st, ArtifactKind::Rule, "orphan", &roots);
+        assert!(
+            result.is_err(),
+            "unresolvable anchor root must propagate as UninstallError::Anchor"
+        );
     }
 }

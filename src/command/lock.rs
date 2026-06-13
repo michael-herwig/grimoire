@@ -125,6 +125,17 @@ mod tests {
         }
     }
 
+    /// Build a minimal `AnchorRoots` for tests where resolution is not exercised.
+    fn stub_roots() -> crate::install::path_anchor::AnchorRoots {
+        crate::install::path_anchor::AnchorRoots {
+            workspace: std::path::PathBuf::from("/tmp/ws"),
+            grim_home: std::path::PathBuf::from("/tmp/gh"),
+            claude_root: None,
+            copilot_root: None,
+            opencode_skills: None,
+        }
+    }
+
     #[test]
     fn action_is_locked_without_previous() {
         let lock = lock_of(vec![locked("a", ArtifactKind::Skill, 'a')]);
@@ -139,6 +150,7 @@ mod tests {
                 lock_path: Default::default(),
                 state_path: Default::default(),
                 workspace: Default::default(),
+                roots: stub_roots(),
             },
         );
         let v = serde_json::to_value(&r).unwrap();
@@ -158,6 +170,7 @@ mod tests {
             lock_path: Default::default(),
             state_path: Default::default(),
             workspace: Default::default(),
+            roots: stub_roots(),
         };
         let r = build_report(&lock, Some(&prev), &scope);
         let v = serde_json::to_value(&r).unwrap();

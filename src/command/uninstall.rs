@@ -15,8 +15,7 @@ use clap::Args;
 use crate::api::uninstall_report::{UninstallReport, UninstallStatus};
 use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
-use crate::install::install_state::InstallState;
-use crate::install::uninstall::{UninstallOutcome, uninstall};
+use crate::install::uninstall::{UninstallError, UninstallOutcome, uninstall};
 use crate::lock::file_lock::ConfigFileLock;
 use crate::lock::lock_io;
 use crate::oci::ArtifactKind;
@@ -67,20 +66,31 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
     };
 
     // 1. Delete materialized files + drop the install-state record.
-    let mut state = super::grim(InstallState::load(&scope.state_path).map_err(|e| state_io(&scope.state_path, e)))?;
+    let mut state = super::grim(scope_resolution::load_state(&scope).map_err(|e| state_io(&scope.state_path, e)))?;
     let involved_clients: Vec<crate::install::client_target::ClientTarget> = state
         .get(kind, &args.name)
-        .map(|r| {
-            r.client_outputs()
-                .iter()
-                .filter_map(|c| c.client.parse().ok())
-                .collect()
-        })
+        .map(|r| r.outputs.iter().filter_map(|c| c.client.parse().ok()).collect())
         .unwrap_or_default();
-    let result = super::grim(uninstall(&mut state, kind, &args.name).map_err(|e| state_io(&scope.workspace, e)))?;
+    let result = super::grim(
+        uninstall(&mut state, kind, &args.name, &scope.roots).map_err(|e| uninstall_error(&scope.workspace, e)),
+    )?;
     let file_removed = result.outcome == UninstallOutcome::Removed;
     if file_removed {
-        super::grim(state.save().map_err(|e| state_io(&scope.state_path, e)))?;
+        // The single `persist` seam handles project-scope dir creation, the
+        // atomic write, and the conditional legacy-file reap in one place.
+        super::grim(
+            state
+                .persist(
+                    scope.scope,
+                    &scope.workspace,
+                    &scope.roots.grim_home,
+                    &scope.config_path,
+                )
+                .map_err(|e| match e {
+                    crate::install::install_state::PersistError::EnsureDir { path, source }
+                    | crate::install::install_state::PersistError::Save { path, source } => state_io(&path, source),
+                }),
+        )?;
     }
 
     // Converge vendor-owned config for every client the removed record
@@ -171,6 +181,17 @@ fn state_io(path: &std::path::Path, source: std::io::Error) -> crate::install::i
             source,
         },
     )
+}
+
+/// Map an [`UninstallError`] to the top-level [`crate::error::Error`] so the
+/// exit-code classifier sees the right tier: an anchor failure keeps its
+/// own taxonomy (65/74/1); an I/O failure becomes the install-tier
+/// `TargetIo` (74), matching `state_io`.
+fn uninstall_error(path: &std::path::Path, source: UninstallError) -> crate::error::Error {
+    match source {
+        UninstallError::Anchor(e) => crate::error::Error::from(e),
+        UninstallError::Io(io) => crate::error::Error::from(state_io(path, io)),
+    }
 }
 
 #[cfg(test)]

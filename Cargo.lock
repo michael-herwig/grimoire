@@ -785,6 +785,7 @@ dependencies = [
  "clap_complete",
  "crossterm",
  "docker_credential",
+ "dunce",
  "fs4",
  "hex",
  "libc",

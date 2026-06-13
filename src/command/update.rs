@@ -20,7 +20,6 @@ use crate::api::update_report::{UpdateEntry, UpdateReport};
 use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
 use crate::install::client_target::ClientTarget;
-use crate::install::install_state::InstallState;
 use crate::install::installer::install_all;
 use crate::install::materializer::DefaultMaterializer;
 use crate::install::prune::{PruneOutcome, PrunedArtifact, prune_orphans};
@@ -115,9 +114,18 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
         &args.client,
         &scope.options.clients,
     ))?;
-    let mut state = InstallState::load(&scope.state_path).map_err(|e| state_io(&scope.state_path, e))?;
+    let mut state = scope_resolution::load_state(&scope).map_err(|e| state_io(&scope.state_path, e))?;
     let materializer = DefaultMaterializer;
-    let outcomes = install_all(&new_lock, &access, &materializer, &target, &mut state, true).await;
+    let outcomes = install_all(
+        &new_lock,
+        &access,
+        &materializer,
+        &target,
+        &mut state,
+        &scope.roots,
+        true,
+    )
+    .await;
 
     // Reconcile the materialized tree back to the new lock: an artifact the
     // resolve dropped (most visibly a bundle that stopped including a
@@ -128,9 +136,27 @@ pub async fn run(ctx: &Context, args: &UpdateArgs) -> anyhow::Result<(UpdateRepo
     // so that stays gated behind `--force`.
     // A prune I/O failure carries the failing artifact path, so the error
     // is attributed to the real file rather than the workspace root.
-    let pruned = prune_orphans(&mut state, &new_lock, args.force).map_err(|e| state_io(&e.path, e.source))?;
+    // Map PruneError to the top-level error type, preserving AnchorError
+    // identity so classify_error maps TraversalAttempt → DataError(65) rather
+    // than flattening it to IoError(74) — ARCH-4/SC-03 exit-code contract.
+    let pruned = prune_orphans(&mut state, &new_lock, &scope.roots, args.force).map_err(|e| match e {
+        crate::install::prune::PruneError::Anchor { source, .. } => crate::error::Error::Anchor(source),
+        crate::install::prune::PruneError::Io { path, source } => state_io(&path, source),
+    })?;
 
-    state.save().map_err(|e| state_io(&scope.state_path, e))?;
+    // The single `persist` seam handles project-scope dir creation, the
+    // atomic write, and the conditional legacy-file reap in one place.
+    state
+        .persist(
+            scope.scope,
+            &scope.workspace,
+            &scope.roots.grim_home,
+            &scope.config_path,
+        )
+        .map_err(|e| match e {
+            crate::install::install_state::PersistError::EnsureDir { path, source }
+            | crate::install::install_state::PersistError::Save { path, source } => state_io(&path, source),
+        })?;
 
     // Converge vendor-owned config on the new state (covers both fresh
     // installs and pruned orphans in one pass) for every involved client.

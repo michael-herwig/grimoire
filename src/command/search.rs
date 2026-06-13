@@ -25,6 +25,7 @@ use crate::cli::exit_code::ExitCode;
 use crate::config::scope::ConfigScope;
 use crate::context::Context;
 use crate::install::install_state::InstallState;
+use crate::install::path_anchor::AnchorRoots;
 use crate::install::status_badge::derive_badge;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
@@ -101,7 +102,7 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
     // Scope badges are best-effort: `search` is not scope-bound, so a
     // missing project config just means "nothing installed" rather than a
     // hard failure.
-    let (lock, state) = load_scope_best_effort(ctx, args);
+    let (lock, state, roots) = load_scope_best_effort(ctx, args);
 
     // The catalog was prefiltered by repo *name*; re-filter in memory so a
     // summary/description/keyword-only match (and multi-term AND / kind
@@ -117,7 +118,7 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
             repository: e.repository_url.clone(),
             latest_tag: e.latest_tag.clone(),
             version: e.version.clone(),
-            status: derive_badge(&e.registry, &e.repository, lock.as_ref(), &state),
+            status: derive_badge(&e.registry, &e.repository, lock.as_ref(), &state, &roots),
         })
         .collect();
     entries.sort_by(|a, b| a.repo.cmp(&b.repo));
@@ -150,16 +151,20 @@ fn resolve_registry(ctx: &Context, args: &SearchArgs) -> String {
     super::resolve_default_registry(ctx, project_default.as_deref(), global_default.as_deref())
 }
 
-/// Load the scope's lock + install-state for badge derivation, degrading
-/// to an empty state when no scope resolves or the files are
-/// absent/corrupt (badges are advisory, never fail the search).
-fn load_scope_best_effort(ctx: &Context, args: &SearchArgs) -> (Option<GrimoireLock>, InstallState) {
+/// Load the scope's lock + install-state + anchor roots for badge
+/// derivation, degrading to an empty state when no scope resolves or the
+/// files are absent/corrupt (badges are advisory, never fail the search).
+fn load_scope_best_effort(ctx: &Context, args: &SearchArgs) -> (Option<GrimoireLock>, InstallState, AnchorRoots) {
     let Ok(scope) = scope_resolution::resolve(ctx, args.global, args.config.as_deref()) else {
-        return (None, InstallState::empty(std::path::Path::new("")));
+        let roots = AnchorRoots::resolve(std::path::PathBuf::new(), ctx);
+        return (None, InstallState::empty(std::path::Path::new("")), roots);
     };
     let lock = lock_io::load(&scope.lock_path).ok();
-    let state = InstallState::load(&scope.state_path).unwrap_or_else(|_| InstallState::empty(&scope.state_path));
-    (lock, state)
+    // Route through the scope seam so a project legacy file (or a V1 global
+    // file) migrates in memory; a load failure degrades to empty (badges are
+    // advisory, never fail the search).
+    let state = scope_resolution::load_state(&scope).unwrap_or_else(|_| InstallState::empty(&scope.state_path));
+    (lock, state, scope.roots)
 }
 
 #[cfg(test)]

@@ -27,6 +27,7 @@ use super::content_hash::footprint_hash;
 use super::install_error::{InstallError, InstallErrorKind};
 use super::install_state::{InstallRecord, InstallState};
 use super::materializer::ArtifactMaterializer;
+use super::path_anchor::AnchorRoots;
 use super::target::InstallTarget;
 
 /// What happened to one artifact during an install pass.
@@ -76,6 +77,7 @@ pub async fn install_all<M: ArtifactMaterializer>(
     materializer: &M,
     target: &InstallTarget,
     state: &mut InstallState,
+    roots: &AnchorRoots,
     force: bool,
 ) -> Vec<ArtifactInstall> {
     let work: Vec<(&LockedArtifact, ArtifactKind)> = lock.iter_artifacts().map(|a| (a, a.kind)).collect();
@@ -94,7 +96,7 @@ pub async fn install_all<M: ArtifactMaterializer>(
             .copied()
             .unwrap_or(crate::install::client_target::ClientTarget::Claude);
         let report_target = target.path_for(primary, kind, &artifact.name);
-        let result = install_one(artifact, kind, access, materializer, target, state, force).await;
+        let result = install_one(artifact, kind, access, materializer, target, state, roots, force).await;
         results.push(ArtifactInstall {
             reference,
             target: report_target,
@@ -106,6 +108,7 @@ pub async fn install_all<M: ArtifactMaterializer>(
 
 /// Install one artifact into every selected client through the integrity
 /// gate.
+#[allow(clippy::too_many_arguments)]
 async fn install_one<M: ArtifactMaterializer>(
     artifact: &LockedArtifact,
     kind: ArtifactKind,
@@ -113,9 +116,10 @@ async fn install_one<M: ArtifactMaterializer>(
     materializer: &M,
     target: &InstallTarget,
     state: &mut InstallState,
+    roots: &AnchorRoots,
     force: bool,
 ) -> Result<InstallOutcome, crate::error::Error> {
-    use crate::install::install_state::ClientRecord;
+    use crate::install::install_state::ClientOutput;
 
     let recorded = state.get(kind, &artifact.name).cloned();
     let pinned_str = artifact.pinned.strip_advisory().to_string();
@@ -126,9 +130,10 @@ async fn install_one<M: ArtifactMaterializer>(
     // and the pin is unchanged the install is a no-op.
     if let Some(rec) = &recorded {
         let mut all_intact = true;
-        for out in rec.client_outputs() {
-            if out.target.exists() {
-                let actual = out.current_hash().map_err(|e| target_io(&out.target, e))?;
+        for out in &rec.outputs {
+            let resolved = out.resolved_target(roots)?;
+            if resolved.exists() {
+                let actual = out.current_hash(roots)?;
                 if actual != out.content_hash {
                     if !force {
                         return Ok(InstallOutcome::Refused {
@@ -233,7 +238,7 @@ async fn install_one<M: ArtifactMaterializer>(
 
     // Materialize into every selected client's final path, replacing any
     // prior output, and hash each client output for the integrity record.
-    let mut client_records = Vec::with_capacity(target.clients().len());
+    let mut client_records: Vec<ClientOutput> = Vec::with_capacity(target.clients().len());
     for client in target.clients() {
         let dest = target.path_for(*client, kind, &artifact.name);
         // Copilot documents no user-level instructions location: a
@@ -293,28 +298,35 @@ async fn install_one<M: ArtifactMaterializer>(
                 .map_err(|e| target_io(parent, e))?;
         }
         let installed_hash = footprint_hash(&dest, support_dest.as_deref()).map_err(|e| target_io(&dest, e))?;
-        client_records.push(ClientRecord {
+        // `dest` / `support_dest` are the non-canonicalized (pre-symlink)
+        // forms — the `from_target` caller invariant (§1.5).
+        let anchored_target =
+            crate::install::path_anchor::AnchoredPath::from_target(&dest, target.scope(), *client, kind, roots)?;
+        let anchored_support = match &support_dest {
+            Some(sd) => Some(crate::install::path_anchor::AnchoredPath::from_target(
+                sd,
+                target.scope(),
+                *client,
+                kind,
+                roots,
+            )?),
+            None => None,
+        };
+        client_records.push(ClientOutput {
             client: client.to_string(),
-            target: dest,
+            target: anchored_target,
             content_hash: installed_hash,
-            support_dir: support_dest,
+            support_dir: anchored_support,
         });
     }
 
-    // `target`/`content_hash` mirror the primary (first) client so the
-    // status report and the single-client contract are preserved.
-    #[allow(clippy::expect_used)]
-    let primary = client_records
-        .first()
-        .cloned()
-        .expect("InstallTarget always has at least one client (detection falls back to all clients)");
+    // `outputs` is the single source of truth — no denormalized top-level
+    // mirror of the primary client.
     state.record(InstallRecord {
         kind,
         name: artifact.name.clone(),
         pinned: artifact.pinned.clone(),
-        content_hash: primary.content_hash,
-        target: primary.target,
-        clients: client_records,
+        outputs: client_records,
     });
 
     Ok(if recorded.is_some() {
@@ -368,6 +380,7 @@ mod tests {
     use async_trait::async_trait;
     use std::path::Path;
 
+    use crate::install::path_anchor::{AnchorRoots, AnchoredPath, PathAnchor};
     use crate::lock::grimoire_lock::LockMetadata;
     use crate::lock::lock_version::LockVersion;
     use crate::oci::access::Operation;
@@ -375,6 +388,17 @@ mod tests {
     use crate::oci::manifest::{Descriptor, OciManifest};
     use crate::oci::pinned_identifier::PinnedIdentifier;
     use crate::oci::{Algorithm, Digest};
+
+    /// Build `AnchorRoots` rooted at `workspace` for tests.
+    fn roots(workspace: &std::path::Path) -> AnchorRoots {
+        AnchorRoots {
+            workspace: workspace.to_path_buf(),
+            grim_home: workspace.to_path_buf(),
+            claude_root: None,
+            copilot_root: None,
+            opencode_skills: None,
+        }
+    }
 
     use super::super::materializer::DefaultMaterializer;
 
@@ -561,14 +585,27 @@ mod tests {
         let target = InstallTarget::new(dir.path(), crate::config::scope::ConfigScope::Project, vec![]);
         let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
         let m = DefaultMaterializer;
+        let roots = roots(dir.path());
 
-        let r1 = install_all(&lock, &access, &m, &target, &mut state, false).await;
+        let r1 = install_all(&lock, &access, &m, &target, &mut state, &roots, false).await;
         assert_eq!(r1.len(), 1);
         assert_eq!(*r1[0].result.as_ref().unwrap(), InstallOutcome::Installed);
         assert!(dir.path().join(".claude/rules/rust-style.md").is_file());
 
+        // F05: portability contract — the saved record's target must be an
+        // AnchoredPath, never an absolute PathBuf. Pins the serialization contract.
+        let rec = state.get(crate::oci::ArtifactKind::Rule, "rust-style").unwrap();
+        assert_eq!(
+            rec.outputs[0].target,
+            AnchoredPath {
+                anchor: PathAnchor::Workspace,
+                relative: ".claude/rules/rust-style.md".to_string(),
+            },
+            "saved target must be Workspace-anchored relative path, never absolute"
+        );
+
         // Second pass with same lock + intact content ⇒ no-op.
-        let r2 = install_all(&lock, &access, &m, &target, &mut state, false).await;
+        let r2 = install_all(&lock, &access, &m, &target, &mut state, &roots, false).await;
         assert_eq!(*r2[0].result.as_ref().unwrap(), InstallOutcome::AlreadyInstalled);
     }
 
@@ -581,20 +618,21 @@ mod tests {
         let target = InstallTarget::new(dir.path(), crate::config::scope::ConfigScope::Project, vec![]);
         let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
         let m = DefaultMaterializer;
+        let roots = roots(dir.path());
 
-        install_all(&lock, &access, &m, &target, &mut state, false).await;
+        install_all(&lock, &access, &m, &target, &mut state, &roots, false).await;
         // Tamper with the installed file.
         let installed = dir.path().join(".claude/rules/rust-style.md");
         std::fs::write(&installed, b"hand edited\n").unwrap();
 
-        let refused = install_all(&lock, &access, &m, &target, &mut state, false).await;
+        let refused = install_all(&lock, &access, &m, &target, &mut state, &roots, false).await;
         assert!(matches!(
             refused[0].result.as_ref().unwrap(),
             InstallOutcome::Refused { .. }
         ));
         assert_eq!(std::fs::read(&installed).unwrap(), b"hand edited\n");
 
-        let forced = install_all(&lock, &access, &m, &target, &mut state, true).await;
+        let forced = install_all(&lock, &access, &m, &target, &mut state, &roots, true).await;
         assert_eq!(*forced[0].result.as_ref().unwrap(), InstallOutcome::Updated);
         assert_eq!(std::fs::read(&installed).unwrap(), b"# rust\n");
     }
@@ -607,6 +645,7 @@ mod tests {
         let target = InstallTarget::new(dir.path(), crate::config::scope::ConfigScope::Project, vec![]);
         let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
         let m = DefaultMaterializer;
+        let roots = roots(dir.path());
 
         install_all(
             &lock_v1,
@@ -614,6 +653,7 @@ mod tests {
             &m,
             &target,
             &mut state,
+            &roots,
             false,
         )
         .await;
@@ -626,6 +666,7 @@ mod tests {
             &m,
             &target,
             &mut state,
+            &roots,
             false,
         )
         .await;
@@ -633,6 +674,18 @@ mod tests {
         assert_eq!(
             std::fs::read(dir.path().join(".claude/rules/rust-style.md")).unwrap(),
             b"v2\n"
+        );
+
+        // F05: portability contract — after an update the record's target must
+        // still be an AnchoredPath, not an absolute PathBuf.
+        let rec = state.get(crate::oci::ArtifactKind::Rule, "rust-style").unwrap();
+        assert_eq!(
+            rec.outputs[0].target,
+            AnchoredPath {
+                anchor: PathAnchor::Workspace,
+                relative: ".claude/rules/rust-style.md".to_string(),
+            },
+            "updated record target must be Workspace-anchored relative path, never absolute"
         );
     }
 
@@ -644,6 +697,7 @@ mod tests {
         let target = InstallTarget::new(dir.path(), crate::config::scope::ConfigScope::Project, vec![]);
         let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
         let m = DefaultMaterializer;
+        let roots = roots(dir.path());
 
         let r = install_all(
             &lock,
@@ -651,6 +705,7 @@ mod tests {
             &m,
             &target,
             &mut state,
+            &roots,
             false,
         )
         .await;
@@ -677,7 +732,8 @@ mod tests {
             manifest_blob: blob.clone(),
             served_blob: wrong,
         };
-        let r = install_all(&lock, &arc(mock), &m, &target, &mut state, false).await;
+        let roots = roots(dir.path());
+        let r = install_all(&lock, &arc(mock), &m, &target, &mut state, &roots, false).await;
         let err = r[0].result.as_ref().expect_err("digest mismatch must error");
         assert!(matches!(
             err,
@@ -694,9 +750,10 @@ mod tests {
         let target = InstallTarget::new(dir.path(), crate::config::scope::ConfigScope::Project, vec![]);
         let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
         let m = DefaultMaterializer;
+        let roots = roots(dir.path());
 
         // Fresh install lands the index and the support file beside it.
-        let r1 = install_all(&lock, &access, &m, &target, &mut state, false).await;
+        let r1 = install_all(&lock, &access, &m, &target, &mut state, &roots, false).await;
         assert_eq!(*r1[0].result.as_ref().unwrap(), InstallOutcome::Installed);
         let index = dir.path().join(".claude/rules/my-rule.md");
         let support = dir.path().join(".claude/rules/my-rule/examples.md");
@@ -704,12 +761,12 @@ mod tests {
         assert!(support.is_file());
 
         // Intact footprint ⇒ no-op.
-        let r2 = install_all(&lock, &access, &m, &target, &mut state, false).await;
+        let r2 = install_all(&lock, &access, &m, &target, &mut state, &roots, false).await;
         assert_eq!(*r2[0].result.as_ref().unwrap(), InstallOutcome::AlreadyInstalled);
 
         // Editing a *support* file (not the index) is detected as drift.
         std::fs::write(&support, b"hand edited\n").unwrap();
-        let refused = install_all(&lock, &access, &m, &target, &mut state, false).await;
+        let refused = install_all(&lock, &access, &m, &target, &mut state, &roots, false).await;
         assert!(matches!(
             refused[0].result.as_ref().unwrap(),
             InstallOutcome::Refused { .. }
@@ -717,7 +774,7 @@ mod tests {
         assert_eq!(std::fs::read(&support).unwrap(), b"hand edited\n");
 
         // Forcing restores the canonical support content.
-        let forced = install_all(&lock, &access, &m, &target, &mut state, true).await;
+        let forced = install_all(&lock, &access, &m, &target, &mut state, &roots, true).await;
         assert_eq!(*forced[0].result.as_ref().unwrap(), InstallOutcome::Updated);
         assert_eq!(std::fs::read(&support).unwrap(), b"# ex\n");
     }
@@ -731,8 +788,9 @@ mod tests {
         let target = InstallTarget::new(dir.path(), crate::config::scope::ConfigScope::Project, vec![]);
         let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
         let m = DefaultMaterializer;
+        let roots = roots(dir.path());
 
-        install_all(&lock, &access, &m, &target, &mut state, false).await;
+        install_all(&lock, &access, &m, &target, &mut state, &roots, false).await;
         let support = dir.path().join(".claude/rules/my-rule");
         assert!(support.is_dir());
 
@@ -740,7 +798,7 @@ mod tests {
         std::fs::remove_dir_all(&support).unwrap();
 
         // Reinstall must see *drift* (Refused), never a hard I/O error.
-        let refused = install_all(&lock, &access, &m, &target, &mut state, false).await;
+        let refused = install_all(&lock, &access, &m, &target, &mut state, &roots, false).await;
         assert!(
             matches!(refused[0].result.as_ref().unwrap(), InstallOutcome::Refused { .. }),
             "a deleted support dir is drift, got {:?}",
@@ -748,7 +806,7 @@ mod tests {
         );
 
         // Forcing restores the support tree.
-        let forced = install_all(&lock, &access, &m, &target, &mut state, true).await;
+        let forced = install_all(&lock, &access, &m, &target, &mut state, &roots, true).await;
         assert_eq!(*forced[0].result.as_ref().unwrap(), InstallOutcome::Updated);
         assert_eq!(std::fs::read(support.join("examples.md")).unwrap(), b"# ex\n");
     }
@@ -761,6 +819,7 @@ mod tests {
         let target = InstallTarget::new(dir.path(), crate::config::scope::ConfigScope::Project, vec![]);
         let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
         let m = DefaultMaterializer;
+        let roots = roots(dir.path());
 
         install_all(
             &lock_v1,
@@ -768,6 +827,7 @@ mod tests {
             &m,
             &target,
             &mut state,
+            &roots,
             false,
         )
         .await;
@@ -783,6 +843,7 @@ mod tests {
             &m,
             &target,
             &mut state,
+            &roots,
             false,
         )
         .await;
@@ -795,7 +856,7 @@ mod tests {
         );
         // The record no longer carries a support dir.
         let rec = state.get(ArtifactKind::Rule, "my-rule").unwrap();
-        assert!(rec.clients.iter().all(|c| c.support_dir.is_none()));
+        assert!(rec.outputs.iter().all(|c| c.support_dir.is_none()));
     }
 
     #[test]

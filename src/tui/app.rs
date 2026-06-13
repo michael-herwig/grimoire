@@ -34,6 +34,7 @@ use crate::config::scope::ConfigScope;
 use crate::install::install_state::InstallState;
 use crate::install::installer::{InstallOutcome, install_all};
 use crate::install::materializer::DefaultMaterializer;
+use crate::install::path_anchor::AnchorRoots;
 use crate::install::target::InstallTarget;
 use crate::lock::file_lock::ConfigFileLock;
 use crate::lock::grimoire_lock::GrimoireLock;
@@ -80,6 +81,9 @@ pub struct TuiContext {
     /// install into it through the same seam `grim add` uses, and the
     /// delete action undeclares through the `grim uninstall` seam.
     pub config_path: std::path::PathBuf,
+    /// Every anchor root resolved once for the active scope, so badge
+    /// derivation + the install/uninstall seams resolve anchored paths.
+    pub roots: AnchorRoots,
     /// The AI client target(s) to materialize into (the raw config `clients`
     /// option; empty triggers detection at install time). Still needed for
     /// the `InstallTarget::parse` fallback in [`perform`].
@@ -110,6 +114,8 @@ pub struct ScopeSwap {
     pub state_path: std::path::PathBuf,
     /// The scope's config path (`grimoire.toml`).
     pub config_path: std::path::PathBuf,
+    /// Every anchor root resolved once for this scope.
+    pub roots: AnchorRoots,
     /// The AI client target(s) to materialize into (raw config clients).
     pub clients_default: Vec<String>,
     /// The effective selected clients for this scope (config or detected).
@@ -132,6 +138,7 @@ impl TuiContext {
             lock_path: std::mem::replace(&mut self.lock_path, alt.lock_path),
             state_path: std::mem::replace(&mut self.state_path, alt.state_path),
             config_path: std::mem::replace(&mut self.config_path, alt.config_path),
+            roots: std::mem::replace(&mut self.roots, alt.roots),
             clients_default: std::mem::replace(&mut self.clients_default, alt.clients_default),
             clients_selected: std::mem::replace(&mut self.clients_selected, alt.clients_selected),
             label: std::mem::replace(&mut self.scope_label, alt.label),
@@ -485,7 +492,7 @@ fn drain_checks(
 /// per-row `↑` flags, pins, and re-applying the kind-sort + filter.
 fn drain_catalog_ready(ctx: &TuiContext, state: &mut TuiState, catalog: &Catalog) {
     let (lock, install_state) = load_scope_for_badges(ctx);
-    let fresh = rows_from_catalog(catalog, lock.as_ref(), &install_state);
+    let fresh = rows_from_catalog(catalog, lock.as_ref(), &install_state, &ctx.roots);
     state.merge_catalog_rows(fresh);
     // The background refresh re-walks the same browse window, so its
     // truncation verdict supersedes the initial load's (the cap may now be
@@ -543,7 +550,7 @@ async fn reload_into(ctx: &TuiContext, state: &mut TuiState, force: bool) {
     match Catalog::load_or_refresh(&ctx.catalog_path, &ctx.registry, "", &ctx.access, ctx.offline, force).await {
         Ok(catalog) => {
             let (lock, install_state) = load_scope_for_badges(ctx);
-            let rows = rows_from_catalog(&catalog, lock.as_ref(), &install_state);
+            let rows = rows_from_catalog(&catalog, lock.as_ref(), &install_state, &ctx.roots);
             let n = rows.len();
             state.set_rows(rows);
             // Surface whether the browse window hit the cap so the row list
@@ -572,12 +579,17 @@ async fn reload_into(ctx: &TuiContext, state: &mut TuiState, force: bool) {
 
 /// Project a catalog into TUI rows, deriving each state from the scope's
 /// lock + install-state.
-fn rows_from_catalog(catalog: &Catalog, lock: Option<&GrimoireLock>, state: &InstallState) -> Vec<TuiRow> {
+fn rows_from_catalog(
+    catalog: &Catalog,
+    lock: Option<&GrimoireLock>,
+    state: &InstallState,
+    roots: &AnchorRoots,
+) -> Vec<TuiRow> {
     catalog
         .entries()
         .map(|e| {
             let kind = e.kind.clone().unwrap_or_else(|| "-".to_string());
-            let row_state = derive_row_state(&kind, &e.registry, &e.repository, lock, state);
+            let row_state = derive_row_state(&kind, &e.registry, &e.repository, lock, state, roots);
             TuiRow {
                 kind,
                 repo: e.repo(),
@@ -605,11 +617,12 @@ fn derive_row_state(
     repository: &str,
     lock: Option<&GrimoireLock>,
     state: &InstallState,
+    roots: &AnchorRoots,
 ) -> ArtifactState {
     if row_kind(kind) == ArtifactKind::Bundle {
-        derive_bundle_state(&format!("{registry}/{repository}"), lock, state)
+        derive_bundle_state(&format!("{registry}/{repository}"), lock, state, roots)
     } else {
-        derive_artifact_state(registry, repository, lock, state)
+        derive_artifact_state(registry, repository, lock, state, roots)
     }
 }
 
@@ -617,7 +630,12 @@ fn derive_row_state(
 /// lock (matched by provenance repo): worst-of aggregation so one broken
 /// member surfaces on the bundle row. No members in the lock ⇒ the bundle
 /// is not installed.
-fn derive_bundle_state(bundle_repo: &str, lock: Option<&GrimoireLock>, state: &InstallState) -> ArtifactState {
+fn derive_bundle_state(
+    bundle_repo: &str,
+    lock: Option<&GrimoireLock>,
+    state: &InstallState,
+    roots: &AnchorRoots,
+) -> ArtifactState {
     let Some(lock) = lock else {
         return ArtifactState::NotInstalled;
     };
@@ -634,7 +652,7 @@ fn derive_bundle_state(bundle_repo: &str, lock: Option<&GrimoireLock>, state: &I
     }
     lock.iter_artifacts()
         .filter(|a| a.bundles.iter().any(|b| b.repo == bundle_repo))
-        .map(|m| derive_artifact_state(m.pinned.registry(), m.pinned.repository(), Some(lock), state))
+        .map(|m| derive_artifact_state(m.pinned.registry(), m.pinned.repository(), Some(lock), state, roots))
         .max_by_key(|s| rank(*s))
         .unwrap_or(ArtifactState::NotInstalled)
 }
@@ -653,6 +671,7 @@ fn derive_artifact_state(
     repository: &str,
     lock: Option<&GrimoireLock>,
     state: &InstallState,
+    roots: &AnchorRoots,
 ) -> ArtifactState {
     let Some(locked) = lock.and_then(|l| {
         l.iter_artifacts()
@@ -667,12 +686,18 @@ fn derive_artifact_state(
         return ArtifactState::NotInstalled;
     };
 
-    let outputs = record.client_outputs();
-    if outputs.iter().any(|o| !o.target.exists()) {
-        return ArtifactState::IntegrityMissing;
+    // A read-only derivation never `?`-propagates an `AnchorError`: an
+    // unresolvable anchored output (corrupt `relative`, anchor root absent
+    // here) surfaces as IntegrityMissing, distinct from never-installed.
+    for out in &record.outputs {
+        match out.resolved_target(roots) {
+            Ok(resolved) if !resolved.exists() => return ArtifactState::IntegrityMissing,
+            Ok(_) => {}
+            Err(_) => return ArtifactState::IntegrityMissing,
+        }
     }
-    for out in &outputs {
-        match out.current_hash() {
+    for out in &record.outputs {
+        match out.current_hash(roots) {
             Ok(actual) if actual != out.content_hash => return ArtifactState::Modified,
             Ok(_) => {}
             Err(_) => return ArtifactState::IntegrityMissing,
@@ -692,15 +717,39 @@ fn recompute_states(ctx: &TuiContext, state: &mut TuiState) {
     let (lock, install_state) = load_scope_for_badges(ctx);
     for r in &mut state.rows {
         if let Some((registry, repository)) = split_repo(&r.repo) {
-            r.state = derive_row_state(&r.kind, &registry, &repository, lock.as_ref(), &install_state);
+            r.state = derive_row_state(
+                &r.kind,
+                &registry,
+                &repository,
+                lock.as_ref(),
+                &install_state,
+                &ctx.roots,
+            );
         }
+    }
+}
+
+/// Load the active scope's install state, routing through the scope-aware
+/// seam so a project legacy file (or a V1 global file) migrates to anchored
+/// outputs in memory (no disk write on the read path). Project scope uses
+/// the workspace + the legacy `$GRIM_HOME/state/projects/<sha>.json`
+/// fallback; global scope threads the vendor roots.
+///
+/// # Errors
+///
+/// An [`std::io::Error`] for a read failure; a corrupt or unknown-version
+/// file is surfaced as [`std::io::ErrorKind::InvalidData`].
+fn load_state(ctx: &TuiContext) -> io::Result<InstallState> {
+    match ctx.scope {
+        ConfigScope::Project => InstallState::load_project(&ctx.workspace, &ctx.roots.grim_home, &ctx.config_path),
+        ConfigScope::Global => InstallState::load_global(&ctx.state_path, &ctx.roots),
     }
 }
 
 /// Best-effort scope load for badges (advisory — never fails the TUI).
 fn load_scope_for_badges(ctx: &TuiContext) -> (Option<GrimoireLock>, InstallState) {
     let lock = lock_io::load(&ctx.lock_path).ok();
-    let state = InstallState::load(&ctx.state_path).unwrap_or_else(|_| InstallState::empty(&ctx.state_path));
+    let state = load_state(ctx).unwrap_or_else(|_| InstallState::empty(&ctx.state_path));
     (lock, state)
 }
 
@@ -836,15 +885,14 @@ fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
         _ => vec![(kind, name.clone())],
     };
 
-    let mut install_state =
-        InstallState::load(&ctx.state_path).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
+    let mut install_state = load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
     let mut involved_clients: Vec<crate::install::client_target::ClientTarget> = Vec::new();
     let mut any_removed = false;
     for (target_kind, target_name) in &targets {
         for client in install_state
             .get(*target_kind, target_name)
             .map(|r| {
-                r.client_outputs()
+                r.outputs
                     .iter()
                     .filter_map(|c| c.client.parse().ok())
                     .collect::<Vec<crate::install::client_target::ClientTarget>>()
@@ -855,14 +903,17 @@ fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
                 involved_clients.push(client);
             }
         }
-        let result = crate::install::uninstall::uninstall(&mut install_state, *target_kind, target_name)
+        let result = crate::install::uninstall::uninstall(&mut install_state, *target_kind, target_name, &ctx.roots)
             .map_err(|e| anyhow::anyhow!("uninstall failed: {e}"))?;
         any_removed |= result.outcome == crate::install::uninstall::UninstallOutcome::Removed;
     }
     if any_removed {
+        // The single `persist` seam handles project-scope dir creation, the
+        // atomic write, and the conditional legacy-file reap (including the
+        // lossy-migration guard that was previously missing here).
         install_state
-            .save()
-            .map_err(|e| anyhow::anyhow!("install-state save failed: {e}"))?;
+            .persist(ctx.scope, &ctx.workspace, &ctx.roots.grim_home, &ctx.config_path)
+            .map_err(|e| anyhow::Error::new(e).context("install-state persist failed"))?;
     }
     // Converge vendor-owned config for every client the removed record
     // carried, mirroring `command::uninstall`. `with_context` keeps the
@@ -952,8 +1003,7 @@ async fn perform(ctx: &TuiContext, row: &TuiRow, is_update: bool) -> anyhow::Res
 
     let target = InstallTarget::parse(&ctx.workspace, ctx.scope, &[], &ctx.clients_default)
         .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
-    let mut install_state =
-        InstallState::load(&ctx.state_path).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
+    let mut install_state = load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
     let materializer = DefaultMaterializer;
 
     // `update` forces re-materialization (rolling-release contract),
@@ -964,12 +1014,16 @@ async fn perform(ctx: &TuiContext, row: &TuiRow, is_update: bool) -> anyhow::Res
         &materializer,
         &target,
         &mut install_state,
+        &ctx.roots,
         is_update,
     )
     .await;
+    // The single `persist` seam handles project-scope dir creation, the
+    // atomic write, and the conditional legacy-file reap (including the
+    // lossy-migration guard that was previously missing here).
     install_state
-        .save()
-        .map_err(|e| anyhow::anyhow!("install-state save failed: {e}"))?;
+        .persist(ctx.scope, &ctx.workspace, &ctx.roots.grim_home, &ctx.config_path)
+        .map_err(|e| anyhow::Error::new(e).context("install-state persist failed"))?;
 
     // Converge vendor-owned config on the new state, mirroring
     // `command::install`. `with_context` keeps the `io::Error` source
@@ -1429,6 +1483,17 @@ mod tests {
         Arc::new(reg)
     }
 
+    /// Build a minimal `AnchorRoots` for tests rooted at `workspace`.
+    fn test_roots(workspace: &std::path::Path) -> AnchorRoots {
+        AnchorRoots {
+            workspace: workspace.to_path_buf(),
+            grim_home: workspace.to_path_buf(),
+            claude_root: None,
+            copilot_root: None,
+            opencode_skills: None,
+        }
+    }
+
     /// A project-scope [`TuiContext`] rooted at `workspace`, wired to
     /// `access` and targeting the claude client.
     fn test_ctx(workspace: &std::path::Path, access: Arc<dyn OciAccess>) -> TuiContext {
@@ -1443,6 +1508,7 @@ mod tests {
             lock_path: workspace.join("grimoire.lock"),
             state_path: workspace.join("install-state.json"),
             config_path: workspace.join("grimoire.toml"),
+            roots: test_roots(workspace),
             clients_default: vec!["claude".to_string()],
             clients_selected: Vec::new(),
             scope_label: "project".to_string(),
@@ -1505,7 +1571,8 @@ mod tests {
                 "localhost:5050",
                 "grimoire/bundles/starter-pack",
                 lock.as_ref(),
-                &install_state
+                &install_state,
+                &ctx.roots,
             ),
             ArtifactState::Installed
         );
@@ -1546,7 +1613,8 @@ mod tests {
                 "localhost:5050",
                 "grimoire/bundles/starter-pack",
                 lock.as_ref(),
-                &install_state
+                &install_state,
+                &ctx.roots,
             ),
             ArtifactState::NotInstalled
         );
@@ -1657,15 +1725,22 @@ mod tests {
         // reports NotInstalled (no install record) rather than hiding the
         // member entirely.
         let state = InstallState::empty(std::path::Path::new("/nonexistent"));
+        let stub_roots = AnchorRoots {
+            workspace: std::path::PathBuf::from("/nonexistent"),
+            grim_home: std::path::PathBuf::from("/nonexistent"),
+            claude_root: None,
+            copilot_root: None,
+            opencode_skills: None,
+        };
         assert_eq!(
-            derive_bundle_state("r/bundles/ai-pack", Some(&lock), &state),
+            derive_bundle_state("r/bundles/ai-pack", Some(&lock), &state, &stub_roots),
             ArtifactState::NotInstalled,
             "bundle with only an agent member derives NotInstalled when not installed"
         );
 
         // A bundle with no matching provenance in the lock is NotInstalled.
         assert_eq!(
-            derive_bundle_state("r/bundles/other", Some(&lock), &state),
+            derive_bundle_state("r/bundles/other", Some(&lock), &state, &stub_roots),
             ArtifactState::NotInstalled,
             "bundle with no matching provenance is NotInstalled"
         );

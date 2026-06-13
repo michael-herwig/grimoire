@@ -84,12 +84,12 @@ under `test/`. Rust edition 2024.
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `GRIM_HOME` | Root data directory (content store, catalog, global config, install state). Global-scope client output lands in vendor-native dirs, not here — see subsystem-file-structure.md | `~/.grimoire` |
+| `GRIM_HOME` | Root data directory (content store, catalog, global config, global-scope install state at `$GRIM_HOME/state/global.json`). Project-scope install state lives at `<workspace>/.grimoire/state.json`. Global-scope client output lands in vendor-native dirs — see subsystem-file-structure.md | `~/.grimoire` |
 | `GRIM_DEFAULT_REGISTRY` | Default registry for short identifiers. Registry precedence: `--registry` flag > `GRIM_DEFAULT_REGISTRY` > project config `[options].default_registry` > global config > built-in fallback `grim.ocx.sh` | (unset) |
 | `GRIM_OFFLINE` | Disable all network access (cache-only; default is always-fresh online resolution) | false |
 | `DOCKER_CONFIG` | Directory holding the docker-compatible `config.json` read/written by `grim login`/`logout` (and the credential read path) | `~/.docker` |
-| `OPENCODE_CONFIG` | OpenCode config file that grim edits for global-scope rule registration (vendor variable, honored read/write). When unset, grim falls back to `$XDG_CONFIG_HOME/opencode/opencode.json` (or `~/.config/opencode/opencode.json` if `XDG_CONFIG_HOME` is also unset). Config-file-only — no effect on skill paths | (unset) |
-| `CLAUDE_CONFIG_DIR`, `COPILOT_HOME`, `OPENCODE_CONFIG_DIR` | Vendor config-dir overrides (honored read-only). Global-scope installs follow them: `CLAUDE_CONFIG_DIR` replaces `~/.claude` (skills + rules), `COPILOT_HOME` replaces `~/.copilot` (skills), `OPENCODE_CONFIG_DIR` is the preferred install target over the XDG default for OpenCode skills (additive — OpenCode scans both). They also drive global-scope client *detection* — a client counts as present when its (possibly overridden) native root exists. Details → subsystem-file-structure.md | (unset) |
+| `OPENCODE_CONFIG` | OpenCode config file that grim edits for global-scope rule registration (vendor variable, honored read/write). When unset, grim falls back to `$XDG_CONFIG_HOME/opencode/opencode.json` (or `~/.config/opencode/opencode.json` if `XDG_CONFIG_HOME` is also unset). Config-file-only — no effect on skill/agent paths | (unset) |
+| `CLAUDE_CONFIG_DIR`, `COPILOT_HOME`, `OPENCODE_CONFIG_DIR` | Vendor config-dir overrides (honored read-only). Global-scope installs follow them: `CLAUDE_CONFIG_DIR` replaces `~/.claude` (skills, rules, and agents), `COPILOT_HOME` replaces `~/.copilot` (skills and agents), `OPENCODE_CONFIG_DIR` is the preferred install target over the XDG default for OpenCode skills and agents (additive — OpenCode scans both). They also drive global-scope client *detection* — a client counts as present when its (possibly overridden) native root exists. Details → subsystem-file-structure.md | (unset) |
 
 ## First-Party Catalog
 

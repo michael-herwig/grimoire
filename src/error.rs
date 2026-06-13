@@ -14,6 +14,7 @@ use crate::cli::exit_code::ExitCode;
 use crate::command::command_error::CommandError;
 use crate::config::config_error::{ConfigError, ConfigErrorKind};
 use crate::install::install_error::{InstallError, InstallErrorKind};
+use crate::install::path_anchor::AnchorError;
 use crate::lock::lock_error::{LockError, LockErrorKind};
 use crate::oci::access::error::{AccessError, AccessErrorKind};
 use crate::oci::digest::error::DigestError;
@@ -55,6 +56,9 @@ pub enum Error {
     Install(#[from] InstallError),
 
     #[error(transparent)]
+    Anchor(#[from] AnchorError),
+
+    #[error(transparent)]
     Skill(#[from] SkillError),
 
     #[error(transparent)]
@@ -90,6 +94,7 @@ pub fn classify_error(err: &anyhow::Error) -> ExitCode {
                 Error::Access(ae) => classify_access(ae),
                 Error::Resolve(re) => classify_resolve(re),
                 Error::Install(ie) => classify_install(ie),
+                Error::Anchor(ae) => classify_anchor(ae),
                 Error::Skill(se) => classify_skill(se),
                 Error::Release(re) => classify_release(re),
                 Error::Catalog(ce) => classify_catalog(ce),
@@ -169,6 +174,17 @@ fn classify_install(err: &InstallError) -> ExitCode {
         | InstallErrorKind::MaterializeFailed(_) => ExitCode::DataError,
         InstallErrorKind::TargetIo { source, .. } | InstallErrorKind::ConfigSync { source, .. } => classify_io(source),
         InstallErrorKind::UnsupportedClient(_) => ExitCode::ConfigError,
+    }
+}
+
+/// Map an anchor-tier error to an exit code. A traversal/escape is bad
+/// on-disk state data (65); an I/O failure is I/O (74); an unclassifiable or
+/// unresolvable anchor falls through to the generic failure (1).
+fn classify_anchor(err: &AnchorError) -> ExitCode {
+    match err {
+        AnchorError::TraversalAttempt { .. } | AnchorError::EscapedAnchor { .. } => ExitCode::DataError,
+        AnchorError::Io { .. } => ExitCode::IoError,
+        AnchorError::UnknownAnchor { .. } | AnchorError::AnchorRootAbsent { .. } => ExitCode::Failure,
     }
 }
 
@@ -370,6 +386,50 @@ mod tests {
         ];
         for (kind, expected) in cases {
             let err: anyhow::Error = Error::from(InstallError::without_reference(kind)).into();
+            assert_eq!(classify_error(&err), expected);
+        }
+    }
+
+    #[test]
+    fn anchor_errors_classify_per_kind() {
+        use crate::install::path_anchor::{AnchorError, PathAnchor};
+
+        let cases = [
+            (
+                AnchorError::TraversalAttempt {
+                    relative: "../escape".to_string(),
+                },
+                ExitCode::DataError,
+            ),
+            (
+                AnchorError::EscapedAnchor {
+                    anchor: PathAnchor::Workspace,
+                    resolved: std::path::PathBuf::from("/outside"),
+                },
+                ExitCode::DataError,
+            ),
+            (
+                AnchorError::Io {
+                    path: std::path::PathBuf::from("/x"),
+                    source: std::io::Error::other("disk full"),
+                },
+                ExitCode::IoError,
+            ),
+            (
+                AnchorError::UnknownAnchor {
+                    path: std::path::PathBuf::from("/other/path"),
+                },
+                ExitCode::Failure,
+            ),
+            (
+                AnchorError::AnchorRootAbsent {
+                    anchor: PathAnchor::ClaudeRoot,
+                },
+                ExitCode::Failure,
+            ),
+        ];
+        for (inner, expected) in cases {
+            let err: anyhow::Error = Error::from(inner).into();
             assert_eq!(classify_error(&err), expected);
         }
     }

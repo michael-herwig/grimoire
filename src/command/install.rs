@@ -16,7 +16,6 @@ use crate::api::install_report::{InstallEntry, InstallReport};
 use crate::cli::exit_code::ExitCode;
 use crate::command::command_error::CommandError;
 use crate::context::Context;
-use crate::install::install_state::InstallState;
 use crate::install::installer::{ArtifactInstall, InstallOutcome, install_all};
 use crate::install::materializer::DefaultMaterializer;
 use crate::install::target::InstallTarget;
@@ -71,14 +70,37 @@ pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallRe
         &scope.options.clients,
     ))?;
     let access = super::access_seam(ctx)?;
-    let mut state = super::grim(InstallState::load(&scope.state_path).map_err(|e| state_io(&scope.state_path, e)))?;
+    let mut state = super::grim(scope_resolution::load_state(&scope).map_err(|e| state_io(&scope.state_path, e)))?;
     let materializer = DefaultMaterializer;
 
-    let outcomes = install_all(&lock, &access, &materializer, &target, &mut state, args.force).await;
+    let outcomes = install_all(
+        &lock,
+        &access,
+        &materializer,
+        &target,
+        &mut state,
+        &scope.roots,
+        args.force,
+    )
+    .await;
 
     // Persist whatever progress was made (some artifacts may have
     // installed before another failed) before surfacing the first error.
-    super::grim(state.save().map_err(|e| state_io(&scope.state_path, e)))?;
+    // The single `persist` seam handles project-scope dir creation, the
+    // atomic write, and the conditional legacy-file reap in one place.
+    super::grim(
+        state
+            .persist(
+                scope.scope,
+                &scope.workspace,
+                &scope.roots.grim_home,
+                &scope.config_path,
+            )
+            .map_err(|e| match e {
+                crate::install::install_state::PersistError::EnsureDir { path, source }
+                | crate::install::install_state::PersistError::Save { path, source } => state_io(&path, source),
+            }),
+    )?;
 
     // Converge vendor-owned config on the new state (e.g. OpenCode's
     // managed `instructions` glob) for every involved client.

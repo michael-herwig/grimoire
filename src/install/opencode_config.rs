@@ -129,7 +129,7 @@ pub fn sync_for_state(state: &InstallState, workspace: &Path, scope: ConfigScope
     let opencode = ClientTarget::OpenCode.to_string();
     let want = state
         .iter_records()
-        .any(|r| r.kind == ArtifactKind::Rule && r.client_outputs().iter().any(|c| c.client == opencode));
+        .any(|r| r.kind == ArtifactKind::Rule && r.outputs.iter().any(|c| c.client == opencode));
     // The managed rules dir mirrors the managed glob: when the last
     // OpenCode rule for this scope is gone, reap the now-empty
     // `.opencode/rules/` directory (it exists only because a rule install
@@ -480,7 +480,8 @@ mod tests {
 
     #[test]
     fn sync_for_state_adds_only_when_an_opencode_rule_is_recorded() {
-        use crate::install::install_state::{ClientRecord, InstallRecord};
+        use crate::install::install_state::{ClientOutput, InstallRecord};
+        use crate::install::path_anchor::{AnchoredPath, PathAnchor};
         use crate::oci::pinned_identifier::PinnedIdentifier;
         use crate::oci::{Digest, Identifier};
 
@@ -499,15 +500,17 @@ mod tests {
         );
         assert!(!ws.join("opencode.json").exists());
 
+        // Record an opencode rule using `outputs` (the V2 field; no denorm fields).
         state.record(InstallRecord {
             kind: ArtifactKind::Rule,
             name: "r".to_string(),
             pinned,
-            content_hash: Digest::Sha256("b".repeat(64)),
-            target: ws.join(".opencode/rules/r.md"),
-            clients: vec![ClientRecord {
+            outputs: vec![ClientOutput {
                 client: "opencode".to_string(),
-                target: ws.join(".opencode/rules/r.md"),
+                target: AnchoredPath {
+                    anchor: PathAnchor::Workspace,
+                    relative: ".opencode/rules/r.md".to_string(),
+                },
                 content_hash: Digest::Sha256("b".repeat(64)),
                 support_dir: None,
             }],

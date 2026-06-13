@@ -19,6 +19,7 @@ use crate::config::project_config::ProjectConfig;
 use crate::config::scope::ConfigScope;
 use crate::context::Context;
 use crate::install::install_state::InstallState;
+use crate::install::path_anchor::AnchorRoots;
 
 /// A resolved scope: everything the lock/install/update/status commands
 /// need to operate on one declaration.
@@ -37,6 +38,9 @@ pub struct ResolvedScope {
     pub state_path: PathBuf,
     /// The workspace root install targets are rooted at.
     pub workspace: PathBuf,
+    /// Every anchor root resolved once for this scope, so all consumers
+    /// resolve anchored install paths from one source.
+    pub roots: AnchorRoots,
 }
 
 /// Resolve the scope from the global/config flags.
@@ -53,15 +57,18 @@ pub fn resolve(ctx: &Context, global: bool, config: Option<&Path>) -> Result<Res
     if global {
         let config_path = paths.global_config();
         let cfg = GlobalConfig::load(&config_path)?;
+        // Global artifacts install under `$GRIM_HOME` so a global
+        // declaration is client config that follows the user.
+        let workspace = paths.root().to_path_buf();
+        let roots = AnchorRoots::resolve(workspace.clone(), ctx);
         Ok(ResolvedScope {
             scope: ConfigScope::Global,
             set: cfg.set,
             options: cfg.options,
             lock_path: paths.global_lock(),
             state_path: InstallState::global_path(&paths.state_dir()),
-            // Global artifacts install under `$GRIM_HOME` so a global
-            // declaration is client config that follows the user.
-            workspace: paths.root().to_path_buf(),
+            workspace,
+            roots,
             config_path,
         })
     } else {
@@ -72,16 +79,42 @@ pub fn resolve(ctx: &Context, global: bool, config: Option<&Path>) -> Result<Res
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
-        let canonical = std::fs::canonicalize(&config_path).unwrap_or_else(|_| config_path.clone());
+        let roots = AnchorRoots::resolve(workspace.clone(), ctx);
         Ok(ResolvedScope {
             scope: ConfigScope::Project,
             set: discovered.config.set,
             options: discovered.config.options,
-            state_path: InstallState::project_path(&paths.state_dir(), &canonical),
+            state_path: InstallState::project_state_path(&workspace),
             lock_path,
             workspace,
+            roots,
             config_path,
         })
+    }
+}
+
+/// Load the install state for a resolved scope, routing project scope
+/// through the [`InstallState::load_project`] legacy fallback (it anchors to
+/// the workspace and falls back to the pre-relocation
+/// `$GRIM_HOME/state/projects/<sha>.json` file) and global scope through
+/// [`InstallState::load_global`] (it threads the vendor anchor roots so a
+/// legacy V1 `global.json` converts to anchored outputs in memory).
+///
+/// This is the single seam every consumer must use instead of bare
+/// [`InstallState::load`]: bare `load` cannot anchor a V1 file (no roots),
+/// and the project arm needs the legacy fallback so a first post-upgrade read
+/// sees migrated state.
+///
+/// # Errors
+///
+/// An [`std::io::Error`] for a read failure; a corrupt or unknown-version
+/// file is surfaced as [`std::io::ErrorKind::InvalidData`].
+pub fn load_state(scope: &ResolvedScope) -> std::io::Result<InstallState> {
+    match scope.scope {
+        ConfigScope::Project => {
+            InstallState::load_project(&scope.workspace, &scope.roots.grim_home, &scope.config_path)
+        }
+        ConfigScope::Global => InstallState::load_global(&scope.state_path, &scope.roots),
     }
 }
 

@@ -19,23 +19,68 @@
 //! "remove an installed artifact" logic lives in exactly one place.
 
 use std::collections::HashSet;
+use std::io;
 use std::path::PathBuf;
 
 use crate::install::install_state::InstallState;
-use crate::install::uninstall::uninstall;
+use crate::install::path_anchor::{AnchorError, AnchorRoots};
+use crate::install::uninstall::{UninstallError, uninstall};
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::oci::{ArtifactKind, Digest};
 
-/// An I/O failure while pruning, carrying the artifact path the failing
-/// operation acted on so the caller can attribute the error precisely
-/// (a bare [`std::io::Error`] from hashing or deletion does not embed the
-/// path on stable Rust).
-#[derive(Debug)]
-pub struct PruneError {
-    /// The artifact path the failing hash/delete acted on.
-    pub path: PathBuf,
-    /// The underlying I/O error.
-    pub source: std::io::Error,
+/// A failure while pruning.
+///
+/// The `Anchor` variant preserves the `AnchorError` identity so a
+/// **security-class** anchor failure (a corrupt stored `relative` carrying
+/// `../`, or a symlink that escapes its anchor root) propagates and maps to
+/// `DataError(65)` via `classify_error`, rather than silently flattening into
+/// an I/O error (`IoError(74)`) — the exit-code contract from ARCH-4/SC-03.
+/// A resolution-absence failure (`AnchorRootAbsent`) is NOT surfaced here:
+/// such a record is treated as an unresolvable orphan and reaped (see
+/// [`is_modified`] and the [`uninstall`] interception in [`prune_orphans`]).
+///
+/// `thiserror`, lowercase no-period messages (`quality-rust-errors.md`),
+/// `#[non_exhaustive]` (error-enum convention).
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum PruneError {
+    /// A security-class anchor failure (path traversal or symlink escape) in a
+    /// stored anchored path. Carries the artifact path for error attribution.
+    #[error("path traversal in stored install state at '{path}'")]
+    Anchor {
+        /// The artifact path context for reporting.
+        path: PathBuf,
+        /// The underlying anchor error.
+        #[source]
+        source: AnchorError,
+    },
+    /// An I/O failure while hashing or deleting, carrying the artifact path
+    /// the failing operation acted on so the caller can attribute it precisely
+    /// (a bare [`io::Error`] does not embed the path on stable Rust).
+    #[error("I/O error at '{path}'")]
+    Io {
+        /// The artifact path the failing hash/delete acted on.
+        path: PathBuf,
+        /// The underlying I/O error.
+        #[source]
+        source: io::Error,
+    },
+}
+
+/// Whether an [`AnchorError`] is **security-class** — a deliberate traversal
+/// or symlink escape that must be FATAL even on the prune path. These
+/// propagate (→ `DataError(65)`) and are NEVER reaped.
+///
+/// `AnchorRootAbsent` (the anchor root is unresolvable on this machine) and
+/// plain I/O are *resolution-absence*, not tampering: such a record is an
+/// unresolvable orphan, safe to reap. `AnchorError` is `#[non_exhaustive]`;
+/// an unknown future variant is treated as non-fatal/absorb (matching the
+/// read-only leniency), so only the two named security variants are fatal.
+fn is_security_class(err: &AnchorError) -> bool {
+    matches!(
+        err,
+        AnchorError::TraversalAttempt { .. } | AnchorError::EscapedAnchor { .. }
+    )
 }
 
 /// What [`prune_orphans`] did to one orphaned artifact.
@@ -91,6 +136,7 @@ pub struct PrunedArtifact {
 pub fn prune_orphans(
     state: &mut InstallState,
     lock: &GrimoireLock,
+    roots: &AnchorRoots,
     force: bool,
 ) -> Result<Vec<PrunedArtifact>, PruneError> {
     // Keys the lock still declares; everything recorded but not here is an
@@ -123,8 +169,15 @@ pub fn prune_orphans(
             kind: r.kind,
             name: r.name.clone(),
             old: r.pinned.digest(),
-            target: r.target.clone(),
-            clients: r.client_outputs().iter().map(|c| c.client.clone()).collect(),
+            // Best-effort path for error attribution: the first output's
+            // resolved target, falling back to the workspace root when the
+            // record is unresolvable.
+            target: r
+                .outputs
+                .first()
+                .and_then(|o| o.resolved_target(roots).ok())
+                .unwrap_or_else(|| roots.workspace.clone()),
+            clients: r.outputs.iter().map(|c| c.client.clone()).collect(),
         })
         .collect();
 
@@ -139,7 +192,7 @@ pub fn prune_orphans(
     {
         // Integrity gate: a locally modified orphan is preserved unless
         // forced. Deleting it would discard the user's edits.
-        if !force && is_modified(state, kind, &name)? {
+        if !force && is_modified(state, kind, &name, roots)? {
             acted.push(PrunedArtifact {
                 kind,
                 name,
@@ -151,16 +204,36 @@ pub fn prune_orphans(
             continue;
         }
 
-        let result = uninstall(state, kind, &name).map_err(|source| PruneError {
-            path: target.clone(),
-            source,
-        })?;
+        // A resolution-absence AnchorError from uninstall (e.g. the anchor
+        // root is unresolvable on this machine) means we cannot resolve the
+        // target to delete it, but the record itself is still
+        // garbage-collectable: warn + drop the record, treating the artifact
+        // as absent/orphaned (consistent with the is_modified contract and the
+        // status Missing semantic — §6/T10, ARCH-4/SC-03).
+        // A SECURITY-CLASS AnchorError (tampered `../` relative or symlink
+        // escape) is FATAL — it propagates as PruneError::Anchor (→
+        // DataError(65)) and is NEVER reaped. A genuine I/O error
+        // (PruneError::Io) still propagates too.
+        let (outcome, removed) = match uninstall(state, kind, &name, roots) {
+            Ok(result) => (PruneOutcome::Pruned, result.removed),
+            Err(UninstallError::Anchor(anchor_err)) if is_security_class(&anchor_err) => {
+                return Err(prune_error(target.clone(), UninstallError::Anchor(anchor_err)));
+            }
+            Err(UninstallError::Anchor(anchor_err)) => {
+                tracing::warn!(
+                    "unresolvable anchor for orphan '{name}' during prune; dropping record without file delete: {anchor_err}"
+                );
+                state.remove(kind, &name);
+                (PruneOutcome::Pruned, Vec::new())
+            }
+            Err(other) => return Err(prune_error(target.clone(), other)),
+        };
         acted.push(PrunedArtifact {
             kind,
             name,
             old,
-            outcome: PruneOutcome::Pruned,
-            removed: result.removed,
+            outcome,
+            removed,
             clients,
         });
     }
@@ -171,16 +244,51 @@ pub fn prune_orphans(
 /// Whether any recorded client output for `(kind, name)` that is still on
 /// disk has drifted from its recorded content hash. An absent output is not
 /// "modified" — it is simply gone, and safe to prune.
-fn is_modified(state: &InstallState, kind: ArtifactKind, name: &str) -> Result<bool, PruneError> {
+///
+/// An output unresolvable for a *resolution-absence* reason (the anchor root
+/// is absent on this machine, or plain I/O) is treated as **absent/orphaned**
+/// (safe to reap) with a `tracing::warn!`, consistent with status `Missing`
+/// — never silently retained. A **security-class** `AnchorError` (a tampered
+/// `../` relative or a symlink that escapes its anchor root) is FATAL: it
+/// propagates as [`PruneError::Anchor`] (→ `DataError(65)`) and is never
+/// reaped — ARCH-4/SC-03.
+///
+/// # Errors
+///
+/// [`PruneError::Anchor`] when resolving/hashing an output hits a
+/// security-class anchor failure.
+fn is_modified(state: &InstallState, kind: ArtifactKind, name: &str, roots: &AnchorRoots) -> Result<bool, PruneError> {
     let Some(record) = state.get(kind, name) else {
         return Ok(false);
     };
-    for out in record.client_outputs() {
-        if out.target.exists() {
-            let actual = out.current_hash().map_err(|source| PruneError {
-                path: out.target.clone(),
-                source,
-            })?;
+    for out in &record.outputs {
+        let resolved = match out.resolved_target(roots) {
+            Ok(resolved) => resolved,
+            Err(e) if is_security_class(&e) => {
+                return Err(PruneError::Anchor {
+                    path: roots.workspace.clone(),
+                    source: e,
+                });
+            }
+            Err(e) => {
+                tracing::warn!("treating unresolvable orphan '{name}' as reapable: {e}");
+                return Ok(false);
+            }
+        };
+        if resolved.exists() {
+            let actual = match out.current_hash(roots) {
+                Ok(actual) => actual,
+                Err(e) if is_security_class(&e) => {
+                    return Err(PruneError::Anchor {
+                        path: resolved,
+                        source: e,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!("treating unresolvable orphan '{name}' as reapable: {e}");
+                    return Ok(false);
+                }
+            };
             if actual != out.content_hash {
                 return Ok(true);
             }
@@ -189,11 +297,25 @@ fn is_modified(state: &InstallState, kind: ArtifactKind, name: &str) -> Result<b
     Ok(false)
 }
 
+/// Map a [`UninstallError`] to a [`PruneError`] attributed to `path`.
+///
+/// A security-class [`AnchorError`] is preserved as [`PruneError::Anchor`]
+/// (not flattened to I/O) so `classify_error` maps a path-traversal to
+/// `DataError(65)` rather than `IoError(74)` — ARCH-4/SC-03. A plain I/O
+/// failure maps to [`PruneError::Io`].
+fn prune_error(path: PathBuf, source: UninstallError) -> PruneError {
+    match source {
+        UninstallError::Anchor(e) => PruneError::Anchor { path, source: e },
+        UninstallError::Io(io) => PruneError::Io { path, source: io },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::install::content_hash::content_hash;
-    use crate::install::install_state::{ClientRecord, InstallRecord};
+    use crate::install::install_state::{ClientOutput, InstallRecord};
+    use crate::install::path_anchor::{AnchorRoots, AnchoredPath, PathAnchor};
     use crate::lock::grimoire_lock::LockMetadata;
     use crate::lock::lock_version::LockVersion;
     use crate::lock::locked_artifact::LockedArtifact;
@@ -205,7 +327,19 @@ mod tests {
         PinnedIdentifier::try_from(id).unwrap()
     }
 
-    /// Materialize a single-file rule on disk and record it in `state`.
+    /// Build `AnchorRoots` rooted at `workspace`.
+    fn roots(workspace: &std::path::Path) -> AnchorRoots {
+        AnchorRoots {
+            workspace: workspace.to_path_buf(),
+            grim_home: workspace.to_path_buf(),
+            claude_root: None,
+            copilot_root: None,
+            opencode_skills: None,
+        }
+    }
+
+    /// Materialize a single-file rule on disk and record it in `state` using
+    /// `Workspace`-anchored `ClientOutput`.
     fn install_rule(state: &mut InstallState, root: &std::path::Path, name: &str) -> std::path::PathBuf {
         let file = root.join(format!(".claude/rules/{name}.md"));
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -215,11 +349,12 @@ mod tests {
             kind: ArtifactKind::Rule,
             name: name.to_string(),
             pinned: pinned(name),
-            content_hash: hash.clone(),
-            target: file.clone(),
-            clients: vec![ClientRecord {
+            outputs: vec![ClientOutput {
                 client: "claude".to_string(),
-                target: file.clone(),
+                target: AnchoredPath {
+                    anchor: PathAnchor::Workspace,
+                    relative: format!(".claude/rules/{name}.md"),
+                },
                 content_hash: hash,
                 support_dir: None,
             }],
@@ -237,11 +372,12 @@ mod tests {
             kind: ArtifactKind::Skill,
             name: name.to_string(),
             pinned: pinned(name),
-            content_hash: hash.clone(),
-            target: dir.clone(),
-            clients: vec![ClientRecord {
+            outputs: vec![ClientOutput {
                 client: "claude".to_string(),
-                target: dir.clone(),
+                target: AnchoredPath {
+                    anchor: PathAnchor::Workspace,
+                    relative: format!(".claude/skills/{name}"),
+                },
                 content_hash: hash,
                 support_dir: None,
             }],
@@ -272,13 +408,15 @@ mod tests {
     #[test]
     fn prunes_clean_orphan_not_in_lock() {
         let dir = tempfile::tempdir().unwrap();
-        let mut state = InstallState::empty(&dir.path().join("state.json"));
-        let keep = install_rule(&mut state, dir.path(), "keep");
-        let drop = install_rule(&mut state, dir.path(), "drop");
+        let ws = dir.path();
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        let keep = install_rule(&mut state, ws, "keep");
+        let drop = install_rule(&mut state, ws, "drop");
 
         // Lock declares only "keep"; "drop" is an orphan.
         let lock = lock_of(vec![locked_rule("keep")]);
-        let acted = prune_orphans(&mut state, &lock, false).unwrap();
+        let roots = roots(ws);
+        let acted = prune_orphans(&mut state, &lock, &roots, false).unwrap();
 
         assert_eq!(acted.len(), 1);
         assert_eq!(acted[0].name, "drop");
@@ -292,13 +430,15 @@ mod tests {
     #[test]
     fn keeps_modified_orphan_without_force() {
         let dir = tempfile::tempdir().unwrap();
-        let mut state = InstallState::empty(&dir.path().join("state.json"));
-        let drop = install_rule(&mut state, dir.path(), "drop");
+        let ws = dir.path();
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        let drop = install_rule(&mut state, ws, "drop");
         // Hand-edit the orphan so its content drifts from the record.
         std::fs::write(&drop, b"locally edited\n").unwrap();
 
         let lock = lock_of(vec![]);
-        let acted = prune_orphans(&mut state, &lock, false).unwrap();
+        let roots = roots(ws);
+        let acted = prune_orphans(&mut state, &lock, &roots, false).unwrap();
 
         assert_eq!(acted.len(), 1);
         assert_eq!(acted[0].outcome, PruneOutcome::KeptModified);
@@ -313,12 +453,14 @@ mod tests {
     #[test]
     fn force_prunes_modified_orphan() {
         let dir = tempfile::tempdir().unwrap();
-        let mut state = InstallState::empty(&dir.path().join("state.json"));
-        let drop = install_rule(&mut state, dir.path(), "drop");
+        let ws = dir.path();
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        let drop = install_rule(&mut state, ws, "drop");
         std::fs::write(&drop, b"locally edited\n").unwrap();
 
         let lock = lock_of(vec![]);
-        let acted = prune_orphans(&mut state, &lock, true).unwrap();
+        let roots = roots(ws);
+        let acted = prune_orphans(&mut state, &lock, &roots, true).unwrap();
 
         assert_eq!(acted.len(), 1);
         assert_eq!(acted[0].outcome, PruneOutcome::Pruned);
@@ -329,22 +471,26 @@ mod tests {
     #[test]
     fn no_orphans_is_empty() {
         let dir = tempfile::tempdir().unwrap();
-        let mut state = InstallState::empty(&dir.path().join("state.json"));
-        install_rule(&mut state, dir.path(), "keep");
+        let ws = dir.path();
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        install_rule(&mut state, ws, "keep");
         let lock = lock_of(vec![locked_rule("keep")]);
-        let acted = prune_orphans(&mut state, &lock, false).unwrap();
+        let roots = roots(ws);
+        let acted = prune_orphans(&mut state, &lock, &roots, false).unwrap();
         assert!(acted.is_empty());
     }
 
     #[test]
     fn prunes_clean_skill_directory_orphan() {
         let dir = tempfile::tempdir().unwrap();
-        let mut state = InstallState::empty(&dir.path().join("state.json"));
-        let skill = install_skill(&mut state, dir.path(), "code-review");
+        let ws = dir.path();
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        let skill = install_skill(&mut state, ws, "code-review");
 
         // Lock declares nothing; the skill directory is an orphan.
         let lock = lock_of(vec![]);
-        let acted = prune_orphans(&mut state, &lock, false).unwrap();
+        let roots = roots(ws);
+        let acted = prune_orphans(&mut state, &lock, &roots, false).unwrap();
 
         assert_eq!(acted.len(), 1);
         assert_eq!(acted[0].outcome, PruneOutcome::Pruned);
@@ -355,13 +501,15 @@ mod tests {
     #[test]
     fn keeps_modified_skill_directory_orphan_without_force() {
         let dir = tempfile::tempdir().unwrap();
-        let mut state = InstallState::empty(&dir.path().join("state.json"));
-        let skill = install_skill(&mut state, dir.path(), "code-review");
+        let ws = dir.path();
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        let skill = install_skill(&mut state, ws, "code-review");
         // Edit a file inside the skill tree so the directory hash drifts.
         std::fs::write(skill.join("SKILL.md"), b"hand edited\n").unwrap();
 
         let lock = lock_of(vec![]);
-        let acted = prune_orphans(&mut state, &lock, false).unwrap();
+        let roots = roots(ws);
+        let acted = prune_orphans(&mut state, &lock, &roots, false).unwrap();
 
         assert_eq!(acted.len(), 1);
         assert_eq!(acted[0].outcome, PruneOutcome::KeptModified);
@@ -369,7 +517,7 @@ mod tests {
         assert!(state.get(ArtifactKind::Skill, "code-review").is_some());
 
         // --force prunes the modified skill tree.
-        let acted = prune_orphans(&mut state, &lock, true).unwrap();
+        let acted = prune_orphans(&mut state, &lock, &roots, true).unwrap();
         assert_eq!(acted[0].outcome, PruneOutcome::Pruned);
         assert!(!skill.exists());
     }
@@ -377,15 +525,137 @@ mod tests {
     #[test]
     fn already_gone_orphan_files_still_drop_record() {
         let dir = tempfile::tempdir().unwrap();
-        let mut state = InstallState::empty(&dir.path().join("state.json"));
-        let drop = install_rule(&mut state, dir.path(), "drop");
+        let ws = dir.path();
+        let mut state = InstallState::empty(&ws.join("state.json"));
+        let drop = install_rule(&mut state, ws, "drop");
         // Files vanished out from under us; the record must still be reaped.
         std::fs::remove_file(&drop).unwrap();
 
         let lock = lock_of(vec![]);
-        let acted = prune_orphans(&mut state, &lock, false).unwrap();
+        let roots = roots(ws);
+        let acted = prune_orphans(&mut state, &lock, &roots, false).unwrap();
         assert_eq!(acted.len(), 1);
         assert_eq!(acted[0].outcome, PruneOutcome::Pruned);
         assert!(state.get(ArtifactKind::Rule, "drop").is_none());
+    }
+
+    // §6/T10: a record that is unresolvable for a RESOLUTION-ABSENCE reason
+    // (the anchor root is unresolvable on this machine — AnchorRootAbsent) is
+    // treated as absent/orphaned (reapable) with a tracing::warn, never
+    // silently retained. The test verifies the contract: the orphan is dropped
+    // and prune_orphans returns Ok (the Err branch is falsifiable). A
+    // security-class AnchorError is covered separately below.
+    #[test]
+    fn unresolvable_record_treated_as_orphan_and_reaped() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let mut state = InstallState::empty(&ws.join("state.json"));
+
+        // Build a record anchored at ClaudeRoot, which resolves to None in the
+        // test `roots` (claude_root: None) → resolve() yields AnchorRootAbsent,
+        // a resolution-absence (NOT security-class) failure.
+        state.record(InstallRecord {
+            kind: ArtifactKind::Rule,
+            name: "absent-root".to_string(),
+            pinned: {
+                let id = Identifier::new_registry("absent-root", "localhost:5000")
+                    .clone_with_digest(Digest::Sha256("a".repeat(64)));
+                PinnedIdentifier::try_from(id).unwrap()
+            },
+            outputs: vec![ClientOutput {
+                client: "claude".to_string(),
+                target: AnchoredPath {
+                    anchor: PathAnchor::ClaudeRoot,
+                    relative: "rules/absent-root.md".to_string(),
+                },
+                content_hash: Digest::Sha256("d".repeat(64)),
+                support_dir: None,
+            }],
+        });
+
+        let lock = lock_of(vec![]); // not in lock → orphan
+        let roots = roots(ws); // claude_root is None
+        // is_modified() + the uninstall interception absorb AnchorRootAbsent →
+        // treat as absent → Pruned. prune_orphans MUST return Ok (the absence
+        // case is reaped, never an Err — so the Err branch here is falsifiable).
+        let acted = prune_orphans(&mut state, &lock, &roots, false)
+            .expect("AnchorRootAbsent must be absorbed → reaped; prune_orphans must return Ok");
+        // T10 contract: an absence-unresolvable record is reaped, never retained.
+        assert_eq!(acted.len(), 1, "unresolvable orphan must be reaped");
+        assert_eq!(acted[0].outcome, PruneOutcome::Pruned);
+        assert!(state.get(ArtifactKind::Rule, "absent-root").is_none());
+    }
+
+    // ARCH-4/SC-03 regression: a SECURITY-CLASS AnchorError (a tampered `../`
+    // relative → TraversalAttempt at resolve) is FATAL even on the prune path.
+    // It must NOT be reaped — prune_orphans must return Err(PruneError::Anchor),
+    // and applying the exact update.rs mapping closure must classify to
+    // DataError(65), not IoError(74). This drives the real flow (no bypass): a
+    // recorded orphan with a `../escape` relative goes through prune_orphans.
+    // The test fails if the security-class distinction is reverted (the error
+    // would be absorbed → Ok → the assertion on Err would fail).
+    #[test]
+    fn security_class_traversal_propagates_from_prune_to_data_error() {
+        use crate::cli::exit_code::ExitCode;
+        use crate::error::{Error, classify_error};
+
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let mut state = InstallState::empty(&ws.join("state.json"));
+
+        // Record an orphan whose stored target.relative is a traversal attempt.
+        // Layer 1 of resolve() rejects it with TraversalAttempt (security-class)
+        // WITHOUT touching the filesystem.
+        state.record(InstallRecord {
+            kind: ArtifactKind::Rule,
+            name: "evil".to_string(),
+            pinned: {
+                let id = Identifier::new_registry("evil", "localhost:5000")
+                    .clone_with_digest(Digest::Sha256("a".repeat(64)));
+                PinnedIdentifier::try_from(id).unwrap()
+            },
+            outputs: vec![ClientOutput {
+                client: "claude".to_string(),
+                target: AnchoredPath {
+                    anchor: PathAnchor::Workspace,
+                    relative: "../escape/target.md".to_string(),
+                },
+                content_hash: Digest::Sha256("d".repeat(64)),
+                support_dir: None,
+            }],
+        });
+
+        let lock = lock_of(vec![]); // not in lock → orphan
+        let roots = roots(ws);
+
+        // Drive the real flow: a security-class traversal must PROPAGATE, never
+        // be reaped.
+        let err = prune_orphans(&mut state, &lock, &roots, false)
+            .expect_err("a security-class TraversalAttempt must propagate, not be reaped");
+        assert!(
+            matches!(err, PruneError::Anchor { .. }),
+            "expected PruneError::Anchor, got {err:?}"
+        );
+        // The record must NOT have been dropped — a fatal error never reaps.
+        assert!(
+            state.get(ArtifactKind::Rule, "evil").is_some(),
+            "a security-class error must not reap the record"
+        );
+
+        // Apply the exact update.rs mapping closure and assert the exit code.
+        let top_err: anyhow::Error = match err {
+            PruneError::Anchor { source, .. } => Error::Anchor(source).into(),
+            PruneError::Io { path, source } => {
+                Error::from(crate::install::install_error::InstallError::without_reference(
+                    crate::install::install_error::InstallErrorKind::TargetIo { path, source },
+                ))
+                .into()
+            }
+        };
+        assert_eq!(
+            classify_error(&top_err),
+            ExitCode::DataError,
+            "a path-traversal through the prune path must classify as DataError(65), not IoError(74)"
+        );
     }
 }

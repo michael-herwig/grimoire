@@ -245,8 +245,9 @@ fn scope_root(workspace: &Path, scope: ConfigScope) -> PathBuf {
 /// Claude Code's user-level config root. `$CLAUDE_CONFIG_DIR` replaces the
 /// **entire** `~/.claude` tree when set — "every ~/.claude path … lives
 /// under that directory instead" (code.claude.com/docs/en/claude-directory)
-/// — so skills and rules both follow it; else `~/.claude`.
-fn global_root(config_dir_override: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
+/// — so skills and rules both follow it; else `~/.claude`. The
+/// [`PathAnchor`](super::path_anchor) `ClaudeRoot` anchor is rooted here.
+pub(crate) fn global_root(config_dir_override: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
     config_dir_override.or_else(|| home.map(|h| h.join(".claude")))
 }
 

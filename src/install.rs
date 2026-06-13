@@ -17,6 +17,7 @@ pub mod install_state;
 pub mod installer;
 pub mod materializer;
 pub mod opencode_config;
+pub mod path_anchor;
 pub mod prune;
 pub mod render;
 pub mod status_badge;
@@ -42,6 +43,8 @@ pub use materializer::{ArtifactMaterializer, DefaultMaterializer};
 #[allow(unused_imports)]
 pub use opencode_config::{InstructionsSync, sync_managed_instruction};
 #[allow(unused_imports)]
+pub use path_anchor::{AnchorError, AnchorRoots, AnchoredPath, PathAnchor};
+#[allow(unused_imports)]
 pub use prune::{PruneError, PruneOutcome, PrunedArtifact, prune_orphans};
 #[allow(unused_imports)]
 pub use render::{RenderError, RenderedSkill, project_skill, validate_namespaced_metadata};
@@ -50,4 +53,4 @@ pub use status_badge::{StatusBadge, derive_badge};
 #[allow(unused_imports)]
 pub use target::InstallTarget;
 #[allow(unused_imports)]
-pub use uninstall::{UninstallOutcome, UninstallResult, uninstall};
+pub use uninstall::{UninstallError, UninstallOutcome, UninstallResult, uninstall};

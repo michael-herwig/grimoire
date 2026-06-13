@@ -179,23 +179,26 @@ impl Vendor for CopilotVendor {
     }
 }
 
-/// Copilot CLI's personal skills dir. `$COPILOT_HOME` "replaces the entire
+/// Copilot CLI's personal config root. `$COPILOT_HOME` "replaces the entire
 /// ~/.copilot path" (docs.github.com → Copilot CLI config-dir reference),
-/// else `~/.copilot`. `$XDG_CONFIG_HOME` interplay is undocumented and
-/// inconsistent upstream (github/copilot-cli#1750) — not honored here.
+/// else `~/.copilot`. This is the bare native root — the [`PathAnchor`]
+/// (`super::path_anchor`) `CopilotRoot` anchor whose `skills/<name>`
+/// remainder is rooted here. `$XDG_CONFIG_HOME` interplay is undocumented
+/// and inconsistent upstream (github/copilot-cli#1750) — not honored here.
+pub(crate) fn global_native_root(copilot_home: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
+    copilot_home.or_else(|| home.map(|h| h.join(".copilot")))
+}
+
+/// Copilot CLI's personal skills dir: the native root + `skills/`.
 fn global_skills_root(copilot_home: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
-    copilot_home
-        .or_else(|| home.map(|h| h.join(".copilot")))
-        .map(|d| d.join("skills"))
+    global_native_root(copilot_home, home).map(|d| d.join("skills"))
 }
 
 /// Copilot CLI's personal agents dir — same resolution order as
 /// [`global_skills_root`], with the native `agents/` subdirectory
 /// (`~/.copilot/agents/` per the custom-agents reference).
 fn global_agents_root(copilot_home: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
-    copilot_home
-        .or_else(|| home.map(|h| h.join(".copilot")))
-        .map(|d| d.join("agents"))
+    global_native_root(copilot_home, home).map(|d| d.join("agents"))
 }
 
 #[cfg(test)]

@@ -18,6 +18,7 @@ use crate::api::status_report::{StatusEntry, StatusReport};
 use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
 use crate::install::install_state::InstallState;
+use crate::install::path_anchor::AnchorRoots;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
 use crate::lock::locked_artifact::LockedArtifact;
@@ -65,7 +66,9 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
 
     // A corrupt state file degrades to "nothing installed" for a
     // read-only report rather than failing the command (state is data).
-    let state = load_state_or_empty(&scope.state_path);
+    // Routes through the scope seam so a project legacy file (or a V1 global
+    // file) migrates in memory; any load failure degrades to empty.
+    let state = scope_resolution::load_state(&scope).unwrap_or_else(|_| InstallState::empty(&scope.state_path));
 
     let lock_matches_config =
         lock.as_ref().map(|l| l.metadata.declaration_hash.as_str()) == Some(scope.set.declaration_hash_cached());
@@ -96,7 +99,7 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
     let declared: Vec<ArtifactRef> = collect_declared(&scope);
     for decl in declared {
         let locked = lock.as_ref().and_then(|l| find_locked(l, decl.kind, &decl.name));
-        let state = derive_state(decl.kind, &decl.name, locked, &state, lock_matches_config);
+        let state = derive_state(decl.kind, &decl.name, locked, &state, &scope.roots, lock_matches_config);
         entries.push(StatusEntry {
             kind: decl.kind,
             name: decl.name,
@@ -112,7 +115,14 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
     // above.
     if let Some(l) = lock.as_ref() {
         for member in l.iter_artifacts().filter(|a| a.is_from_bundle()) {
-            let st = derive_state(member.kind, &member.name, Some(member), &state, lock_matches_config);
+            let st = derive_state(
+                member.kind,
+                &member.name,
+                Some(member),
+                &state,
+                &scope.roots,
+                lock_matches_config,
+            );
             // Every contributing bundle is listed (a shared member carries
             // multi-provenance), comma-joined in lock order.
             let repos: Vec<&str> = member.bundles.iter().map(|b| b.repo.as_str()).collect();
@@ -127,12 +137,6 @@ pub async fn run(ctx: &Context, args: &StatusArgs) -> anyhow::Result<(StatusRepo
     }
 
     Ok((StatusReport::new(entries), ExitCode::Success))
-}
-
-/// Load the install state, or an empty state if the file is absent or
-/// corrupt (a read-only report must not fail on store damage).
-fn load_state_or_empty(path: &std::path::Path) -> InstallState {
-    InstallState::load(path).unwrap_or_else(|_| InstallState::empty(path))
 }
 
 /// Every declared artifact (skills, then rules, then agents) as a reference.
@@ -178,6 +182,7 @@ fn derive_state(
     name: &str,
     locked: Option<&LockedArtifact>,
     state: &InstallState,
+    roots: &AnchorRoots,
     lock_matches_config: bool,
 ) -> ArtifactStatus {
     if !lock_matches_config {
@@ -189,18 +194,23 @@ fn derive_state(
     let Some(record) = state.get(kind, name) else {
         return ArtifactStatus::Missing;
     };
-    let outputs = record.client_outputs();
-    // Any missing client output ⇒ the artifact is not fully installed.
-    if outputs.iter().any(|o| !o.target.exists()) {
-        return ArtifactStatus::Missing;
+    // An unresolvable anchored target (corrupt/tampered `relative`, or an
+    // anchor root absent on this machine) is degraded to `Missing` for a
+    // read-only report — never `?`-propagated (state is data; status exits 0).
+    for out in &record.outputs {
+        match out.resolved_target(roots) {
+            Ok(resolved) if !resolved.exists() => return ArtifactStatus::Missing,
+            Ok(_) => {}
+            Err(_) => return ArtifactStatus::Missing,
+        }
     }
     // Any drifted client output (canonical OR generated — the recorded
     // hash for a generated target is over its expected bytes) ⇒ modified.
-    for out in &outputs {
-        match out.current_hash() {
+    for out in &record.outputs {
+        match out.current_hash(roots) {
             Ok(actual) if actual != out.content_hash => return ArtifactStatus::Modified,
             Ok(_) => {}
-            // An unreadable target is effectively gone for reporting.
+            // An unreadable / unresolvable target is effectively gone.
             Err(_) => return ArtifactStatus::Missing,
         }
     }
@@ -215,9 +225,11 @@ fn derive_state(
 mod tests {
     use super::*;
     use crate::install::content_hash::content_hash;
-    use crate::install::install_state::InstallRecord;
+    use crate::install::install_state::{ClientOutput, InstallRecord};
+    use crate::install::path_anchor::{AnchorRoots, AnchoredPath, PathAnchor};
     use crate::oci::pinned_identifier::PinnedIdentifier;
     use crate::oci::{Algorithm, Digest, Identifier};
+    use std::path::PathBuf;
 
     fn pinned(byte: char) -> PinnedIdentifier {
         let id = Identifier::new_registry("x", "localhost:5000")
@@ -229,24 +241,37 @@ mod tests {
         LockedArtifact::direct("x".to_string(), ArtifactKind::Rule, pinned(byte))
     }
 
+    /// Build `AnchorRoots` with `workspace` set to `ws`, other roots absent.
+    fn roots(ws: &std::path::Path) -> AnchorRoots {
+        AnchorRoots {
+            workspace: ws.to_path_buf(),
+            grim_home: ws.to_path_buf(),
+            claude_root: None,
+            copilot_root: None,
+            opencode_skills: None,
+        }
+    }
+
     #[test]
     fn stale_when_lock_does_not_match_config() {
         let dir = tempfile::tempdir().unwrap();
+        let roots = roots(dir.path());
         let st = InstallState::load(&dir.path().join("s.json")).unwrap();
-        let s = derive_state(ArtifactKind::Rule, "x", Some(&locked('a')), &st, false);
+        let s = derive_state(ArtifactKind::Rule, "x", Some(&locked('a')), &st, &roots, false);
         assert_eq!(s, ArtifactStatus::Stale);
     }
 
     #[test]
     fn missing_when_not_locked_or_not_recorded() {
         let dir = tempfile::tempdir().unwrap();
+        let roots = roots(dir.path());
         let st = InstallState::load(&dir.path().join("s.json")).unwrap();
         assert_eq!(
-            derive_state(ArtifactKind::Rule, "x", None, &st, true),
+            derive_state(ArtifactKind::Rule, "x", None, &st, &roots, true),
             ArtifactStatus::Missing
         );
         assert_eq!(
-            derive_state(ArtifactKind::Rule, "x", Some(&locked('a')), &st, true),
+            derive_state(ArtifactKind::Rule, "x", Some(&locked('a')), &st, &roots, true),
             ArtifactStatus::Missing
         );
     }
@@ -254,38 +279,83 @@ mod tests {
     #[test]
     fn installed_modified_outdated_transitions() {
         let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("x.md");
+        let ws = dir.path();
+        let target = ws.join("x.md");
         std::fs::write(&target, b"canonical\n").unwrap();
         let hash = content_hash(&target).unwrap();
+        let roots = roots(ws);
 
-        let mut st = InstallState::load(&dir.path().join("s.json")).unwrap();
+        let mut st = InstallState::load(&ws.join("s.json")).unwrap();
         st.record(InstallRecord {
             kind: ArtifactKind::Rule,
             name: "x".to_string(),
             pinned: pinned('a'),
-            content_hash: hash.clone(),
-            target: target.clone(),
-            clients: vec![],
+            outputs: vec![ClientOutput {
+                client: "claude".to_string(),
+                target: AnchoredPath {
+                    anchor: PathAnchor::Workspace,
+                    relative: "x.md".to_string(),
+                },
+                content_hash: hash.clone(),
+                support_dir: None,
+            }],
         });
 
         // Same pin, intact content ⇒ installed.
         assert_eq!(
-            derive_state(ArtifactKind::Rule, "x", Some(&locked('a')), &st, true),
+            derive_state(ArtifactKind::Rule, "x", Some(&locked('a')), &st, &roots, true),
             ArtifactStatus::Installed
         );
 
         // Lock advanced to a different digest ⇒ outdated.
         assert_eq!(
-            derive_state(ArtifactKind::Rule, "x", Some(&locked('b')), &st, true),
+            derive_state(ArtifactKind::Rule, "x", Some(&locked('b')), &st, &roots, true),
             ArtifactStatus::Outdated
         );
 
         // Tamper with the file ⇒ modified.
         std::fs::write(&target, b"hand edited\n").unwrap();
         assert_eq!(
-            derive_state(ArtifactKind::Rule, "x", Some(&locked('a')), &st, true),
+            derive_state(ArtifactKind::Rule, "x", Some(&locked('a')), &st, &roots, true),
             ArtifactStatus::Modified
         );
         let _ = Algorithm::Sha256;
+        let _ = PathBuf::new();
+    }
+
+    // T10 spec: derive_state with an unresolvable AnchoredPath must degrade to
+    // Missing via match — never propagate AnchorError as a command failure.
+    #[test]
+    fn unresolvable_anchored_path_degrades_to_missing_not_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let roots = roots(ws);
+
+        let mut st = InstallState::load(&ws.join("s.json")).unwrap();
+        // Record a rule with ClaudeRoot anchor but roots.claude_root = None.
+        st.record(InstallRecord {
+            kind: ArtifactKind::Rule,
+            name: "x".to_string(),
+            pinned: pinned('a'),
+            outputs: vec![ClientOutput {
+                client: "claude".to_string(),
+                target: AnchoredPath {
+                    anchor: PathAnchor::ClaudeRoot,
+                    relative: "rules/x.md".to_string(),
+                },
+                content_hash: Digest::Sha256("a".repeat(64)),
+                support_dir: None,
+            }],
+        });
+
+        // Roots with claude_root = None → resolved_target returns AnchorRootAbsent.
+        // Contract: must return Missing via match, NOT propagate the error.
+        // Until T8 this panics with unimplemented!; after T8 it must return Missing.
+        let state = derive_state(ArtifactKind::Rule, "x", Some(&locked('a')), &st, &roots, true);
+        assert_eq!(
+            state,
+            ArtifactStatus::Missing,
+            "unresolvable AnchoredPath must degrade to Missing, not error"
+        );
     }
 }

@@ -203,7 +203,7 @@ impl Vendor for OpenCodeVendor {
 /// `$XDG_CONFIG_HOME|~/.config/opencode/skills`. `$OPENCODE_CONFIG` (a
 /// config **file** path) deliberately plays no role — it does not affect
 /// OpenCode's skill discovery (sst/opencode#3432).
-fn global_skills_root(config_dir_override: Option<PathBuf>, xdg_config: Option<PathBuf>) -> Option<PathBuf> {
+pub(crate) fn global_skills_root(config_dir_override: Option<PathBuf>, xdg_config: Option<PathBuf>) -> Option<PathBuf> {
     config_dir_override
         .map(|d| d.join("skills"))
         .or_else(|| xdg_config.map(|c| c.join("opencode").join("skills")))
