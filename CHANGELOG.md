@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-06-13
+
+### Added
+
+- Manifest-driven batch release command *(publish)*
+- Popup init dialog persisting default registry *(tui)*
+
+### Fixed
+
+- Checkout LFS logo so ocx describe publishes real PNG *(ci)*
+- Reap empty OpenCode rules dir on last uninstall *(install)*
+- Align table columns by chars, not bytes *(cli)*
+
 ## [0.4.1] - 2026-06-12
 
 ### Added
@@ -30,10 +43,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Open repository URLs on all platforms *(tui)*
 - Build the same catalog window the TUI loads *(search)*
 - Fall back to all clients when none are detected *(install)*
+- Set DOCKER_CONFIG via GITHUB_ENV in publish-catalog *(ci)*
 
 ### Release
 
 - Catalog
+- V0.4.1
 
 ## [0.4.0] - 2026-06-11
 
@@ -159,6 +174,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Make release-update.sh executable; add rolling-release regression tests
 - Contact loopback registries over plain HTTP on any port
+[0.4.2]: https://github.com/michael-herwig/grimoire/compare/v0.4.1..v0.4.2
 [0.4.1]: https://github.com/michael-herwig/grimoire/compare/v0.4.0..v0.4.1
 [0.4.0]: https://github.com/michael-herwig/grimoire/compare/v0.3.0..v0.4.0
 [0.3.0]: https://github.com/michael-herwig/grimoire/compare/v0.2.0..v0.3.0
