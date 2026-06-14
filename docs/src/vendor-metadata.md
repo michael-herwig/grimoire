@@ -116,8 +116,8 @@ at both install time and publish-time validation.
 | Plain metadata key (non-tool prefix, e.g. `vendor.x`) | Passes through unchanged |
 | No tool-namespaced keys at all | Fast path: verbatim install, byte-identical to canonical |
 
-The three recognized tool namespaces are `claude`, `opencode`, and
-`copilot`. Any key whose prefix is not one of these three is plain
+The four recognized tool namespaces are `claude`, `opencode`, `copilot`,
+and `codex`. Any key whose prefix is not one of these four is plain
 metadata and is never treated as a tool key.
 
 When a namespaced key collides with a top-level key of the same name,
@@ -225,39 +225,61 @@ projectable vendor key, mapped from `COPILOT_AGENT_FIELDS` in
 
 `mcp-servers` (an object) is not in this registry.
 
-## Empty registries for OpenCode and Copilot skills {#empty-registries}
+## The codex.* agent registry {#codex-agent-registry}
 
-The skill registries for [OpenCode][opencode-skills-docs] and [GitHub
-Copilot][copilot-instructions-docs] are intentionally empty. Both tools
-read only the universal agentskills fields from a `SKILL.md`; neither
+[Codex][codex-subagents-docs] subagents are TOML files, not Markdown — Codex
+is the only vendor that emits TOML. The canonical agent body becomes the
+`developer_instructions` TOML key; `name` and `description` project verbatim.
+The common `model` field projects to the `model` TOML key. The common `tools`
+field has no Codex equivalent and is **dropped** (grim emits a warning).
+
+Three vendor keys are projectable, mapped from `CODEX_AGENT_FIELDS` in
+`src/install/vendor_codex.rs`:
+
+| Key | Native TOML field | Type | Notes |
+|---|---|---|---|
+| `codex.model` | `model` | string | **Overrides** the common `model` field for Codex |
+| `codex.reasoning-effort` | `model_reasoning_effort` | enum | Accepted values: `minimal`, `low`, `medium`, `high` |
+| `codex.sandbox-mode` | `sandbox_mode` | enum | Accepted values: `read-only`, `workspace-write`, `danger-full-access` |
+
+A `codex.model` key overrides the projected common `model` field silently,
+following the same override semantics as `claude.model` and `opencode.model`.
+
+## Empty registries for OpenCode, Copilot, and Codex skills {#empty-registries}
+
+The skill registries for [OpenCode][opencode-skills-docs], [GitHub
+Copilot][copilot-instructions-docs], and [Codex][codex-skills-docs] are
+intentionally empty. All three non-Claude clients (OpenCode, Copilot, and
+Codex) read only the universal agentskills fields from a `SKILL.md`; none
 has client-specific skill capabilities that need projection.
 
-Any key prefixed with `opencode.` or `copilot.` in the `metadata` map
-of a skill is therefore always unknown. grim emits a warning and drops
+Any key prefixed with `opencode.`, `copilot.`, or `codex.` in the `metadata`
+map of a skill is therefore always unknown. grim emits a warning and drops
 it when it encounters one. This behavior is the typo guard: if you
 accidentally write `opencode.some-key`, you get a warning at publish
 time rather than silent data loss.
 
-Because both registries are empty, [OpenCode][opencode-skills-docs] and
-[GitHub Copilot][copilot-instructions-docs] produce byte-identical rendered
-skill files — the *unified universal render*. A skill installed by grim
-for [Claude Code][claude-code-docs] is also discovered by both other
-tools, which ignore the lifted Claude fields as unknown keys. This means
-installing for Claude effectively covers all three clients for skill
-discovery, with no extra work for authors.
+Because all three non-Claude registries are empty, [OpenCode][opencode-skills-docs],
+[GitHub Copilot][copilot-instructions-docs], and [Codex][codex-skills-docs]
+produce byte-identical rendered skill files — the *unified universal render*.
+A skill installed by grim for [Claude Code][claude-code-docs] is also
+discovered by those three non-Claude clients, which ignore the lifted Claude
+fields as unknown keys. This means installing for Claude effectively covers
+all four clients for skill discovery, with no extra work for authors.
 
 ## Skill discovery locations {#discovery-locations}
 
 grim installs skills into the directories each client scans for
 `SKILL.md` files.
 
-**Project scope** (per-workspace, discovered by all three clients):
+**Project scope** (per-workspace, discovered by all four clients):
 
 | Client | Directory |
 |---|---|
 | [Claude Code][claude-code-docs] | `.claude/skills/<name>/` |
 | [GitHub Copilot][copilot-skills-docs] | `.github/skills/<name>/`, `.claude/skills/<name>/`, `.agents/skills/<name>/` |
 | [OpenCode][opencode-skills-docs] | `.opencode/skills/<name>/`, `.claude/skills/<name>/`, `.agents/skills/<name>/` |
+| [Codex][codex-skills-docs] | `.agents/skills/<name>/` |
 
 **Global scope** (user-level; grim installs directly into each client's
 native discovery directory, honoring the client's own directory-override
@@ -268,6 +290,7 @@ environment variable):
 | [Claude Code][claude-code-docs] | `~/.claude/skills/<name>/` | `$CLAUDE_CONFIG_DIR/skills/<name>/` — the variable replaces the entire `~/.claude` tree ([claude-directory reference][claude-dir-docs]) |
 | [GitHub Copilot][copilot-skills-docs] | `~/.copilot/skills/<name>/` | `$COPILOT_HOME/skills/<name>/` — the variable replaces the entire `~/.copilot` path ([Copilot CLI config-dir reference][copilot-config-dir-docs]) |
 | [OpenCode][opencode-skills-docs] | `~/.config/opencode/skills/<name>/` (or `$XDG_CONFIG_HOME/opencode/skills/<name>/`) | `$OPENCODE_CONFIG_DIR/skills/<name>/` — OpenCode's *additive* scan directory ([OpenCode config docs][opencode-config-docs]): the XDG default stays scanned either way; grim prefers the override as install target when set. `$OPENCODE_CONFIG` (a config *file* path) does not affect skill discovery and plays no role here |
+| [Codex][codex-skills-docs] | `$HOME/.agents/skills/<name>/` | None — `$CODEX_HOME` does not relocate skills; they are always keyed on `$HOME` |
 
 When neither the override variable nor `$HOME` can be resolved (rare CI
 environments), grim falls back to the workspace layout under `$GRIM_HOME`
@@ -278,6 +301,13 @@ for the affected client.
 documentation. Global **rules** for [GitHub Copilot][copilot-skills-docs]
 have no documented user-level instructions path; grim writes them under
 the workspace layout and emits a warning at install time.
+
+[Codex][codex-skills-docs] **agent** paths follow a separate layout from
+skills. At project scope, agents land in `.codex/agents/<name>.toml`. At
+global scope, agents land in `$CODEX_HOME/agents/<name>.toml`, falling back
+to `~/.codex/agents/<name>.toml` when `$CODEX_HOME` is unset. Note that
+`$CODEX_HOME` relocates only the agents root — skill discovery remains tied
+to `$HOME/.agents/skills` regardless of `$CODEX_HOME`.
 
 ## Rule-level vendor keys {#rule-keys}
 
@@ -295,6 +325,7 @@ The mapping table for rules:
 | [GitHub Copilot][copilot-instructions-docs] | `paths` | top-level | `applyTo` | Comma-joined into a single string (Copilot does not accept a list) |
 | [GitHub Copilot][copilot-instructions-docs] | `copilot.exclude-agent` | `metadata` | `excludeAgent` | Enum: `code-review` or `cloud-agent` (registry in `src/install/vendor_copilot.rs`) |
 | [OpenCode][opencode-rules-docs] | — | — | — | No per-file rule frontmatter; loading is registered via `opencode.json` |
+| [Codex][codex-subagents-docs] | — | — | — | **Rules are unsupported.** Codex uses an always-on, directory-granular `AGENTS.md` with no path-glob or `applyTo` mechanism. Installing a rule with `--client codex` emits a warning and writes no file. |
 
 A rule's `paths` list is native [Claude Code][claude-memory-docs]
 frontmatter and passes through verbatim. For [GitHub
@@ -419,6 +450,8 @@ claude namespace to silence it and gain proper type conversion.
 [opencode-skills-docs]: https://opencode.ai/docs/skills
 [opencode-rules-docs]: https://opencode.ai/docs/rules
 [opencode-config-docs]: https://opencode.ai/docs/config
+[codex-skills-docs]: https://developers.openai.com/codex/skills
+[codex-subagents-docs]: https://developers.openai.com/codex/subagents
 [xdg-spec]: https://specifications.freedesktop.org/basedir-spec/latest/
 
 <!-- internal -->

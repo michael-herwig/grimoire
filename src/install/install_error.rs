@@ -112,7 +112,7 @@ pub enum InstallErrorKind {
     BlobDigestMismatch { expected: Digest, actual: Digest },
 
     /// The configured client target is not supported by this build.
-    #[error("unsupported client target '{0}'; supported clients are 'claude', 'opencode', 'copilot'")]
+    #[error("unsupported client target '{0}'; supported clients are 'claude', 'opencode', 'copilot', 'codex'")]
     UnsupportedClient(String),
 }
 

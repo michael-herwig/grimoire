@@ -1491,6 +1491,8 @@ mod tests {
             claude_root: None,
             copilot_root: None,
             opencode_skills: None,
+            agents_skills: None,
+            codex_root: None,
         }
     }
 
@@ -1731,6 +1733,8 @@ mod tests {
             claude_root: None,
             copilot_root: None,
             opencode_skills: None,
+            agents_skills: None,
+            codex_root: None,
         };
         assert_eq!(
             derive_bundle_state("r/bundles/ai-pack", Some(&lock), &state, &stub_roots),

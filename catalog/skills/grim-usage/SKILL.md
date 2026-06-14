@@ -15,7 +15,9 @@ Grimoire (binary: `grim`) is a package manager for AI-agent configuration.
 It distributes four artifact kinds — **skills**, **rules**, **agents**, and
 **bundles** — through any standard OCI registry (GHCR, Docker Hub, a private
 Distribution), with lockfile-pinned installs into AI clients such as Claude
-Code, OpenCode, and GitHub Copilot.
+Code, OpenCode, GitHub Copilot, and Codex. (Codex supports skills and agents
+only; rules are not supported and grim warns and skips them when
+`--client codex` is specified.)
 
 ## Verify Before Acting
 

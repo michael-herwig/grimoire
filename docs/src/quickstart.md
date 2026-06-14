@@ -34,8 +34,10 @@ is what makes [`grim update`](#5-upgrade) meaningful later.
 
 `grim install` materializes every locked artifact into your AI client's
 configuration directory. By default it targets [Claude Code][claude]; pass
-`--client` to select [opencode][opencode] or [GitHub Copilot][copilot], or
-supply a comma-separated list to install into several AI clients at once:
+`--client` to select [opencode][opencode], [GitHub Copilot][copilot], or
+[OpenAI Codex][codex], or supply a comma-separated list to install into
+several AI clients at once. Note that [Codex][codex] supports skills and
+agents only — rules are not supported and are skipped with a warning.
 
 ```sh
 grim install
@@ -74,6 +76,7 @@ before declaring anything, launch the interactive browser with
 [claude]: https://docs.anthropic.com/en/docs/claude-code/overview
 [opencode]: https://opencode.ai
 [copilot]: https://github.com/features/copilot
+[codex]: https://openai.com/index/openai-codex/
 
 <!-- internal -->
 [install]: ./installation.md

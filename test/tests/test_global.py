@@ -516,3 +516,113 @@ def test_global_opencode_honors_custom_xdg_config_home(
     assert not (runner.home / ".config/opencode").exists(), (
         "default ~/.config must stay untouched when XDG_CONFIG_HOME points elsewhere"
     )
+
+
+# ---------------------------------------------------------------------------
+# Codex global scope
+# ---------------------------------------------------------------------------
+
+
+def _codex_agent_doc(name: str = "cx-agent") -> str:
+    return (
+        f"---\nname: {name}\ndescription: A codex agent.\nmodel: gpt-5\n---\n"
+        f"# {name}\nCodex body text.\n"
+    )
+
+
+def test_global_install_codex_skill_lands_in_home_dot_agents(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """A globally-installed Codex skill materializes at
+    ``$HOME/.agents/skills/<name>/`` — the cross-vendor open standard."""
+    repo = f"{unique_repo}/cx-skill"
+    sk = make_artifact(
+        repo,
+        "skill",
+        {"cx-skill/SKILL.md": "---\nname: cx-skill\ndescription: codex skill\n---\n# body\n"},
+        tag="v1",
+    )
+    (grim_home / "grimoire.toml").write_text(f'[skills]\ncx-skill = "{sk.fq}"\n')
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.json("lock", "--global")
+
+    install_rows = runner.json("install", "--global", "--client", "codex")
+    assert install_rows[0]["status"] == "installed"
+
+    skill_dir = runner.home / ".agents/skills/cx-skill"
+    assert (skill_dir / "SKILL.md").is_file(), (
+        f"global Codex skill must materialize at $HOME/.agents/skills/; nothing at {skill_dir}"
+    )
+    # NOT under $CODEX_HOME-style or $GRIM_HOME layouts.
+    assert not (runner.home / ".codex/skills/cx-skill").exists()
+    assert not (grim_home / ".agents/skills/cx-skill").exists()
+
+
+def test_global_install_codex_agent_lands_in_home_dot_codex(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """A globally-installed Codex agent materializes at
+    ``$HOME/.codex/agents/<name>.toml`` when ``CODEX_HOME`` is unset."""
+    import tomllib
+
+    repo = f"{unique_repo}/cx-agent"
+    ag = make_artifact(repo, "agent", {"cx-agent.md": _codex_agent_doc("cx-agent")}, tag="v1")
+    (grim_home / "grimoire.toml").write_text(f'[agents]\ncx-agent = "{ag.fq}"\n')
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.json("lock", "--global")
+
+    install_rows = runner.json("install", "--global", "--client", "codex")
+    assert install_rows[0]["status"] == "installed"
+
+    toml_file = runner.home / ".codex/agents/cx-agent.toml"
+    assert toml_file.is_file(), (
+        f"global Codex agent must materialize at $HOME/.codex/agents/; nothing at {toml_file}"
+    )
+    parsed = tomllib.loads(toml_file.read_text())
+    assert parsed["name"] == "cx-agent"
+    assert "Codex body text." in parsed["developer_instructions"]
+
+
+def test_global_codex_home_relocates_agent_but_not_skill(
+    grim_binary: Path, grim_home: Path, registry: str, unique_repo: str
+) -> None:
+    """``CODEX_HOME`` relocates the Codex **agent** root but NOT skills:
+    the agent lands under ``$CODEX_HOME/agents`` while the skill stays at the
+    ``$HOME/.agents/skills`` cross-vendor standard."""
+    sk = make_artifact(
+        f"{unique_repo}/cx2-skill",
+        "skill",
+        {"cx2-skill/SKILL.md": "---\nname: cx2-skill\ndescription: s\n---\n# body\n"},
+        tag="v1",
+    )
+    ag = make_artifact(
+        f"{unique_repo}/cx2-agent",
+        "agent",
+        {"cx2-agent.md": _codex_agent_doc("cx2-agent")},
+        tag="v1",
+    )
+    (grim_home / "grimoire.toml").write_text(
+        f'[skills]\ncx2-skill = "{sk.fq}"\n[agents]\ncx2-agent = "{ag.fq}"\n'
+    )
+    codex_home = grim_home.parent / "codex_home"
+    runner = GrimRunner(grim_binary, grim_home)
+    runner.env["CODEX_HOME"] = str(codex_home)
+    runner.json("lock", "--global")
+
+    install_rows = runner.json("install", "--global", "--client", "codex")
+    assert all(r["status"] == "installed" for r in install_rows), install_rows
+
+    # Agent follows $CODEX_HOME.
+    assert (codex_home / "agents/cx2-agent.toml").is_file(), (
+        "CODEX_HOME must relocate the Codex agent root"
+    )
+    assert not (runner.home / ".codex/agents/cx2-agent.toml").exists(), (
+        "with CODEX_HOME set, the agent must NOT land in the ~/.codex default"
+    )
+    # Skill stays at $HOME/.agents/skills — CODEX_HOME does not move it.
+    assert (runner.home / ".agents/skills/cx2-skill/SKILL.md").is_file(), (
+        "CODEX_HOME must NOT relocate Codex skills (cross-vendor $HOME standard)"
+    )
+    assert not (codex_home / "skills/cx2-skill").exists(), (
+        "Codex skills must never land under $CODEX_HOME"
+    )

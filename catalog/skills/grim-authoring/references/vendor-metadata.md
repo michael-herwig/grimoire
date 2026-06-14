@@ -1,7 +1,7 @@
 # Vendor Metadata
 
-You loaded this file because you are adding `claude.*`, `opencode.*`, or
-`copilot.*` keys to an artifact, or a publish failed on a vendor literal.
+You loaded this file because you are adding `claude.*`, `opencode.*`,
+`copilot.*`, or `codex.*` keys to an artifact, or a publish failed on a vendor literal.
 
 Contents: [Mental Model](#mental-model) · [Outcome Classes](#outcome-classes) ·
 [Literal Discipline](#literal-discipline) ·
@@ -16,9 +16,12 @@ artifact's `metadata` map. At install time grim looks each key up in the
 target vendor's registry and **projects** it — converts the string to
 its native type and lifts it into top-level frontmatter of the written
 file. Each client sees only its own namespace; one canonical file serves
-all clients. The three recognized namespaces are `claude`, `opencode`,
-and `copilot`; any other prefix (e.g. `vendor.x`) is plain metadata and
-passes through untouched.
+all clients. The four recognized namespaces are `claude`, `opencode`, `copilot`, and
+`codex`; any other prefix (e.g. `vendor.x`) is plain metadata and passes
+through untouched. Note that Codex supports skills and agents only — rules
+are unsupported and grim warns and skips them. Codex skills use the
+universal agentskills shape (no `codex.*` skill namespace exists); only
+agents carry `codex.*` metadata.
 
 ## Outcome Classes
 
@@ -32,9 +35,10 @@ they explain every vendor-metadata surprise:
 | Unknown key in your **own** namespace (typo: `claude.efort`) | Warning + dropped — the typo guard; silent data loss if the warning is ignored |
 | Key in a **foreign** namespace (e.g. `opencode.*` rendering for Claude) | Dropped silently — by design, that is multi-client serving |
 
-Two corollaries: the OpenCode and Copilot *skill* registries are empty,
-so any `opencode.*`/`copilot.*` key on a skill is always unknown → warn
-+ drop. And when a namespaced key collides with a same-named top-level
+Two corollaries: the OpenCode, Copilot, and Codex *skill* registries are
+empty (no vendor namespace exists for skills in those clients), so any
+`opencode.*`/`copilot.*`/`codex.*` key on a skill is always unknown →
+warn + drop. And when a namespaced key collides with a same-named top-level
 field, the namespaced key wins — with a warning in the legacy-migration
 case, silently for the agent `model`/`tools` override escape hatch.
 
@@ -63,8 +67,9 @@ grow over time. The authoritative tables:
 - [`claude.*` agent registry][claude-agent-reg]
 - [`opencode.*` agent registry][opencode-agent-reg]
 - [`copilot.*` agent registry][copilot-agent-reg]
+- [`codex.*` agent registry][codex-agent-reg] (`codex.model`, `codex.reasoning-effort`, `codex.sandbox-mode`)
 - [Rule-level keys][rule-keys] (today: `copilot.exclude-agent` only)
-- [Empty skill registries][empty-reg] (OpenCode, Copilot)
+- [Empty skill registries][empty-reg] (OpenCode, Copilot, Codex)
 
 ## Worked Example
 
@@ -104,6 +109,7 @@ to silence the nudge and gain type conversion ([migration][migration]).
 [claude-agent-reg]: https://michael-herwig.github.io/grimoire/vendor-metadata.html#claude-agent-registry
 [opencode-agent-reg]: https://michael-herwig.github.io/grimoire/vendor-metadata.html#opencode-agent-registry
 [copilot-agent-reg]: https://michael-herwig.github.io/grimoire/vendor-metadata.html#copilot-agent-registry
+[codex-agent-reg]: https://michael-herwig.github.io/grimoire/vendor-metadata.html#codex-agent-registry
 [rule-keys]: https://michael-herwig.github.io/grimoire/vendor-metadata.html#rule-keys
 [empty-reg]: https://michael-herwig.github.io/grimoire/vendor-metadata.html#empty-registries
 [publish-val]: https://michael-herwig.github.io/grimoire/vendor-metadata.html#publish-validation

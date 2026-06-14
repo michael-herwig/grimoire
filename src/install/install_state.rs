@@ -512,6 +512,8 @@ impl InstallState {
             claude_root: None,
             copilot_root: None,
             opencode_skills: None,
+            agents_skills: None,
+            codex_root: None,
         };
         let convert = (ConfigScope::Project, &roots);
 
@@ -829,6 +831,8 @@ mod tests {
             claude_root: None,
             copilot_root: None,
             opencode_skills: None,
+            agents_skills: None,
+            codex_root: None,
         }
     }
 
@@ -1674,6 +1678,8 @@ mod tests {
             claude_root: Some(claude_root.clone()),
             copilot_root: None,
             opencode_skills: None,
+            agents_skills: None,
+            codex_root: None,
         };
 
         let st = InstallState::load_global(&global_path, &roots).unwrap();

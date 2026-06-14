@@ -145,9 +145,15 @@ two at runtime.
 ## Clients {#clients}
 
 An installed artifact has to land somewhere the agent reads. Grimoire calls
-that destination a **client target** and ships three: [Claude Code][claude],
-[opencode][opencode], and [GitHub Copilot][copilot]. The same skill is
-transformed into each client's native layout on install.
+that destination a **client target** and ships four: [Claude Code][claude],
+[opencode][opencode], [GitHub Copilot][copilot], and [Codex][codex]. The
+same skill is transformed into each client's native layout on install.
+
+[Codex][codex] covers skills and agents. Rules are not supported — Codex
+uses an always-on, directory-granular instruction file (`AGENTS.md`) with no
+path-glob or `applyTo` scoping mechanism, so there is no native target for a
+rule artifact. Installing a rule with `--client codex` produces a warning and
+writes no file.
 
 [`grim install`](./commands.md#install) writes to the targets listed in the
 `clients` option in your config, defaulting to `["claude"]`; `--client`
@@ -183,3 +189,4 @@ described in [Configuration](./configuration.md).
 [claude]: https://docs.anthropic.com/en/docs/claude-code/overview
 [opencode]: https://opencode.ai
 [copilot]: https://github.com/features/copilot
+[codex]: https://developers.openai.com/codex

@@ -38,7 +38,7 @@ use super::vendor::{FieldType, KnownField, Vendor};
 
 /// The known tool namespaces a `metadata` key may carry. Keys prefixed
 /// with anything else (`vendor.x`) are plain metadata, not tool keys.
-const KNOWN_NAMESPACES: &[&str] = &["claude", "opencode", "copilot"];
+const KNOWN_NAMESPACES: &[&str] = &["claude", "opencode", "copilot", "codex"];
 
 /// A projection failure: a known namespaced key carries a literal that
 /// cannot convert to the field's native type. Hard error — publish fails
@@ -54,6 +54,19 @@ pub enum RenderError {
         value: String,
         /// Human-readable description of accepted literals.
         expected: String,
+    },
+
+    /// Serializing a rendered document to its native on-disk format failed.
+    /// In practice unreachable for the flat string tables grim emits (Codex
+    /// agent TOML) — surfaced rather than `.expect()`-panicked to keep
+    /// library code free of panics across the render boundary.
+    #[error("failed to serialize rendered {format} document")]
+    Serialization {
+        /// The target format (e.g. `TOML`).
+        format: &'static str,
+        /// The underlying serializer error.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
 }
 

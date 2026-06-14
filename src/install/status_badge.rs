@@ -129,6 +129,8 @@ mod tests {
             claude_root: None,
             copilot_root: None,
             opencode_skills: None,
+            agents_skills: None,
+            codex_root: None,
         }
     }
 
@@ -324,6 +326,8 @@ mod tests {
             claude_root: None,
             copilot_root: None,
             opencode_skills: None,
+            agents_skills: None,
+            codex_root: None,
         };
 
         let lk = lock_with("acme/x", 'a');

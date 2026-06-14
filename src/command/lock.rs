@@ -133,6 +133,8 @@ mod tests {
             claude_root: None,
             copilot_root: None,
             opencode_skills: None,
+            agents_skills: None,
+            codex_root: None,
         }
     }
 

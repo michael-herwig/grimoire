@@ -158,6 +158,64 @@ def test_config_clients_array_installs_to_all_declared_clients(
     )
 
 
+def test_config_clients_array_includes_codex_skill_and_skips_rule(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """``clients = ["codex"]`` installs the skill to the cross-vendor
+    ``.agents/skills`` tree and **skips** the rule (Codex declines rules):
+    no ``.codex`` rule file is written and stderr carries the skip warning.
+    """
+    sk, ru = _publish_skill_and_rule(unique_repo)
+    _build_toml(project_dir, sk.fq, ru.fq, ["codex"])
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+
+    result = runner.run("install", format="json")
+    import json as _json
+
+    rows = _json.loads(result.stdout)
+    assert rows, "install must return a non-empty result set"
+
+    # Skill lands in the cross-vendor `.agents/skills` standard, NOT `.codex`.
+    assert_path_exists(project_dir / ".agents/skills/code-review/SKILL.md")
+    assert_not_exists(project_dir / ".codex/skills/code-review")
+
+    # Rule is declined: no Codex rule file anywhere.
+    assert_not_exists(project_dir / ".codex/rules/rust-style.md")
+    assert_not_exists(project_dir / ".agents/rules/rust-style.md")
+
+    # The skip is surfaced on stderr.
+    assert "no native target for rule" in result.stderr.lower(), (
+        f"a rule installed for Codex must warn on stderr; got: {result.stderr!r}"
+    )
+    assert "codex" in result.stderr.lower()
+
+
+def test_client_codex_rule_only_warns_and_writes_nothing(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """A project declaring only a rule, installed with ``--client codex``,
+    writes no Codex file but still records the artifact (install succeeds)."""
+    ru = make_artifact(
+        f"{unique_repo}/rust-style",
+        "rule",
+        {"rust-style.md": "---\npaths: ['**/*.rs']\n---\n# Rust Style\nUse 4 spaces.\n"},
+        tag="v1",
+    )
+    (project_dir / "grimoire.toml").write_text(f'[rules]\nrust-style = "{ru.fq}"\n')
+    runner = grim_at(project_dir)
+    runner.run("lock", check=False)
+
+    result = runner.run("install", "--client", "codex", format="json")
+    import json as _json
+
+    rows = _json.loads(result.stdout)
+    assert rows, "install must return a non-empty result set"
+    # No Codex rule file is written anywhere.
+    assert_not_exists(project_dir / ".codex/rules/rust-style.md")
+    assert "no native target for rule" in result.stderr.lower(), result.stderr
+
+
 def test_client_flag_overrides_config_clients(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:

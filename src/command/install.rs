@@ -40,9 +40,9 @@ pub struct InstallArgs {
     pub force: bool,
 
     /// AI client(s) to materialize into (comma-separated, repeatable;
-    /// `claude`, `opencode`, `copilot`). Defaults to the config `clients`
-    /// option, then all detected clients (vendor dir present), then
-    /// `claude` when none are detected.
+    /// `claude`, `opencode`, `copilot`, `codex`). Defaults to the config
+    /// `clients` option, then all detected clients (vendor dir present),
+    /// then `claude` when none are detected.
     #[arg(long = "client")]
     pub client: Vec<String>,
 }
@@ -227,12 +227,12 @@ mod tests {
         let outcomes = vec![
             ArtifactInstall {
                 reference: aref("a"),
-                target: "/t/a".into(),
+                target: Some("/t/a".into()),
                 result: Ok(InstallOutcome::Installed),
             },
             ArtifactInstall {
                 reference: aref("b"),
-                target: "/t/b".into(),
+                target: Some("/t/b".into()),
                 result: Ok(InstallOutcome::AlreadyInstalled),
             },
         ];
@@ -247,7 +247,7 @@ mod tests {
     fn finish_errors_on_refusal_as_data_error() {
         let outcomes = vec![ArtifactInstall {
             reference: aref("a"),
-            target: "/t/a".into(),
+            target: Some("/t/a".into()),
             result: Ok(InstallOutcome::Refused {
                 recorded: crate::oci::Digest::Sha256("a".repeat(64)),
                 actual: crate::oci::Digest::Sha256("b".repeat(64)),
@@ -261,7 +261,7 @@ mod tests {
     fn finish_propagates_first_error() {
         let outcomes = vec![ArtifactInstall {
             reference: aref("a"),
-            target: "/t/a".into(),
+            target: Some("/t/a".into()),
             result: Err(crate::error::Error::from(InstallError::without_reference(
                 InstallErrorKind::BlobMissing,
             ))),
