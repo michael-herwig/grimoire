@@ -256,6 +256,9 @@ impl UpdateChecker {
             // `force = true` rebuilds even a fresh cache; `offline = false`
             // because the app pre-checks `ctx.offline` and never spawns when
             // offline (and `load_or_refresh` would degrade to cache anyway).
+            //
+            // Single-registry, like `reload_into`: the TUI's migration onto the
+            // shared `catalog_service::load_catalog` seam is deferred (Workstream E).
             if let Ok(catalog) =
                 Catalog::load_or_refresh_coordinated(&catalog_path, &registry, "", &access, false, true).await
             {

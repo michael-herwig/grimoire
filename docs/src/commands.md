@@ -40,6 +40,7 @@ These apply to every subcommand:
 | [`grim login`](#login) | Authenticate to a registry and store the credential. |
 | [`grim logout`](#logout) | Remove a stored registry credential. |
 | [`grim schema`](#schema) | Print the JSON Schema for `grimoire.toml` or `publish.toml`. |
+| [`grim mcp`](#mcp) | Run a local STDIO MCP server for AI agent integration. |
 
 ## grim init {#init}
 
@@ -160,8 +161,10 @@ rematerializes it.
 
 `grim search [query]` searches the registry catalog by case-insensitive
 substring against repository, summary, description, and keywords; an empty
-query lists the whole catalog. `--refresh` forces a catalog rebuild;
-`--registry <ref>` chooses which registry to search.
+query lists the whole catalog. When `[[registries]]` are configured, all
+of them are browsed and the results are flattened into one table.
+`--refresh` forces a catalog rebuild; `--registry <ref>` collapses the
+browse to exactly that one registry.
 
 The plain table shows each entry's short summary (`com.grimoire.summary`),
 falling back to the description when no summary is set. On an interactive
@@ -184,6 +187,12 @@ multi-select with batch install, update, and delete. Press `?` in the TUI
 for the full key map; highlights are `v` to pick a version, `o` to open
 the selected entry's repository URL in the browser, `g` to switch scope,
 and `space` to mark rows.
+
+Unlike `grim search`, the TUI browses a **single** registry — the effective
+default resolved from the precedence chain below. Multi-registry browse (and
+a collapsible registry tree) across declared `[[registries]]` is planned for
+a later release; today only `grim search` and the MCP `grim_search` tool
+span the full declared set.
 
 When the active scope has no `grimoire.toml` yet, the TUI offers to create
 one before starting, as popup dialogs: confirm the init, then accept or
@@ -339,5 +348,76 @@ The same schemas are published to the docs site; see [Editor schema
 support](./configuration.md#editor-schema) for the hosted URLs and the
 `#:schema` directive that wires an editor up to them.
 
+## grim mcp {#mcp}
+
+`grim mcp` runs a local [Model Context Protocol][mcp-spec] server over
+STDIO. An AI agent host — [Claude Code][claude-code], [OpenCode][opencode],
+or any [MCP][mcp-spec]-compatible client — connects to it over stdin/stdout
+and gains structured access to Grimoire's catalog and install state without
+running shell commands.
+
+The server is **read-only by default**. Mutating tools (add, install,
+update, uninstall) are gated behind `--allow-writes` and are not yet
+registered; the flag reserves the gate for a later release.
+
+The install **scope is fixed at server start**: `--global` operates on the
+global scope; `--config <path>` points at a specific project config.
+Individual tool calls cannot redirect the scope.
+
+Because stdout carries the [JSON-RPC][json-rpc] channel, the server writes
+no diagnostic output there — all tracing goes to stderr. The server shuts
+down when the client closes stdin (EOF).
+
+| Flag | Effect |
+|------|--------|
+| `--allow-writes` | Enable mutating tools when they land (currently no-op — server is read-only). |
+| `--global` | Fix the scope to the global config for the server's lifetime. |
+| `--config <path>` | Use an explicit project config (scope resolution for status tools). |
+
+**Tools exposed today:**
+
+| Tool | Description | Equivalent CLI |
+|------|-------------|----------------|
+| `grim_search` | Browse/search the configured registries (no registry override — the configured set is the boundary). Args: `query?`, `refresh?`. | `grim search --format json` |
+| `grim_status` | Install status of every declared artifact in the fixed scope. | `grim status --format json` |
+
+The JSON payload each tool returns is identical to the `--format json`
+output of the corresponding command — one source of truth for both the CLI
+and the MCP surface.
+
+**Registering with Claude Code** — add to `.mcp.json` in the project root
+(or register globally via `claude mcp add`):
+
+```json
+{
+  "mcpServers": {
+    "grimoire": {
+      "command": "grim",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Pass `--global` to the `args` array when you want the server to operate on
+the global scope rather than the discovered project:
+
+```json
+{
+  "mcpServers": {
+    "grimoire": {
+      "command": "grim",
+      "args": ["mcp", "--global"]
+    }
+  }
+}
+```
+
 <!-- internal -->
 [global-options]: #global-options
+
+<!-- external -->
+[mcp-spec]: https://spec.modelcontextprotocol.io/
+[claude-code]: https://docs.anthropic.com/en/docs/claude-code
+[opencode]: https://opencode.ai/
+[json-rpc]: https://www.jsonrpc.org/specification

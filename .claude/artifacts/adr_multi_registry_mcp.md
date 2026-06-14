@@ -64,10 +64,17 @@ seam returning `CatalogResults { groups: Vec<CatalogGroup> }`, each group
 registry-tagged with already-filtered, already-badged rows. It fans out one
 coordinated per-registry refresh on a `tokio::task::JoinSet`, re-sorts by
 input order (determinism rule), filters via `SearchQuery` once, and applies
-`derive_badge` once. `search`, the TUI, and the MCP read tools all consume
-it. The TUI keeps its richer per-row state (`IntegrityMissing`, worst-of
-bundle) layered locally — no other front-end needs it (YAGNI), so it is not
-hoisted into the shared layer.
+`derive_badge` once. `search` and the MCP read tools consume it. The TUI keeps
+its richer per-row state (`IntegrityMissing`, worst-of bundle) layered locally
+— no other front-end needs it (YAGNI), so it is not hoisted into the shared
+layer.
+
+**Shipped subset vs. deferred (Workstream E):** The `load_catalog` seam is
+consumed by `grim search` and the MCP `grim_search` tool only. The TUI still
+browses a single registry via `Catalog::load_or_refresh_coordinated` directly
+(`src/tui/app.rs`) and does not consume `load_catalog` or `[[registries]]`.
+TUI multi-registry browse and the `VisibleRow` collapsible registry-tree are
+deferred to a follow-up workstream.
 
 ### 2. Multiple registries — additive `[[registries]]`
 
@@ -124,22 +131,43 @@ catalog-file `mtime`.
 `grim mcp` runs a local STDIO MCP server via `rmcp` 1.7 (official SDK;
 Tokio/serde/schemars-native; the schemars major is already locked). It is
 `Printable`-exempt (like `tui`/`schema`), returns `ExitCode` directly, and
-shuts down cleanly on stdin EOF. Read tools (`grim_search`, `grim_detail`,
-`grim_status`, `grim_list_installed`) are always available; write tools
-(`grim_add`, `grim_install`, `grim_update`, `grim_uninstall`) are **not even
-advertised** unless `--allow-writes` is passed. The install scope is fixed
-at server start (no per-call scope redirection → no project→global
-escalation). All writes route through existing seams, inheriting the
-path-anchor containment guard. stdout is the JSON-RPC channel — diagnostics
-go to stderr via `tracing`. Every tool maps to an existing domain seam and
-reuses the `api/*_report.rs` serializers so MCP JSON equals
-`grim … --format json`.
+shuts down cleanly on stdin EOF. The accepted flags are `--allow-writes`,
+`--global`, and `--config <path>`. The install scope is fixed at server start
+(no per-call scope redirection → no project→global escalation). stdout is
+the JSON-RPC channel — diagnostics go to stderr via `tracing`.
+
+**Shipped v1 subset:** Two read tools are always available: `grim_search`
+and `grim_status`. Both map to existing domain seams and reuse the
+`api/*_report.rs` serializers so MCP JSON equals `grim … --format json`.
+
+**Deferred:** `grim_detail` and `grim_list_installed` are not implemented
+in this branch. Write tools (`grim_add`, `grim_install`, `grim_update`,
+`grim_uninstall`) are **not yet registered** — only the `--allow-writes`
+flag and scope plumbing exist. They will be gated behind `--allow-writes`
+and added in a later change; all writes will route through existing seams,
+inheriting the path-anchor containment guard.
+
+**Tool input boundary (registry allowlist).** `grim_search` exposes **no**
+registry override: it always browses the server's configured registry set
+(`[[registries]]` + fallback). The CLI's `--registry` (free choice of host)
+is intentionally *not* surfaced to the agent — honoring an arbitrary
+agent-supplied registry would let a prompt-injected agent point grim at an
+unconfigured host (SSRF, CWE-918). The configured set is the security
+boundary; a narrower or unconfigured registry is reachable only by editing
+config, not by a tool call.
+
+**Known limitation (deferred):** tool errors currently return the full
+`anyhow` chain (`{err:#}`, which can include filesystem paths) to the MCP
+client (CWE-209). Accepted for v1 — the server is local and runs as the same
+user as the client, so the chain crosses no privilege boundary and aids
+debugging. Revisit (trim to a top-level message) before write tools land,
+when error surfaces widen.
 
 ## Consequences
 
 **Positive**
 - One catalog seam; the duplicated `resolve_registry` is deleted.
-- Multi-registry browse/search/install works across CLI, TUI, and MCP.
+- Multi-registry browse/search works across `grim search` and the MCP `grim_search` tool (TUI multi-registry deferred to a follow-up).
 - Concurrent processes coordinate cleanly: no corruption, no redundant
   registry walks, readers never block.
 - An AI agent gets a safe, read-by-default programmatic interface; mutation

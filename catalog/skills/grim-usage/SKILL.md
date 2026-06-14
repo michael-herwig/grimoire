@@ -1,11 +1,11 @@
 ---
 name: grim-usage
-description: Drive the grim CLI — the OCI package manager for AI skills, rules, agents, and bundles. Use when installing, updating, searching, or publishing AI-config artifacts with grim; when composing grim init, add, lock, install, update, status, search, build, release, publish, login, or logout commands; or when resolving registries, project vs global scope, client targets, or offline mode.
+description: Drive the grim CLI — the OCI package manager for AI skills, rules, agents, and bundles. Use when installing, updating, searching, or publishing AI-config artifacts with grim; when composing grim init, add, lock, install, update, status, search, tui, mcp, build, release, publish, login, or logout commands; when configuring multiple registries or qualified alias/repo references; or when resolving registries, project vs global scope, client targets, or offline mode.
 license: Apache-2.0
 compatibility: grim>=0.4
 metadata:
   summary: How to use the grim CLI end to end
-  keywords: grim,grimoire,cli,oci,registry,install,update,publish,skills,rules,agents,bundles
+  keywords: grim,grimoire,cli,oci,registry,install,update,publish,skills,rules,agents,bundles,mcp,multi-registry
   repository: https://github.com/michael-herwig/grimoire
 ---
 
@@ -43,6 +43,7 @@ full reference is `--help` plus the docs site linked below.
 | `grim status` | Report each declared artifact's state | [consume](references/consume.md) |
 | `grim remove` / `uninstall` | Undeclare vs full inverse of install | [consume](references/consume.md) |
 | `grim search` / `tui` | Browse a registry's catalog | [registries](references/registries.md) |
+| `grim mcp` | Run a local STDIO MCP server for AI agent integration | [registries](references/registries.md) |
 | `grim build` | Validate and pack locally, no push | [publish](references/publish.md) |
 | `grim release` | Validate, pack, push with cascade tags | [publish](references/publish.md) |
 | `grim publish` | Batch-release packages from a `publish.toml` manifest | [publish](references/publish.md) |
@@ -58,6 +59,13 @@ reference with no registry resolves against the default registry —
 `--registry` flag, then `GRIM_DEFAULT_REGISTRY`, then config, then the
 built-in default `grim.ocx.sh`; full
 precedence in [references/registries.md](references/registries.md).
+
+When a config declares `[[registries]]` with aliases, a **qualified
+reference** `alias/repo[:tag]` expands the alias to its configured URL —
+for example `acme/code-review:1` becomes `ghcr.io/acme/code-review:1`
+when `acme` is aliased to `ghcr.io/acme`. Full details and the
+multi-registry browse behavior in
+[references/registries.md](references/registries.md).
 
 ## Routing Table
 

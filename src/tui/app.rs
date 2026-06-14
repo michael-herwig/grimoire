@@ -547,6 +547,11 @@ async fn reload_into(ctx: &TuiContext, state: &mut TuiState, force: bool) {
     // The TUI browses a capped window (empty name-scope) and narrows
     // in-memory via the pure state filter; a registry-wide walk is a
     // cut-line shared with `search`.
+    //
+    // NOTE: the TUI still browses a SINGLE registry here, bypassing the shared
+    // `catalog_service::load_catalog` seam that `search`/`mcp` use. Migrating
+    // it onto that seam (so `[[registries]]` is honored) and rendering a
+    // collapsible registry tree is a deferred follow-up (Workstream E).
     match Catalog::load_or_refresh_coordinated(&ctx.catalog_path, &ctx.registry, "", &ctx.access, ctx.offline, force)
         .await
     {

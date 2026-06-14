@@ -28,6 +28,7 @@ column formats.
 | `grim login [<registry>]` | Authenticate to a registry; store the credential via the docker-compatible credential store (helper or, with `--allow-insecure-store`, plaintext) |
 | `grim logout [<registry>]` | Remove a stored registry credential (idempotent — exits 0 when nothing is stored) |
 | `grim schema --kind <config\|publish>` | Print the JSON Schema for `grimoire.toml` or `publish.toml` to stdout (generated from the real parse structs); emits a document, not a `Printable` report |
+| `grim mcp [--allow-writes] [--global] [--config <path>]` | Run a local STDIO Model Context Protocol server (rmcp SDK). Long-running, `Printable`-exempt (returns `ExitCode` directly, like `tui`/`schema`); stdout is the JSON-RPC channel. Read tools (`grim_search`, `grim_status`) always on; mutating tools gated behind `--allow-writes`. Scope fixed at start |
 | `grim version` | Print the compiled version |
 
 Global flags (illustrative): `--offline`, `--remote`, `--format json`.

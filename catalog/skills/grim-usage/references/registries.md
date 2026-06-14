@@ -5,8 +5,10 @@ reference hits, which scope a command edits, which AI clients an install
 lands in, how offline mode behaves, or how to search a catalog.
 
 Contents: [Registry Resolution](#registry-resolution) ·
+[Multiple Registries](#multiple-registries) ·
+[Qualified References](#qualified-references) ·
 [Scopes](#scopes) · [Client Targets](#client-targets) ·
-[Offline Mode](#offline-mode) · [Search and TUI](#search-and-tui)
+[Offline Mode](#offline-mode) · [Search, TUI, and MCP](#search-tui-and-mcp)
 
 ## Registry Resolution
 
@@ -41,6 +43,69 @@ Environment variables that matter here (full table:
 | `GRIM_OFFLINE` | Same as `--offline` |
 | `GRIM_INSECURE_REGISTRIES` | Comma-separated plain-HTTP registries (local/in-cluster) |
 | `DOCKER_CONFIG` | Directory of the Docker-compatible credential `config.json` |
+
+## Multiple Registries {#multiple-registries}
+
+When a project draws from more than one registry, declare them in a
+`[[registries]]` array in `grimoire.toml` (or the global config). When
+the array is present it replaces the single-registry path: `grim search`
+and the MCP server browse **all declared registries at once** instead of
+one. The TUI currently browses a single registry and does not yet consume
+`[[registries]]` — multi-registry TUI support is planned for a later
+release.
+
+Each entry:
+
+| Field | Required | Purpose |
+|-------|----------|---------|
+| `url` | yes | Registry host and optional namespace — same form as `[options].default_registry` |
+| `alias` | no | Short name for qualified `alias/repo` references |
+| `default` | no | Marks the primary registry for short-id expansion; first entry is primary when none set it |
+
+```toml
+[[registries]]
+alias = "acme"
+url = "ghcr.io/acme"
+default = true
+
+[[registries]]
+alias = "internal"
+url = "registry.corp.example/team"
+```
+
+Project entries take precedence over global entries; duplicate URLs are
+deduped, first occurrence wins. An explicit `--registry` flag still
+collapses the browse to exactly that one registry regardless of what is
+declared.
+
+A config with no `[[registries]]` behaves exactly as before — the
+`[options].default_registry` / `GRIM_DEFAULT_REGISTRY` / `--registry` /
+built-in fallback chain still applies (see [Registry Resolution](#registry-resolution)).
+Confirm with `grim --help` and `grim search --help`.
+
+## Qualified References {#qualified-references}
+
+A `[[registries]]` alias enables the `alias/repo[:tag]` qualified form:
+
+```sh
+# with alias "acme" → "ghcr.io/acme"
+grim add acme/code-review:1.2
+# expands to: ghcr.io/acme/code-review:1.2
+
+# with alias "internal" → "registry.corp.example/team"
+grim add internal/lint-rules:stable
+# expands to: registry.corp.example/team/lint-rules:stable
+```
+
+The separator is `/`, not `:` — the colon form (`alias:repo`) is not
+treated as a qualified reference because it is indistinguishable from a
+bare `repo:tag`. A leading segment that does not match any configured alias
+is treated as a repository path component under the primary registry:
+`acme/x:1` where `acme` is not an alias expands to
+`<primary-registry>/acme/x:1`.
+
+Short references (no `/`-prefix alias, no explicit registry) still expand
+against the primary registry unchanged.
 
 ## Scopes
 
@@ -91,39 +156,63 @@ grim install --offline # later: cache-only, no network
 The flag or env var are the only switches — there is no config-file
 counterpart for offline.
 
-## Search and TUI
+## Search, TUI, and MCP {#search-tui-and-mcp}
 
 `grim search [query]` matches a case-insensitive substring against each
 catalog entry's repository, summary, description, and keywords; an empty
-query lists the whole catalog. The catalog is cached under `$GRIM_HOME`
-— pass `--refresh` to rebuild it from the registry, `--registry` to pick
-which registry to search. Plain output shows the one-line summary
-(truncated to the terminal); piped output and `--format json` keep the
-full description, and JSON adds a `repository` URL field for tooling.
+query lists the whole catalog. When `[[registries]]` are configured, all
+of them are browsed and flattened into one table. The catalog is cached
+under `$GRIM_HOME` — pass `--refresh` to rebuild it from the registry,
+`--registry` to collapse the browse to exactly that one registry. Plain
+output shows the one-line summary (truncated to the terminal); piped
+output and `--format json` keep the full description, and JSON adds a
+`repository` URL field for tooling.
 
 ```sh
 grim search review
 grim search --refresh --registry ghcr.io/acme --format json
 ```
 
-`grim tui` browses the same catalog interactively: kind-grouped list,
+`grim tui` browses a registry's catalog interactively: kind-grouped list,
 live install state, multi-select with batch install/update/delete, and a
-detail pane per entry. When the active scope has no `grimoire.toml` yet
-it offers to create one before starting via popup dialogs (the registry
-input is pre-filled with the effective default registry — flag, env,
-global config, or the built-in fallback — and the accepted value is
-persisted as `default_registry`; cancelling closes the TUI). Its install, update, and delete actions go
-through the same seams as `grim add`/`install`/`uninstall`, so nothing
-the TUI does is special. Press `?` inside for the full key map rather
-than memorizing keys from any guide.
+detail pane per entry. It browses a single registry (the effective default
+registry from the precedence chain — flag, env, global config, or the
+built-in fallback); multi-registry browse is planned for a future release.
+When the active scope has no `grimoire.toml` yet it offers to create one
+before starting via popup dialogs (the registry input is pre-filled with
+the effective default registry and the accepted value is persisted as
+`default_registry`; cancelling closes the TUI). Its install, update, and
+delete actions go through the same seams as
+`grim add`/`install`/`uninstall`. Press `?` inside for the full key map.
+
+`grim mcp` runs a local [Model Context Protocol][mcp-spec] server over
+STDIO. An AI agent host such as [Claude Code][claude-code] connects to it
+and can call two read tools:
+
+| Tool | What it returns |
+|------|-----------------|
+| `grim_search` | Same JSON as `grim search --format json`, over the configured registries (no registry override). Args: `query?`, `refresh?` |
+| `grim_status` | Same JSON as `grim status --format json` for the fixed scope |
+
+The server is read-only by default; `--allow-writes` reserves the gate
+for mutating tools in a future release. The scope (`--global` or
+`--config <path>`) is fixed at startup — tool calls cannot redirect it.
+Diagnostics go to stderr; stdout is the JSON-RPC channel. Register it
+in a project `.mcp.json`:
+
+```json
+{ "mcpServers": { "grimoire": { "command": "grim", "args": ["mcp"] } } }
+```
+
+Confirm current flags with `grim mcp --help`.
 
 ## Further Reading
 
 - [Concepts: scopes][scopes], [clients][clients], and
   [online-by-default][online] — the semantics behind each section above.
-- [Configuration][envvars] — environment variables, precedence rules,
-  data layout under `GRIM_HOME`.
-- [Command reference: search][search] and [tui][tui].
+- [Configuration][envvars] — environment variables, `[[registries]]`
+  schema, precedence rules, data layout under `GRIM_HOME`.
+- [Command reference: search][search], [tui][tui], and [mcp][mcp].
 
 [scopes]: https://michael-herwig.github.io/grimoire/concepts.html#scopes
 [clients]: https://michael-herwig.github.io/grimoire/concepts.html#clients
@@ -131,3 +220,6 @@ than memorizing keys from any guide.
 [envvars]: https://michael-herwig.github.io/grimoire/configuration.html#environment-variables
 [search]: https://michael-herwig.github.io/grimoire/commands.html#search
 [tui]: https://michael-herwig.github.io/grimoire/commands.html#tui
+[mcp]: https://michael-herwig.github.io/grimoire/commands.html#mcp
+[mcp-spec]: https://spec.modelcontextprotocol.io/
+[claude-code]: https://docs.anthropic.com/en/docs/claude-code

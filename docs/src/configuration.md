@@ -52,6 +52,72 @@ defaults to `:latest`. Per `(kind, name)`, a direct declaration wins over any
 bundle, agreeing bundles coalesce, and disagreeing bundles fail closed; see the
 [conflict policy](./concepts.md#bundle-conflicts).
 
+## Multiple registries {#multiple-registries}
+
+A project that pulls artifacts from more than one registry can declare all
+of them in a `[[registries]]` array instead of juggling `--registry` flags.
+When the array is present it becomes the authoritative browse set for
+[`grim search`](./commands.md#search) and the [MCP server](./commands.md#mcp);
+an explicit `--registry` flag still collapses the browse to exactly that one
+registry. The [TUI](./commands.md#tui) currently browses a single registry
+and does not yet consume `[[registries]]` — multi-registry TUI support is
+planned for a future release.
+
+Each entry has one required field and two optional fields:
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `url` | yes | Registry host and optional namespace, e.g. `ghcr.io/acme`. Same form as `[options].default_registry`. |
+| `alias` | no | Short name for use in [qualified references](#qualified-references). Must be unique across the array. |
+| `default` | no | Marks this entry as the primary registry short identifiers expand against. At most one entry may set it; when none do, the first entry is primary. |
+
+```toml
+#:schema https://michael-herwig.github.io/grimoire/schemas/grimoire-config.schema.json
+[[registries]]
+alias = "acme"
+url = "ghcr.io/acme"
+default = true
+
+[[registries]]
+alias = "internal"
+url = "registry.corp.example/team"
+```
+
+The same `[[registries]]` array can appear in the global config
+(`$GRIM_HOME/grimoire.toml`). Project entries take precedence over global
+entries; duplicate URLs are deduped, first occurrence wins.
+
+**Backward compatibility**: a config that omits `[[registries]]` entirely
+behaves exactly as before — `[options].default_registry`, the environment
+variable `GRIM_DEFAULT_REGISTRY`, and the `--registry` flag still drive the
+single-registry path. The two approaches do not mix: when any `[[registries]]`
+entry is declared, `[options].default_registry` is ignored for browse purposes
+(the `default = true` entry, or first entry, takes its role).
+
+### Qualified references {#qualified-references}
+
+When registries have aliases, a reference can be qualified with
+`alias/repo[:tag]` to expand the alias to its configured URL. For example,
+with the config above:
+
+```sh
+grim add acme/code-review:1.2
+# expands to: grim add ghcr.io/acme/code-review:1.2
+
+grim add internal/lint-rules:stable
+# expands to: grim add registry.corp.example/team/lint-rules:stable
+```
+
+The qualified form uses a slash separator (`alias/repo`), not a colon —
+`alias:repo` would be ambiguous with `repo:tag`. A reference whose leading
+`/`-segment does not match any alias is treated as a multi-segment
+repository path under the primary registry, exactly as without aliases
+configured.
+
+Short references with no alias and no explicit registry still expand
+against the primary (or only) registry, unchanged from the single-registry
+behavior.
+
 ## `grimoire.lock`
 
 The lockfile pins every declared tag to an exact digest and records the
