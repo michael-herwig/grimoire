@@ -97,19 +97,20 @@ empty.
 
 ## Portability
 
-Agents are the **least portable** artifact type — three incompatible
+Agents are the **least portable** artifact type — four incompatible
 envelopes (as of 2026):
 
-| Client | Path | Notes |
-|---|---|---|
-| Claude Code | `.claude/agents/*.md` | Richest field set; tools inherit-all when omitted |
-| OpenCode | `.opencode/agents/*.md` | Primary/subagent modes; per-tool permission map |
-| Copilot | `.github/agents/*.agent.md` | Body capped at 30,000 chars (as of 2026; re-verify) |
+| Client | Path | Format | Notes |
+|---|---|---|---|
+| Claude Code | `.claude/agents/*.md` | Markdown | Richest field set; tools inherit-all when omitted |
+| OpenCode | `.opencode/agents/*.md` | Markdown | Primary/subagent modes; per-tool permission map |
+| Copilot | `.github/agents/*.agent.md` | Markdown | Body capped at 30,000 chars (as of 2026; re-verify) |
+| Codex | `.codex/agents/<name>.toml` | TOML | Body in `developer_instructions`; `tools` dropped with warning |
 
 The only cross-read: VS Code Copilot also detects `.claude/agents/*.md`.
-OpenCode reads neither foreign path. Portable strategy: keep the prompt
-body vendor-neutral and generate the per-client frontmatter envelopes;
-only `description` is conceptually common to all three.
+OpenCode and Codex read neither foreign path. Portable strategy: keep the
+prompt body vendor-neutral and generate the per-client envelopes; only
+`description` is conceptually common to all four.
 
 ## Further Reading
 

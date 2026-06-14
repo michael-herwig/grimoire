@@ -32,6 +32,7 @@ use super::install_error::{InstallError, InstallErrorKind};
 
 use super::vendor::Vendor;
 use super::vendor_claude::ClaudeVendor;
+use super::vendor_codex::CodexVendor;
 use super::vendor_copilot::CopilotVendor;
 use super::vendor_opencode::OpenCodeVendor;
 
@@ -48,6 +49,9 @@ pub enum ClientTarget {
     OpenCode,
     /// GitHub Copilot — `.github/{skills,instructions}` (rules transformed).
     Copilot,
+    /// OpenAI Codex — `.agents/skills` + `.codex/agents/<name>.toml`
+    /// (skills + agents only; rules unsupported).
+    Codex,
 }
 
 impl std::str::FromStr for ClientTarget {
@@ -58,6 +62,7 @@ impl std::str::FromStr for ClientTarget {
             "claude" => Ok(Self::Claude),
             "opencode" => Ok(Self::OpenCode),
             "copilot" => Ok(Self::Copilot),
+            "codex" => Ok(Self::Codex),
             other => Err(InstallError::without_reference(InstallErrorKind::UnsupportedClient(
                 other.to_string(),
             ))),
@@ -84,7 +89,7 @@ pub struct MaterializedFile {
 
 impl ClientTarget {
     /// Every supported client, in canonical order.
-    pub const ALL: [ClientTarget; 3] = [Self::Claude, Self::OpenCode, Self::Copilot];
+    pub const ALL: [ClientTarget; 4] = [Self::Claude, Self::OpenCode, Self::Copilot, Self::Codex];
 
     /// The per-vendor materialization strategy behind this identity.
     pub fn vendor(self) -> &'static dyn Vendor {
@@ -92,6 +97,7 @@ impl ClientTarget {
             Self::Claude => &ClaudeVendor,
             Self::OpenCode => &OpenCodeVendor,
             Self::Copilot => &CopilotVendor,
+            Self::Codex => &CodexVendor,
         }
     }
 
@@ -345,6 +351,7 @@ mod tests {
             ("claude", ClientTarget::Claude),
             ("opencode", ClientTarget::OpenCode),
             ("copilot", ClientTarget::Copilot),
+            ("codex", ClientTarget::Codex),
         ] {
             assert_eq!(ClientTarget::from_str(s).unwrap(), t);
             assert_eq!(t.to_string(), s);
@@ -395,6 +402,21 @@ mod tests {
             ),
             PathBuf::from("/w/.github/instructions/rust-style.instructions.md")
         );
+        // Codex: skills land in the cross-vendor `.agents/skills` tree;
+        // agents are TOML under `.codex/agents`.
+        assert_eq!(
+            ClientTarget::Codex.path_for(w, crate::config::scope::ConfigScope::Project, ArtifactKind::Skill, "x"),
+            PathBuf::from("/w/.agents/skills/x")
+        );
+        assert_eq!(
+            ClientTarget::Codex.path_for(
+                w,
+                crate::config::scope::ConfigScope::Project,
+                ArtifactKind::Agent,
+                "rev"
+            ),
+            PathBuf::from("/w/.codex/agents/rev.toml")
+        );
     }
 
     #[test]
@@ -416,6 +438,21 @@ mod tests {
                 ClientTarget::Copilot.path_for(w, g, ArtifactKind::Skill, "x"),
                 home.join(".copilot/skills/x")
             );
+            // Codex skills follow the cross-vendor `$HOME/.agents/skills`
+            // standard — NOT `$CODEX_HOME` (proven by the agent path below).
+            assert_eq!(
+                ClientTarget::Codex.path_for(w, g, ArtifactKind::Skill, "x"),
+                home.join(".agents/skills/x")
+            );
+            // Codex agents live under `$CODEX_HOME|~/.codex` + `agents/`; the
+            // env-override order is unit-tested in vendor_codex, so only assert
+            // the `~/.codex` default when CODEX_HOME is unset.
+            if crate::install::vendor::env_dir("CODEX_HOME").is_none() {
+                assert_eq!(
+                    ClientTarget::Codex.path_for(w, g, ArtifactKind::Agent, "rev"),
+                    home.join(".codex/agents/rev.toml")
+                );
+            }
         }
         if let Some(cfg) = crate::install::vendor::xdg_config_dir() {
             assert_eq!(
@@ -514,7 +551,12 @@ mod tests {
         std::fs::write(root.join("SKILL.md"), "---\nname: code-review\ndescription: d\n---\n").unwrap();
         std::fs::write(root.join("scripts/run.sh"), "echo hi\n").unwrap();
 
-        for client in [ClientTarget::Claude, ClientTarget::OpenCode, ClientTarget::Copilot] {
+        for client in [
+            ClientTarget::Claude,
+            ClientTarget::OpenCode,
+            ClientTarget::Copilot,
+            ClientTarget::Codex,
+        ] {
             let dest = tmp.path().join(format!("out-{client}/code-review"));
             let files = client
                 .materialize(ArtifactKind::Skill, "code-review", &root, &dest, "p", None)
@@ -600,7 +642,12 @@ mod tests {
         std::fs::write(root.join("SKILL.md"), canonical).unwrap();
         std::fs::write(root.join("scripts/run.sh"), "echo hi\n").unwrap();
 
-        for client in [ClientTarget::Claude, ClientTarget::OpenCode, ClientTarget::Copilot] {
+        for client in [
+            ClientTarget::Claude,
+            ClientTarget::OpenCode,
+            ClientTarget::Copilot,
+            ClientTarget::Codex,
+        ] {
             let dest = tmp.path().join(format!("out-{client}/next"));
             let files = client
                 .materialize(ArtifactKind::Skill, "next", &root, &dest, "p", None)
@@ -639,7 +686,12 @@ mod tests {
         let canonical = "---\nname: plain\ndescription: d\nmetadata:\n  keywords: a,b\n---\n# body\n";
         std::fs::write(root.join("SKILL.md"), canonical).unwrap();
 
-        for client in [ClientTarget::Claude, ClientTarget::OpenCode, ClientTarget::Copilot] {
+        for client in [
+            ClientTarget::Claude,
+            ClientTarget::OpenCode,
+            ClientTarget::Copilot,
+            ClientTarget::Codex,
+        ] {
             let dest = tmp.path().join(format!("out-{client}/plain"));
             let files = client
                 .materialize(ArtifactKind::Skill, "plain", &root, &dest, "p", None)

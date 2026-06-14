@@ -32,7 +32,8 @@ On every grim **minor** release:
 ## Durable Search Terms
 
 - `grimoire grim build exit 65 DataError validation`
-- `grim vendor metadata projection claude opencode copilot registry`
+- `grim vendor metadata projection claude opencode copilot codex registry`
+- `codex subagents TOML agent developer_instructions`
 - `grim catalog metadata summary keywords repository annotation`
 - `grim bundle pin floating members cascade tags`
 - `agentskills.io specification metadata map string values`

@@ -3,11 +3,14 @@
 
 //! `grim install` output.
 //!
-//! Plain format: 4-column table (Kind | Name | Target | Status).
+//! Plain format: 4-column table (Kind | Name | Target | Status). The
+//! Target cell is `—` when nothing was written (every selected client
+//! declined the kind).
 //!
 //! JSON format: an array of `{kind, name, target, status}` objects (the
 //! report wraps a `Vec`, serialized to the bare array — no wrapper
-//! object, per subsystem-cli-api.md).
+//! object, per subsystem-cli-api.md). `target` is `null` when no client
+//! wrote a file.
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -25,7 +28,9 @@ pub struct InstallEntry {
     #[serde(serialize_with = "serialize_kind")]
     pub kind: ArtifactKind,
     pub name: String,
-    pub target: PathBuf,
+    /// The on-disk path written, or `None` when every selected client
+    /// declined the kind (serialized as `null`, rendered as `—`).
+    pub target: Option<PathBuf>,
     pub status: InstallStatus,
 }
 
@@ -61,7 +66,9 @@ impl Printable for InstallReport {
                 vec![
                     e.kind.to_string(),
                     e.name.clone(),
-                    e.target.display().to_string(),
+                    e.target
+                        .as_ref()
+                        .map_or_else(|| "—".to_string(), |p| p.display().to_string()),
                     e.status.to_string(),
                 ]
             })
@@ -84,7 +91,7 @@ mod tests {
         let r = InstallReport::new(vec![InstallEntry {
             kind: ArtifactKind::Skill,
             name: "code-review".to_string(),
-            target: PathBuf::from("/w/.claude/skills/code-review"),
+            target: Some(PathBuf::from("/w/.claude/skills/code-review")),
             status: InstallStatus::Installed,
         }]);
         let mut buf = Vec::new();
@@ -100,7 +107,7 @@ mod tests {
         let r = InstallReport::new(vec![InstallEntry {
             kind: ArtifactKind::Rule,
             name: "rust-style".to_string(),
-            target: PathBuf::from("/w/.claude/rules/rust-style.md"),
+            target: Some(PathBuf::from("/w/.claude/rules/rust-style.md")),
             status: InstallStatus::Refused,
         }]);
         let mut buf = Vec::new();
@@ -109,5 +116,24 @@ mod tests {
         assert!(v.is_array());
         assert_eq!(v[0]["kind"], "rule");
         assert_eq!(v[0]["status"], "refused");
+    }
+
+    #[test]
+    fn none_target_renders_dash_and_null() {
+        // A declined-only install (every selected client declines the kind)
+        // has no on-disk path: plain shows `—`, JSON shows `null`.
+        let r = InstallReport::new(vec![InstallEntry {
+            kind: ArtifactKind::Rule,
+            name: "rust-style".to_string(),
+            target: None,
+            status: InstallStatus::Skipped,
+        }]);
+        let mut plain = Vec::new();
+        r.print_plain(&mut plain).unwrap();
+        assert!(String::from_utf8(plain).unwrap().contains('—'));
+        let mut json = Vec::new();
+        r.print_json(&mut json).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        assert!(v[0]["target"].is_null());
     }
 }

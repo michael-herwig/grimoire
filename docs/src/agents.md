@@ -6,11 +6,12 @@ its own system prompt, model, and tool access.
 
 Every major AI client has grown such a definition format: [Claude Code
 subagents][claude-subagents-docs], [OpenCode agents][opencode-agents-docs],
-and [Copilot CLI custom agents][copilot-agents-docs]. All three read a
-Markdown file with YAML frontmatter whose body is the system prompt — but
-each with its own field names, its own directory, and its own quirks.
-Teams end up copy-pasting near-identical agent files between repositories
-and editing three variants by hand.
+[Copilot CLI custom agents][copilot-agents-docs], and [OpenAI Codex
+agents][codex-subagents-docs]. Three of the four read a Markdown file with
+YAML frontmatter whose body is the system prompt — but each with its own
+field names, its own directory, and its own quirks. Codex takes a different
+path entirely: it reads TOML. Teams end up copy-pasting near-identical
+agent files between repositories and editing four variants by hand.
 
 Grimoire treats an agent like any other artifact: author **one canonical
 file**, publish it once, and let `grim install` project it into each
@@ -86,15 +87,16 @@ OpenCode needs.
 
 On install, grim projects the canonical file per client:
 
-| Canonical field | [Claude Code][claude-subagents-docs] | [OpenCode][opencode-agents-docs] | [Copilot CLI][copilot-agents-docs] |
-|---|---|---|---|
-| `name` | kept | **dropped** (filename is the identity) | kept |
-| `description` | kept | kept | kept |
-| `model` | kept | kept (see [precedence](#override-precedence)) | **dropped** (no documented field) |
-| `tools` | kept (comma string) | **dropped** (deprecated upstream) | emitted as a YAML **list** |
-| plain `metadata` / unknown keys | kept | dropped | dropped |
-| body | verbatim | verbatim | verbatim |
-| provenance comment | none | yes | yes |
+| Canonical field | [Claude Code][claude-subagents-docs] | [OpenCode][opencode-agents-docs] | [Copilot CLI][copilot-agents-docs] | [Codex][codex-subagents-docs] |
+|---|---|---|---|---|
+| `name` | kept | **dropped** (filename is the identity) | kept | kept (`name` key in TOML) |
+| `description` | kept | kept | kept | kept (`description` key in TOML) |
+| `model` | kept | kept (see [precedence](#override-precedence)) | **dropped** (no documented field) | kept (optional `model` key in TOML) |
+| `tools` | kept (comma string) | **dropped** (deprecated upstream) | emitted as a YAML **list** | **dropped with warning** (no Codex equivalent) |
+| plain `metadata` / unknown keys | kept | dropped | dropped | dropped |
+| body | verbatim | verbatim | verbatim | `developer_instructions` key in TOML |
+| output format | Markdown + YAML frontmatter | Markdown (no frontmatter) | Markdown + YAML frontmatter | **TOML** (`<name>.toml`) |
+| provenance comment | none | yes | yes | none |
 
 The canonical format **is** Claude Code's native subagent format, so a
 plain agent — one with no `<vendor>.<field>` metadata keys — installs for
@@ -112,6 +114,7 @@ provenance comment; editing them by hand is detected as
 | [Claude Code][claude-subagents-docs] | `.claude/agents/<name>.md` |
 | [OpenCode][opencode-agents-docs] | `.opencode/agents/<name>.md` |
 | [Copilot CLI][copilot-agents-docs] | `.github/agents/<name>.md` |
+| [Codex][codex-subagents-docs] | `.codex/agents/<name>.toml` |
 
 **Global scope** (native user-level discovery directories, honoring each
 client's directory-override variable — the same resolution as
@@ -122,6 +125,7 @@ client's directory-override variable — the same resolution as
 | [Claude Code][claude-subagents-docs] | `~/.claude/agents/<name>.md` | `$CLAUDE_CONFIG_DIR/agents/` |
 | [OpenCode][opencode-agents-docs] | `~/.config/opencode/agents/<name>.md` (XDG) | `$OPENCODE_CONFIG_DIR/agents/` |
 | [Copilot CLI][copilot-agents-docs] | `~/.copilot/agents/<name>.md` | `$COPILOT_HOME/agents/` |
+| [Codex][codex-subagents-docs] | `~/.codex/agents/<name>.toml` | `$CODEX_HOME/agents/` |
 
 Unlike global rules, Copilot agents have a real user-level home — no
 inert-install warning applies.
@@ -179,11 +183,25 @@ grim uninstall agent code-reviewer         # removes files + declaration
 - **No model translation.** The common `model` passes through verbatim;
   use `opencode.model` when the OpenCode side needs a
   `provider/model-id` value.
+- **[Codex][codex-subagents-docs] `tools` field dropped.** [Codex][codex-subagents-docs]
+  has no native equivalent for the `tools` field. When installing for
+  [Codex][codex-subagents-docs], grim drops `tools` entirely and emits a
+  warning. This is a hard drop, not a projection — no Codex TOML key
+  carries the value.
+- **[Codex][codex-subagents-docs] agents are TOML, not Markdown.** The
+  installed file at `.codex/agents/<name>.toml` (or
+  `$CODEX_HOME/agents/<name>.toml` globally) is a TOML document, not a
+  Markdown file. The canonical agent body lands in the
+  `developer_instructions` key; `name`, `description`, and optionally
+  `model` are top-level TOML keys. Vendor-namespaced `codex.*` keys in
+  `metadata` (e.g., `codex.reasoning-effort`, `codex.sandbox-mode`) lift
+  to their native TOML counterparts.
 
 <!-- external -->
 [claude-subagents-docs]: https://code.claude.com/docs/en/sub-agents
 [opencode-agents-docs]: https://opencode.ai/docs/agents/
 [copilot-agents-docs]: https://docs.github.com/en/copilot/concepts/agents/copilot-cli/about-custom-agents
+[codex-subagents-docs]: https://developers.openai.com/codex/subagents
 
 <!-- internal -->
 [vendor-metadata]: ./vendor-metadata.md

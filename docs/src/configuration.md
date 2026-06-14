@@ -28,11 +28,11 @@ code-reviewer = "ghcr.io/acme/code-reviewer:1"
 
 `default_registry` lets you write short references; `clients` selects which
 [AI clients](./concepts.md#clients) `grim install` and `grim update` materialize
-into. It accepts a TOML array of client names (`claude`, `opencode`, `copilot`);
-when absent, the **detected** clients for the scope are targeted — every client
-whose vendor directory or marker is present — falling back to all clients when
-none are detected. Unknown keys are rejected on parse, so a typo surfaces
-immediately rather than silently doing nothing.
+into. It accepts a TOML array of client names (`claude`, `opencode`, `copilot`,
+`codex`); when absent, the **detected** clients for the scope are targeted —
+every client whose vendor directory or marker is present — falling back to all
+clients when none are detected. Unknown keys are rejected on parse, so a typo
+surfaces immediately rather than silently doing nothing.
 
 An optional `[bundles]` table declares [bundles](./concepts.md#bundles), each
 mapping a binding name to a bundle reference. A bundle expands into its member

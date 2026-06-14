@@ -22,6 +22,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CopilotRoot`, `OpenCodeSkills`, `OpenCodeRoot`, `GrimHome` *(install)*
 - `OpenCodeRoot` anchor for global OpenCode agent paths
   (`<opencode_root>/agents/<name>.md`) *(install)*
+- OpenAI Codex CLI is now a supported install target: `--client codex` on the
+  CLI and `clients = ["codex"]` in `[options]`, alongside Claude, Copilot, and
+  OpenCode *(install)*
+- Codex skills install to the cross-vendor open standard
+  `.agents/skills/<name>/` — project-scope under `<workspace>/.agents/skills`,
+  global-scope under `$HOME/.agents/skills` (independent of `$CODEX_HOME`)
+  *(install)*
+- Codex agents render to TOML at `.codex/agents/<name>.toml`, supporting
+  `name`, `description`, `developer_instructions`, and optional `model`; Codex-
+  specific knobs (`codex.model`, `codex.reasoning-effort`, `codex.sandbox-mode`)
+  are also honored; `tools` entries are dropped with a warning *(install)*
+- Codex rules are unsupported (Codex has no path-scoped instruction mechanism);
+  grim warns and skips rule artifacts silently *(install)*
+- New `CODEX_HOME` env var relocates the Codex agent directory (skills are
+  unaffected) *(install)*
 
 ### Changed
 
