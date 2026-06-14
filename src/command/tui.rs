@@ -112,8 +112,9 @@ pub async fn run(ctx: &Context, args: &TuiArgs) -> anyhow::Result<ExitCode> {
         });
 
     let tui_ctx = TuiContext {
+        // Per-registry cache file (borrow `registry` before it moves below).
+        catalog_path: ctx.paths().catalog_file_for(&registry),
         registry,
-        catalog_path: ctx.paths().catalog_file(),
         access,
         offline: ctx.offline(),
         force_refresh: args.refresh,

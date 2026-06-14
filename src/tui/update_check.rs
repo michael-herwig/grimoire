@@ -256,7 +256,9 @@ impl UpdateChecker {
             // `force = true` rebuilds even a fresh cache; `offline = false`
             // because the app pre-checks `ctx.offline` and never spawns when
             // offline (and `load_or_refresh` would degrade to cache anyway).
-            if let Ok(catalog) = Catalog::load_or_refresh(&catalog_path, &registry, "", &access, false, true).await {
+            if let Ok(catalog) =
+                Catalog::load_or_refresh_coordinated(&catalog_path, &registry, "", &access, false, true).await
+            {
                 // Drop on a full channel: a stale catalog is superseded by
                 // the next refresh; never block the task. Stamped with the
                 // scheduling generation so a refresh spawned under a scope the

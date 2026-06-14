@@ -16,6 +16,7 @@ pub mod install;
 pub mod lock;
 pub mod login;
 pub mod logout;
+pub mod mcp;
 pub mod publish;
 pub mod release;
 pub mod remove;
@@ -97,6 +98,49 @@ pub fn global_config_default(
     crate::config::global_config::GlobalConfig::load(&ctx.paths().global_config())
         .ok()
         .and_then(|cfg| cfg.options.default_registry)
+}
+
+/// The global config's `[[registries]]`, loaded best-effort as a
+/// lower-priority tier than the project `[[registries]]`. Returns an empty
+/// vec for a global-scope run (the global config is already that run's
+/// active scope, so it must not be folded in twice) and on any load failure
+/// (the registries are advisory at this tier, never fatal).
+///
+/// Single-sourced alongside [`global_config_default`] so every
+/// registry-resolving command assembles the same browse set.
+pub fn global_config_registries(
+    ctx: &crate::context::Context,
+    scope: crate::config::scope::ConfigScope,
+) -> Vec<crate::config::declaration::RegistryConfig> {
+    if scope == crate::config::scope::ConfigScope::Global {
+        return Vec::new();
+    }
+    crate::config::global_config::GlobalConfig::load(&ctx.paths().global_config())
+        .map(|cfg| cfg.registries)
+        .unwrap_or_default()
+}
+
+/// Assemble the ordered registry browse set for a resolved scope.
+///
+/// The single seam `search` / `tui` / `mcp` call to get the multi-registry
+/// set: it folds the `--registry` flag / `$GRIM_DEFAULT_REGISTRY`, the
+/// scope's `[[registries]]` + `[options].default_registry`, and the global
+/// config's tiers through [`crate::config::resolve_registries`] so the
+/// precedence is single-sourced.
+pub fn registries_for_scope(
+    ctx: &crate::context::Context,
+    scope: &scope_resolution::ResolvedScope,
+) -> Vec<crate::config::ResolvedRegistry> {
+    let global_registries = global_config_registries(ctx, scope.scope);
+    let global_default = global_config_default(ctx, scope.scope);
+    crate::config::resolve_registries(
+        ctx.default_registry(),
+        &scope.registries,
+        scope.options.default_registry.as_deref(),
+        &global_registries,
+        global_default.as_deref(),
+        FALLBACK_REGISTRY,
+    )
 }
 
 /// Build a classifiable usage error (exit 64) for a missing `login`

@@ -12,7 +12,8 @@
 //! that tag's manifest. No blob is ever pulled (catalog is metadata-only).
 //! Walking an entire (potentially huge) registry is an explicit cut-line.
 //!
-//! The file at `$GRIM_HOME/catalog.json` is version-enveloped via
+//! The per-registry cache file at `$GRIM_HOME/catalog/<hash>.json` is
+//! version-enveloped via
 //! `serde_repr` (an unknown version is rejected, never silently reset) and
 //! written through the shared atomic-write primitive. A 1 hour TTL governs
 //! freshness; `--refresh` forces a rebuild. Offline never errors here: a
@@ -20,11 +21,12 @@
 //! cache yields an empty catalog rather than a failure.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 
+use crate::lock::advisory_lock::AdvisoryFileLock;
 use crate::oci::access::OciAccess;
 use crate::oci::{Identifier, PinnedIdentifier};
 use crate::store::atomic_write::atomic_write;
@@ -120,7 +122,7 @@ impl CatalogEntry {
     }
 }
 
-/// Versioned envelope persisted at `$GRIM_HOME/catalog.json`.
+/// Versioned envelope persisted per registry at `$GRIM_HOME/catalog/<hash>.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CatalogFile {
@@ -154,6 +156,31 @@ pub struct Catalog {
     truncated: bool,
     built_at: String,
     entries: BTreeMap<String, CatalogEntry>,
+}
+
+/// The outcome of the coordinated refresh's blocking pre-flight: either a
+/// catalog ready to serve, or a decision to rebuild (with the advisory lock
+/// when one was won — `None` is the uncoordinated fallback after a lock I/O
+/// fault).
+enum PreFlight {
+    Serve(Catalog),
+    Rebuild(Option<AdvisoryFileLock>),
+}
+
+/// Run a blocking catalog op on the blocking pool, surfacing a panic via
+/// `resume_unwind` (a panic is a bug, not a cache condition) and mapping a
+/// genuine task cancellation to an I/O error keyed to `path`. Mirrors the
+/// `auth::store` blocking bridge.
+async fn run_blocking<T, F>(path: PathBuf, f: F) -> Result<T, CatalogError>
+where
+    F: FnOnce() -> Result<T, CatalogError> + Send + 'static,
+    T: Send + 'static,
+{
+    match tokio::task::spawn_blocking(f).await {
+        Ok(result) => result,
+        Err(join) if join.is_panic() => std::panic::resume_unwind(join.into_panic()),
+        Err(join) => Err(CatalogError::io(&path, std::io::Error::other(join))),
+    }
 }
 
 impl Catalog {
@@ -296,6 +323,140 @@ impl Catalog {
             .map_err(|e| CatalogError::access(path, e))?;
         rebuilt.save(path)?;
         Ok(rebuilt)
+    }
+
+    /// Like [`Self::load_or_refresh`], but coordinates the rebuild across
+    /// concurrent processes via an advisory lock on the cache file so a long-
+    /// lived MCP server, a CLI invocation, and the TUI sharing one
+    /// `$GRIM_HOME` do not each walk the registry at once.
+    ///
+    /// The fresh-cache path takes **no lock** — readers are never blocked.
+    /// When a refresh is needed the rebuild is gated by a non-blocking
+    /// [`AdvisoryFileLock`] on the cache file:
+    /// - **Won the lock:** re-read the cache (a peer may have refreshed it
+    ///   while we contended); serve it if now fresh, else rebuild + persist.
+    /// - **Lost the lock (a peer is refreshing):** serve the stale cache (or
+    ///   an empty catalog on a cold miss) instead of joining a thundering
+    ///   herd of redundant registry walks.
+    ///
+    /// The lock is an OS file handle held across the async rebuild — not a
+    /// `MutexGuard`, so it is sound to hold across `.await`. A genuine lock
+    /// I/O fault (e.g. a symlinked cache path) degrades to an uncoordinated
+    /// rebuild rather than failing the operation; the atomic write still
+    /// prevents corruption.
+    ///
+    /// # Errors
+    ///
+    /// [`CatalogError`] for a cache parse/version failure, or a genuine
+    /// registry transport/auth failure during a rebuild this process owns.
+    pub async fn load_or_refresh_coordinated(
+        path: &Path,
+        registry: &str,
+        query: &str,
+        access: &std::sync::Arc<dyn OciAccess>,
+        offline: bool,
+        force: bool,
+    ) -> Result<Self, CatalogError> {
+        let scope = query.to_lowercase();
+
+        // Phase 1 — blocking pre-flight on the blocking pool: read the cache,
+        // decide, and (when a rebuild is needed) acquire the advisory lock and
+        // double-check. The cache read, the flock syscall, and the Windows
+        // delete-pending retry `sleep` are all blocking, so they must never
+        // run on a Tokio worker (quality-rust: no blocking I/O in async).
+        let preflight = {
+            let path = path.to_path_buf();
+            let registry = registry.to_string();
+            let scope = scope.clone();
+            run_blocking(path.clone(), move || {
+                let cached = Catalog::load(&path, &registry)?;
+
+                // Offline: serve whatever is cached (any scope), never lock or
+                // reach the network. A cold cache is empty.
+                if offline {
+                    return Ok(PreFlight::Serve(cached.unwrap_or_else(|| Catalog::empty(&registry))));
+                }
+
+                // Fast path: a fresh, same-scope cache serves with no lock
+                // taken, so the common case never contends.
+                if !force
+                    && let Some(c) = &cached
+                    && c.scope == scope
+                    && c.is_fresh(chrono::Utc::now())
+                {
+                    return Ok(PreFlight::Serve(c.clone()));
+                }
+
+                // The cache file's parent (the per-registry `catalog/` dir)
+                // must exist for the sidecar and the atomic write; best-effort.
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+
+                match AdvisoryFileLock::try_acquire(&path) {
+                    Ok(guard) => {
+                        // Double-check: a peer may have rebuilt while we
+                        // contended for the lock. Serve their fresh build
+                        // instead of redoing it.
+                        if !force
+                            && let Some(c) = Catalog::load(&path, &registry)?
+                            && c.scope == scope
+                            && c.is_fresh(chrono::Utc::now())
+                        {
+                            return Ok(PreFlight::Serve(c));
+                        }
+                        Ok(PreFlight::Rebuild(Some(guard)))
+                    }
+                    // A peer owns the refresh — serve stale (or empty) and move
+                    // on rather than walking the registry redundantly.
+                    Err(e) if matches!(e.kind, crate::lock::lock_error::LockErrorKind::Locked) => {
+                        Ok(PreFlight::Serve(cached.unwrap_or_else(|| Catalog::empty(&registry))))
+                    }
+                    // A real lock I/O fault: fall back to an uncoordinated
+                    // rebuild (the atomic write still prevents corruption).
+                    Err(_) => Ok(PreFlight::Rebuild(None)),
+                }
+            })
+            .await?
+        };
+
+        let guard = match preflight {
+            PreFlight::Serve(catalog) => return Ok(catalog),
+            PreFlight::Rebuild(guard) => guard,
+        };
+
+        // Phase 2 — the network rebuild, the only genuinely async work, runs on
+        // the async executor. The advisory lock (an OS file handle, not a
+        // `MutexGuard`) is held across this await: sound to hold across `.await`.
+        // On a build failure the guard is handed to the blocking pool for
+        // disposal — its `Drop` unlinks the sidecar (a blocking syscall that
+        // must not run on a Tokio worker), the same reason the commit below is
+        // blocking.
+        let rebuilt = match Self::build(registry, &scope, access).await {
+            Ok(rebuilt) => rebuilt,
+            Err(build_err) => {
+                let lock_path = path.to_path_buf();
+                let _ = run_blocking(lock_path, move || {
+                    drop(guard);
+                    Ok(())
+                })
+                .await;
+                return Err(CatalogError::access(path, build_err));
+            }
+        };
+
+        // Phase 3 — blocking commit on the blocking pool: atomically write the
+        // rebuilt cache and release the lock (its `Drop` unlinks the sidecar).
+        // A save error exits via `?`; the guard then drops at the end of this
+        // closure — still on the blocking pool — so the sidecar unlink never
+        // runs on the async executor on either the success or the error path.
+        let write_path = path.to_path_buf();
+        run_blocking(write_path.clone(), move || {
+            rebuilt.save(&write_path)?;
+            drop(guard);
+            Ok(rebuilt)
+        })
+        .await
     }
 
     /// Build a bounded, query-scoped catalog over the access seam.
@@ -946,6 +1107,195 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cold.entries().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn coordinated_rebuilds_when_uncontended() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog").join("reg.json");
+        let reg: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(seed().await);
+        // No lock held ⇒ this process wins the refresh lock and rebuilds.
+        // The parent `catalog/` dir is created by the coordinator itself.
+        let cat = Catalog::load_or_refresh_coordinated(&path, "localhost:5000", "", &reg, false, true)
+            .await
+            .unwrap();
+        assert_eq!(cat.entries().count(), 1, "uncontended refresh rebuilds");
+        assert!(path.exists(), "rebuilt catalog is persisted");
+    }
+
+    #[tokio::test]
+    async fn coordinated_serves_stale_when_refresh_lock_held() {
+        // A peer process holds the refresh lock; the coordinator must serve
+        // the existing (stale-by-scope) cache rather than walk the registry.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let reg: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(seed().await);
+        // Seed a cache built under the empty (browse) scope: 1 entry.
+        Catalog::load_or_refresh(&path, "localhost:5000", "", &reg, false, true)
+            .await
+            .unwrap();
+
+        // A peer holds the per-file refresh lock.
+        let _peer = AdvisoryFileLock::try_acquire(&path).expect("peer acquires refresh lock");
+
+        // Query a different scope so the fast path does not serve the cache;
+        // an empty registry would rebuild to zero entries if the lock were
+        // free. Because the lock is held, the coordinator serves the cached
+        // catalog as-is (1 entry) without consulting the registry.
+        let empty: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(MemoryRegistry::new());
+        let cat = Catalog::load_or_refresh_coordinated(&path, "localhost:5000", "zzz", &empty, false, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            cat.entries().count(),
+            1,
+            "contended refresh serves the stale cache, not a fresh empty walk"
+        );
+    }
+
+    #[tokio::test]
+    async fn coordinated_offline_serves_cached_without_locking() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let reg: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(seed().await);
+        Catalog::load_or_refresh(&path, "localhost:5000", "", &reg, false, true)
+            .await
+            .unwrap();
+        let empty: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(MemoryRegistry::new());
+        let cat = Catalog::load_or_refresh_coordinated(&path, "localhost:5000", "", &empty, true, false)
+            .await
+            .unwrap();
+        assert_eq!(cat.entries().count(), 1, "offline serves cached");
+    }
+
+    /// An access whose catalog listing always fails — `build` aborts at
+    /// `list_catalog`, so only that method is reached.
+    struct FailingAccess;
+
+    #[async_trait]
+    impl OciAccess for FailingAccess {
+        async fn resolve_digest(
+            &self,
+            _: &Identifier,
+            _: crate::oci::access::Operation,
+        ) -> Result<Option<crate::oci::Digest>, crate::oci::access::error::AccessError> {
+            unreachable!()
+        }
+        async fn fetch_manifest(
+            &self,
+            _: &PinnedIdentifier,
+        ) -> Result<Option<OciManifest>, crate::oci::access::error::AccessError> {
+            unreachable!()
+        }
+        async fn fetch_blob(
+            &self,
+            _: &Identifier,
+            _: &crate::oci::Digest,
+        ) -> Result<Option<Vec<u8>>, crate::oci::access::error::AccessError> {
+            unreachable!()
+        }
+        async fn list_tags(
+            &self,
+            _: &Identifier,
+        ) -> Result<Option<Vec<String>>, crate::oci::access::error::AccessError> {
+            unreachable!()
+        }
+        async fn list_catalog(&self, _: &str) -> Result<Vec<String>, crate::oci::access::error::AccessError> {
+            Err(crate::oci::access::error::AccessError::without_identifier(
+                crate::oci::access::error::AccessErrorKind::Registry(std::io::Error::other("simulated outage").into()),
+            ))
+        }
+        async fn push_blob(
+            &self,
+            _: &Identifier,
+            _: &[u8],
+        ) -> Result<crate::oci::Digest, crate::oci::access::error::AccessError> {
+            unreachable!()
+        }
+        async fn push_manifest(
+            &self,
+            _: &Identifier,
+            _: &OciManifest,
+        ) -> Result<crate::oci::Digest, crate::oci::access::error::AccessError> {
+            unreachable!()
+        }
+        async fn put_tag(
+            &self,
+            _: &Identifier,
+            _: &str,
+            _: &crate::oci::Digest,
+        ) -> Result<(), crate::oci::access::error::AccessError> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn coordinated_releases_lock_on_build_error() {
+        // A forced rebuild whose registry walk fails (Phase 2 error path) must
+        // still release the refresh lock — the spawn_blocking split disposes the
+        // guard on the blocking pool on error, so a later acquire succeeds.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog").join("reg.json");
+        let failing: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(FailingAccess);
+        let err = Catalog::load_or_refresh_coordinated(&path, "localhost:5000", "", &failing, false, true)
+            .await
+            .expect_err("a failing registry walk surfaces an error");
+        assert!(
+            matches!(err.kind, super::super::catalog_error::CatalogErrorKind::Access(_)),
+            "a build failure must surface as a catalog Access error"
+        );
+        AdvisoryFileLock::try_acquire(&path).expect("lock must be released after a build error");
+    }
+
+    #[tokio::test]
+    async fn coordinated_fast_path_serves_fresh_cache_without_locking() {
+        // A fresh, same-scope cache is served by the fast path with no lock
+        // taken: proven by holding the refresh lock with a peer and still being
+        // served (the fast path never contends, so it cannot deadlock).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let reg: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(seed().await);
+        Catalog::load_or_refresh_coordinated(&path, "localhost:5000", "", &reg, false, true)
+            .await
+            .unwrap();
+
+        let _peer = AdvisoryFileLock::try_acquire(&path).expect("peer holds the refresh lock");
+        let empty: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(MemoryRegistry::new());
+        let cat = Catalog::load_or_refresh_coordinated(&path, "localhost:5000", "", &empty, false, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            cat.entries().count(),
+            1,
+            "fresh same-scope cache served without the lock"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn coordinated_uncoordinated_rebuild_on_lock_fault() {
+        // A lock I/O fault (here: a symlink planted at the cache path, which
+        // `try_acquire` rejects) is not `Locked`, so the coordinator falls back
+        // to an uncoordinated rebuild (`PreFlight::Rebuild(None)`) rather than
+        // failing — the atomic write still replaces the path safely.
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        symlink(dir.path().join("nonexistent-target"), &path).unwrap();
+
+        let reg: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(seed().await);
+        let cat = Catalog::load_or_refresh_coordinated(&path, "localhost:5000", "", &reg, false, true)
+            .await
+            .expect("a lock fault degrades to an uncoordinated rebuild, not an error");
+        assert_eq!(
+            cat.entries().count(),
+            1,
+            "uncoordinated rebuild still builds the catalog"
+        );
+        assert!(
+            !std::fs::symlink_metadata(&path).unwrap().file_type().is_symlink(),
+            "the atomic write replaced the symlink with a real cache file"
+        );
     }
 
     /// Seed a registry double advertising many repositories so the cap

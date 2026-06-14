@@ -12,11 +12,14 @@
 //! cached rather than failing.
 
 pub mod catalog_error;
+pub mod catalog_service;
 pub mod registry_catalog;
 pub mod search_match;
 
 #[allow(unused_imports)]
 pub use catalog_error::{CatalogError, CatalogErrorKind};
+#[allow(unused_imports)]
+pub use catalog_service::{BadgeContext, CatalogGroup, CatalogResults, CatalogRow, load_catalog};
 #[allow(unused_imports)]
 pub use registry_catalog::{Catalog, CatalogEntry};
 #[allow(unused_imports)]

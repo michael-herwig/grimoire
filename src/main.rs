@@ -29,6 +29,7 @@ mod env;
 mod error;
 mod install;
 mod lock;
+mod mcp;
 mod oci;
 mod resolve;
 mod skill;
@@ -47,6 +48,7 @@ use crate::command::install::InstallArgs;
 use crate::command::lock::LockArgs;
 use crate::command::login::LoginArgs;
 use crate::command::logout::LogoutArgs;
+use crate::command::mcp::McpArgs;
 use crate::command::publish::PublishArgs;
 use crate::command::release::ReleaseArgs;
 use crate::command::remove::RemoveArgs;
@@ -104,6 +106,8 @@ pub enum Command {
     Schema(SchemaArgs),
     /// Browse the registry catalog in an interactive TUI.
     Tui(TuiArgs),
+    /// Run a local STDIO Model Context Protocol server.
+    Mcp(McpArgs),
     /// Authenticate to a registry and store the credential.
     Login(LoginArgs),
     /// Remove a stored registry credential.

@@ -17,7 +17,7 @@ use serde::Deserialize;
 
 use crate::config;
 use crate::config::config_error::{ConfigError, ConfigErrorKind};
-use crate::config::declaration::{ConfigOptions, DesiredSet};
+use crate::config::declaration::{ConfigOptions, DesiredSet, RegistryConfig};
 use crate::oci::Identifier;
 use crate::oci::identifier::error::IdentifierErrorKind;
 
@@ -26,6 +26,9 @@ use crate::oci::identifier::error::IdentifierErrorKind;
 pub struct ProjectConfig {
     /// Options table (`[options]`).
     pub options: ConfigOptions,
+    /// The declared registries (`[[registries]]`); empty when none are
+    /// declared (legacy single-registry behavior).
+    pub registries: Vec<RegistryConfig>,
     /// The declared skills, rules, agents, and bundles.
     pub set: DesiredSet,
 }
@@ -71,6 +74,8 @@ pub fn lock_path_for(config_path: &Path) -> PathBuf {
 struct RawConfig {
     #[serde(default)]
     options: ConfigOptions,
+    #[serde(default)]
+    registries: Vec<RegistryConfig>,
     #[serde(default)]
     skills: BTreeMap<String, String>,
     #[serde(default)]
@@ -155,6 +160,7 @@ fn load_from_path(path: &Path) -> Result<ProjectConfig, ConfigError> {
 fn parse_config(s: &str, path: PathBuf) -> Result<ProjectConfig, ConfigError> {
     let raw: RawConfig =
         toml::from_str(s).map_err(|e| ConfigError::new(path.clone(), ConfigErrorKind::TomlParse(e)))?;
+    validate_registries(&raw.registries, &path)?;
     let skills = parse_artifact_map(&raw.skills, &path)?;
     let rules = parse_artifact_map(&raw.rules, &path)?;
     // Agent and bundle references validate exactly like skills/rules: a
@@ -163,8 +169,74 @@ fn parse_config(s: &str, path: PathBuf) -> Result<ProjectConfig, ConfigError> {
     let bundles = parse_artifact_map(&raw.bundles, &path)?;
     Ok(ProjectConfig {
         options: raw.options,
+        registries: raw.registries,
         set: DesiredSet::from_maps(skills, rules, agents, bundles),
     })
+}
+
+/// Validate a `[[registries]]` array: every `url` non-empty, every present
+/// `alias` non-empty and unique across the array. Ordering and the
+/// `default` flag are normalized at resolution time (`resolve_registries`),
+/// so multiple `default = true` entries are tolerated here (the first
+/// wins); only structurally ambiguous input (empty url, empty or duplicate
+/// alias) is rejected.
+fn validate_registries(registries: &[RegistryConfig], path: &Path) -> Result<(), ConfigError> {
+    let mut seen_aliases = std::collections::BTreeSet::new();
+    for rc in registries {
+        if rc.url.trim().is_empty() {
+            return Err(ConfigError::new(
+                path.to_path_buf(),
+                ConfigErrorKind::RegistryInvalid {
+                    reason: "url must not be empty".to_string(),
+                },
+            ));
+        }
+        if let Some(alias) = &rc.alias {
+            if alias.trim().is_empty() {
+                return Err(ConfigError::new(
+                    path.to_path_buf(),
+                    ConfigErrorKind::RegistryInvalid {
+                        reason: format!("alias for url '{}' must not be empty", rc.url),
+                    },
+                ));
+            }
+            if alias != alias.trim() {
+                return Err(ConfigError::new(
+                    path.to_path_buf(),
+                    ConfigErrorKind::RegistryInvalid {
+                        reason: format!("alias '{alias}' must not have leading or trailing whitespace"),
+                    },
+                ));
+            }
+            // `/` is unreachable — reference resolution splits the input on the
+            // first `/`, so an alias containing one can never match.
+            if alias.contains('/') {
+                return Err(ConfigError::new(
+                    path.to_path_buf(),
+                    ConfigErrorKind::RegistryInvalid {
+                        reason: format!("alias '{alias}' must not contain '/'"),
+                    },
+                ));
+            }
+            if alias.chars().any(char::is_control) {
+                return Err(ConfigError::new(
+                    path.to_path_buf(),
+                    ConfigErrorKind::RegistryInvalid {
+                        reason: format!("alias '{alias}' must not contain control characters"),
+                    },
+                ));
+            }
+            if !seen_aliases.insert(alias.as_str()) {
+                return Err(ConfigError::new(
+                    path.to_path_buf(),
+                    ConfigErrorKind::RegistryInvalid {
+                        reason: format!("duplicate alias '{alias}'"),
+                    },
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Catalog metadata authored at the top of a bundle source file
@@ -352,6 +424,164 @@ rust-style = "ghcr.io/acme/rules/rust-style:v3"
         assert!(cfg.set.skills.is_empty());
         assert!(cfg.set.rules.is_empty());
         assert!(cfg.set.bundles.is_empty());
+        assert!(cfg.registries.is_empty());
+    }
+
+    #[test]
+    fn parse_registries_array_ok() {
+        let cfg = ProjectConfig::from_toml_str(
+            r#"
+[[registries]]
+alias = "acme"
+url = "ghcr.io/acme"
+default = true
+
+[[registries]]
+url = "registry.corp/team"
+"#,
+        )
+        .expect("parse");
+        assert_eq!(cfg.registries.len(), 2);
+        assert_eq!(cfg.registries[0].alias.as_deref(), Some("acme"));
+        assert_eq!(cfg.registries[0].url, "ghcr.io/acme");
+        assert!(cfg.registries[0].default);
+        assert_eq!(cfg.registries[1].alias, None);
+        assert!(!cfg.registries[1].default);
+    }
+
+    #[test]
+    fn registries_empty_url_rejected() {
+        let err = ProjectConfig::from_toml_str(
+            r#"
+[[registries]]
+url = ""
+"#,
+        )
+        .expect_err("empty url must reject");
+        assert!(matches!(err.kind, ConfigErrorKind::RegistryInvalid { .. }));
+    }
+
+    #[test]
+    fn registries_duplicate_alias_rejected() {
+        let err = ProjectConfig::from_toml_str(
+            r#"
+[[registries]]
+alias = "acme"
+url = "ghcr.io/acme"
+
+[[registries]]
+alias = "acme"
+url = "registry.corp/team"
+"#,
+        )
+        .expect_err("duplicate alias must reject");
+        assert!(matches!(err.kind, ConfigErrorKind::RegistryInvalid { .. }));
+    }
+
+    #[test]
+    fn registries_alias_with_slash_rejected() {
+        let err = ProjectConfig::from_toml_str(
+            r#"
+[[registries]]
+alias = "a/b"
+url = "ghcr.io/acme"
+"#,
+        )
+        .expect_err("alias with '/' must reject");
+        assert!(matches!(err.kind, ConfigErrorKind::RegistryInvalid { .. }));
+        if let ConfigErrorKind::RegistryInvalid { reason } = &err.kind {
+            assert!(
+                reason.contains('/'),
+                "reason should mention the offending character: {reason}"
+            );
+            assert!(
+                !reason.contains("unreachable"),
+                "user-facing reason must not leak the implementation note: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn registries_alias_with_control_char_rejected() {
+        let err = ProjectConfig::from_toml_str("[[registries]]\nalias = \"a\\tb\"\nurl = \"ghcr.io/acme\"\n")
+            .expect_err("alias with an embedded control character must reject");
+        assert!(matches!(err.kind, ConfigErrorKind::RegistryInvalid { .. }));
+    }
+
+    #[test]
+    fn registries_alias_with_leading_whitespace_rejected() {
+        let err = ProjectConfig::from_toml_str(
+            r#"
+[[registries]]
+alias = " acme"
+url = "ghcr.io/acme"
+"#,
+        )
+        .expect_err("alias with leading whitespace must reject");
+        assert!(matches!(err.kind, ConfigErrorKind::RegistryInvalid { .. }));
+        if let ConfigErrorKind::RegistryInvalid { reason } = &err.kind {
+            assert!(
+                reason.contains("whitespace"),
+                "reason should mention whitespace: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn registries_alias_with_trailing_whitespace_rejected() {
+        let err = ProjectConfig::from_toml_str(
+            r#"
+[[registries]]
+alias = "acme "
+url = "ghcr.io/acme"
+"#,
+        )
+        .expect_err("alias with trailing whitespace must reject");
+        assert!(matches!(err.kind, ConfigErrorKind::RegistryInvalid { .. }));
+        if let ConfigErrorKind::RegistryInvalid { reason } = &err.kind {
+            assert!(
+                reason.contains("whitespace"),
+                "reason should mention whitespace: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn registries_valid_multi_registry_accepted() {
+        let cfg = ProjectConfig::from_toml_str(
+            r#"
+[[registries]]
+alias = "acme"
+url = "ghcr.io/acme"
+default = true
+
+[[registries]]
+alias = "corp"
+url = "registry.corp/team"
+
+[[registries]]
+url = "other.registry.io"
+"#,
+        )
+        .expect("valid multi-registry config must parse");
+        assert_eq!(cfg.registries.len(), 3);
+        assert_eq!(cfg.registries[0].alias.as_deref(), Some("acme"));
+        assert!(cfg.registries[0].default);
+        assert_eq!(cfg.registries[1].alias.as_deref(), Some("corp"));
+        assert_eq!(cfg.registries[2].alias, None);
+    }
+
+    #[test]
+    fn registries_unknown_field_rejected() {
+        let err = ProjectConfig::from_toml_str(
+            r#"
+[[registries]]
+url = "ghcr.io/acme"
+surprise = "x"
+"#,
+        )
+        .expect_err("unknown registry field must reject");
+        assert!(matches!(err.kind, ConfigErrorKind::TomlParse(_)));
     }
 
     #[test]

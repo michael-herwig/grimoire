@@ -116,6 +116,9 @@ pub async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         // `tui` diverges into a full-screen session: it owns the terminal
         // and emits no structured report (exempt from `Printable`).
         Command::Tui(args) => crate::command::tui::run(&ctx, &args).await?,
+        // `mcp` runs a long-lived STDIO server (stdout is the JSON-RPC
+        // channel); it emits no structured report (exempt from `Printable`).
+        Command::Mcp(args) => crate::command::mcp::run(&ctx, &args).await?,
     };
 
     Ok(code)

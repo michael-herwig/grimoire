@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::config::config_error::{ConfigError, ConfigErrorKind};
-use crate::config::declaration::{ConfigOptions, DesiredSet};
+use crate::config::declaration::{ConfigOptions, DesiredSet, RegistryConfig};
 use crate::config::global_config::GlobalConfig;
 use crate::config::project_config::ProjectConfig;
 use crate::config::scope::ConfigScope;
@@ -30,6 +30,8 @@ pub struct ResolvedScope {
     pub set: DesiredSet,
     /// The parsed options table.
     pub options: ConfigOptions,
+    /// The declared `[[registries]]` for this scope (empty when none).
+    pub registries: Vec<RegistryConfig>,
     /// The config file path (the advisory flock target).
     pub config_path: PathBuf,
     /// The adjacent lock path.
@@ -65,6 +67,7 @@ pub fn resolve(ctx: &Context, global: bool, config: Option<&Path>) -> Result<Res
             scope: ConfigScope::Global,
             set: cfg.set,
             options: cfg.options,
+            registries: cfg.registries,
             lock_path: paths.global_lock(),
             state_path: InstallState::global_path(&paths.state_dir()),
             workspace,
@@ -84,6 +87,7 @@ pub fn resolve(ctx: &Context, global: bool, config: Option<&Path>) -> Result<Res
             scope: ConfigScope::Project,
             set: discovered.config.set,
             options: discovered.config.options,
+            registries: discovered.config.registries,
             state_path: InstallState::project_state_path(&workspace),
             lock_path,
             workspace,

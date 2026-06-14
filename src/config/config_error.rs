@@ -103,6 +103,11 @@ pub enum ConfigErrorKind {
     /// directory (project scope).
     #[error("no grimoire.toml found by walking up from the working directory")]
     NotDiscovered,
+
+    /// A `[[registries]]` entry is malformed: an empty `url`, an empty
+    /// `alias`, or a duplicate `alias` across the array.
+    #[error("invalid [[registries]] entry: {reason}")]
+    RegistryInvalid { reason: String },
 }
 
 #[cfg(test)]

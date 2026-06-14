@@ -3,14 +3,16 @@
 
 //! `grim search` — query the registry catalog.
 //!
-//! Loads (or refreshes) the cached [`Catalog`] for the resolved registry,
-//! filters entries with the shared [`SearchQuery`] matcher (whitespace-split
+//! Browses every configured registry through the shared
+//! [`crate::catalog::load_catalog`] seam (the one `search` / `tui` / `mcp`
+//! share): each registry's cached catalog is loaded or coordinately
+//! refreshed, filtered with the [`SearchQuery`] matcher (whitespace-split
 //! AND of terms over kind / repo / summary / description / keywords, plus
 //! bare kind keywords — `skill`/`rule`/`bundle` and plurals — acting as kind
-//! filters; an empty query lists everything), and annotates each match with
-//! its install status derived from the discovered scope's lock + install-state
-//! via the shared [`derive_badge`] helper (the same derivation `grim status`
-//! uses — not duplicated here).
+//! filters; an empty query lists everything), and badged against the scope's
+//! lock + install-state. An explicit `--registry` collapses the browse set
+//! to exactly that registry; otherwise the declared `[[registries]]` (or the
+//! single default) are all browsed and flattened into one table.
 //!
 //! State is data: `search` always exits 0, even with no results. Offline
 //! degrades — the catalog layer serves whatever is cached and never errors
@@ -19,14 +21,11 @@
 use clap::Args;
 
 use crate::api::search_report::{SearchEntry, SearchReport};
-use crate::catalog::SearchQuery;
-use crate::catalog::registry_catalog::Catalog;
+use crate::catalog::{BadgeContext, SearchQuery};
 use crate::cli::exit_code::ExitCode;
-use crate::config::scope::ConfigScope;
 use crate::context::Context;
 use crate::install::install_state::InstallState;
 use crate::install::path_anchor::AnchorRoots;
-use crate::install::status_badge::derive_badge;
 use crate::lock::grimoire_lock::GrimoireLock;
 use crate::lock::lock_io;
 
@@ -70,99 +69,116 @@ pub struct SearchArgs {
 /// transport/auth failure during an online rebuild. Offline never errors.
 /// A registry always resolves (the built-in fallback is the last tier).
 pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchReport, ExitCode)> {
-    let registry = resolve_registry(ctx, args);
-
     let access = super::access_seam(ctx)?;
-    let catalog_path = ctx.paths().catalog_file();
-    // Parse the raw query once: the in-memory matcher reuses it per row.
+    // Parse the raw query once for the truncation hint (the service applies
+    // the same matcher per registry).
     let parsed = SearchQuery::parse(args.query.as_deref().unwrap_or(""));
-    // Build the same unscoped browse window the TUI loads (empty name
-    // prefilter) and apply the full query in memory. A repository-name
-    // prefilter at build time would drop entries whose match lives only in
-    // the summary / description / keywords (those annotations are never
-    // fetched for filtered-out repos), making `grim search` miss results
-    // the TUI finds. Equivalence with the TUI beats the narrower walk.
-    let catalog = super::grim(
-        Catalog::load_or_refresh(&catalog_path, &registry, "", &access, ctx.offline(), args.refresh).await,
+
+    // Resolve the scope's registry set + the best-effort badge inputs once,
+    // then browse every configured registry through the shared catalog
+    // service (the single seam `search`/`tui`/`mcp` share). A registry given
+    // via `--registry` collapses the set to exactly that registry.
+    let (registries, lock, state, roots) = resolve_scope(ctx, args);
+    let badges = BadgeContext {
+        lock: lock.as_ref(),
+        state: &state,
+        roots: &roots,
+    };
+    let results = super::grim(
+        crate::catalog::load_catalog(
+            &ctx.paths(),
+            &registries,
+            args.query.as_deref().unwrap_or(""),
+            &access,
+            &badges,
+            ctx.offline(),
+            args.refresh,
+        )
+        .await,
     )?;
 
     // A non-empty query against a build that hit the repository cap may be
-    // missing matches past the window: the catalog walked only the first
-    // `MAX_CATALOG_REPOS` candidates and the query narrows in memory over
-    // that prefix. Surface it so a short or empty result set is not read as
-    // exhaustive. (An empty query is an explicit browse and the cap is the
-    // documented cut-line — no warning.)
-    if catalog.truncated() && !parsed.is_empty() {
+    // missing matches past the window. Surface it so a short or empty result
+    // set is not read as exhaustive. (An empty query is an explicit browse
+    // and the cap is the documented cut-line — no warning.)
+    if results.any_truncated() && !parsed.is_empty() {
         tracing::warn!(
             "catalog listing capped at {} repositories; results may be incomplete — narrow the query or use a more specific term",
             crate::catalog::registry_catalog::MAX_CATALOG_REPOS
         );
     }
 
-    // Scope badges are best-effort: `search` is not scope-bound, so a
-    // missing project config just means "nothing installed" rather than a
-    // hard failure.
-    let (lock, state, roots) = load_scope_best_effort(ctx, args);
-
-    // The catalog was prefiltered by repo *name*; re-filter in memory so a
-    // summary/description/keyword-only match (and multi-term AND / kind
-    // filters) still narrows the built set correctly.
-    let mut entries: Vec<SearchEntry> = catalog
-        .entries()
-        .filter(|e| e.matches(&parsed))
-        .map(|e| SearchEntry {
-            kind: e.kind.clone(),
-            repo: e.repo(),
-            summary: e.summary.clone(),
-            description: e.description.clone(),
-            repository: e.repository_url.clone(),
-            latest_tag: e.latest_tag.clone(),
-            version: e.version.clone(),
-            status: derive_badge(&e.registry, &e.repository, lock.as_ref(), &state, &roots),
+    // Flatten the registry groups into the flat search table (sorted by
+    // `registry/repository`).
+    let entries: Vec<SearchEntry> = results
+        .into_flat_rows()
+        .into_iter()
+        .map(|r| SearchEntry {
+            repo: r.repo(),
+            kind: r.kind,
+            summary: r.summary,
+            description: r.description,
+            repository: r.repository_url,
+            latest_tag: r.latest_tag,
+            version: r.version,
+            status: r.badge,
         })
         .collect();
-    entries.sort_by(|a, b| a.repo.cmp(&b.repo));
 
     Ok((SearchReport::new(entries), ExitCode::Success))
 }
 
-/// Resolve the registry to search via the centralized precedence:
-/// `--registry` flag > `GRIM_DEFAULT_REGISTRY` > the resolved scope's
-/// project config `[options].default_registry` > the global config
-/// (consulted as the lowest-priority fallback only for a non-global run)
-/// > the built-in [`super::FALLBACK_REGISTRY`].
-fn resolve_registry(ctx: &Context, args: &SearchArgs) -> String {
-    // `--registry` on the command is the top precedence; fold it into the
-    // helper as the flag-equivalent so the single helper owns the order.
+/// Resolve the registry browse set and best-effort badge inputs for the
+/// search. The registry set spans every configured `[[registries]]` (or the
+/// single default), so `grim search` browses all of them at once; an
+/// explicit `--registry` collapses the set to exactly that registry. Badge
+/// derivation is best-effort — a missing project config just means "nothing
+/// installed" rather than a hard failure.
+fn resolve_scope(
+    ctx: &Context,
+    args: &SearchArgs,
+) -> (
+    Vec<crate::config::ResolvedRegistry>,
+    Option<GrimoireLock>,
+    InstallState,
+    AnchorRoots,
+) {
+    // An explicit `--registry` on the command collapses the browse set to
+    // exactly that registry (historical single-registry `--registry`
+    // behavior), independent of any `[[registries]]` declared in config.
     if let Some(r) = &args.registry {
-        return r.clone();
+        let registries = vec![crate::config::ResolvedRegistry {
+            url: r.clone(),
+            alias: None,
+            is_default: true,
+        }];
+        let (lock, state, roots) = load_badges_best_effort(ctx, args);
+        return (registries, lock, state, roots);
     }
-    let project_default = scope_resolution::resolve(ctx, args.global, args.config.as_deref())
-        .ok()
-        .and_then(|scope| scope.options.default_registry);
-    // `--global` maps to the global scope; the centralized helper gates the
-    // global-config fallback on it (same mapping `scope_resolution` applies).
-    let scope = if args.global {
-        ConfigScope::Global
-    } else {
-        ConfigScope::Project
+
+    let Ok(scope) = scope_resolution::resolve(ctx, args.global, args.config.as_deref()) else {
+        // No scope resolves: browse the env/flag/fallback registry (no
+        // config tiers) with empty badge inputs.
+        let registries =
+            crate::config::resolve_registries(ctx.default_registry(), &[], None, &[], None, super::FALLBACK_REGISTRY);
+        let roots = AnchorRoots::resolve(std::path::PathBuf::new(), ctx);
+        return (registries, None, InstallState::empty(std::path::Path::new("")), roots);
     };
-    let global_default = super::global_config_default(ctx, scope);
-    super::resolve_default_registry(ctx, project_default.as_deref(), global_default.as_deref())
+    let registries = super::registries_for_scope(ctx, &scope);
+    let lock = lock_io::load(&scope.lock_path).ok();
+    let state = scope_resolution::load_state(&scope).unwrap_or_else(|_| InstallState::empty(&scope.state_path));
+    (registries, lock, state, scope.roots)
 }
 
 /// Load the scope's lock + install-state + anchor roots for badge
 /// derivation, degrading to an empty state when no scope resolves or the
 /// files are absent/corrupt (badges are advisory, never fail the search).
-fn load_scope_best_effort(ctx: &Context, args: &SearchArgs) -> (Option<GrimoireLock>, InstallState, AnchorRoots) {
+fn load_badges_best_effort(ctx: &Context, args: &SearchArgs) -> (Option<GrimoireLock>, InstallState, AnchorRoots) {
     let Ok(scope) = scope_resolution::resolve(ctx, args.global, args.config.as_deref()) else {
         let roots = AnchorRoots::resolve(std::path::PathBuf::new(), ctx);
         return (None, InstallState::empty(std::path::Path::new("")), roots);
     };
     let lock = lock_io::load(&scope.lock_path).ok();
-    // Route through the scope seam so a project legacy file (or a V1 global
-    // file) migrates in memory; a load failure degrades to empty (badges are
-    // advisory, never fail the search).
     let state = scope_resolution::load_state(&scope).unwrap_or_else(|_| InstallState::empty(&scope.state_path));
     (lock, state, scope.roots)
 }
@@ -194,56 +210,50 @@ mod tests {
     }
 
     #[test]
-    fn explicit_registry_flag_wins() {
-        let ctx = Context::new(&opts());
+    fn explicit_registry_collapses_browse_set() {
+        // `--registry` on the command collapses the browse set to exactly
+        // that registry (historical single-registry behavior), regardless of
+        // any configured `[[registries]]`. Hermetic so the developer's
+        // environment cannot interpose.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
         let mut a = args();
         a.registry = Some("ghcr.io".to_string());
-        assert_eq!(resolve_registry(&ctx, &a), "ghcr.io");
+        let (registries, ..) = resolve_scope(&ctx, &a);
+        assert_eq!(registries.len(), 1);
+        assert_eq!(registries[0].url, "ghcr.io");
     }
 
     #[test]
-    fn no_registry_anywhere_uses_builtin_fallback() {
+    fn no_registry_anywhere_browses_builtin_fallback() {
         // No --registry, no env, no config default anywhere ⇒ the built-in
-        // fallback registry applies (never an error). Hermetic: the
-        // developer's $GRIM_DEFAULT_REGISTRY / $GRIM_HOME / a CWD-discovered
-        // project config must not leak in — pin all three tiers explicitly.
+        // fallback registry is the sole browse target (never an error).
         let tmp = tempfile::tempdir().unwrap();
         let cfg = tmp.path().join("grimoire.toml");
         std::fs::write(&cfg, "[options]\n").unwrap();
         let ctx = Context::hermetic(tmp.path().to_path_buf());
         let mut a = args();
         a.config = Some(cfg);
-        assert_eq!(resolve_registry(&ctx, &a), crate::command::FALLBACK_REGISTRY);
+        let (registries, ..) = resolve_scope(&ctx, &a);
+        assert_eq!(registries.len(), 1);
+        assert_eq!(registries[0].url, crate::command::FALLBACK_REGISTRY);
     }
 
     #[test]
-    fn context_default_registry_used_as_fallback() {
-        let mut o = opts();
-        o.registry = Some("localhost:5000".to_string());
-        let ctx = Context::new(&o);
-        let a = args();
-        assert_eq!(resolve_registry(&ctx, &a), "localhost:5000");
-    }
-
-    #[test]
-    fn flag_beats_project_config_default_registry() {
-        // A project config declaring `default_registry` is the lowest CLI
-        // tier; the `--registry` flag (here folded through the context, the
-        // same precedence the `--registry` arg uses) must win over it. This
-        // pins the reordered chain: flag/env > project config > global config.
+    fn declared_registries_become_the_browse_set() {
+        // A project config declaring `[[registries]]` browses all of them.
         let tmp = tempfile::tempdir().unwrap();
         let cfg = tmp.path().join("grimoire.toml");
-        std::fs::write(&cfg, "[options]\ndefault_registry = \"config.example\"\n").unwrap();
-
-        let mut o = opts();
-        o.registry = Some("flag.example".to_string());
-        let ctx = Context::new(&o);
+        std::fs::write(
+            &cfg,
+            "[[registries]]\nalias = \"acme\"\nurl = \"ghcr.io/acme\"\n\n[[registries]]\nurl = \"registry.corp/team\"\n",
+        )
+        .unwrap();
+        let ctx = Context::hermetic(tmp.path().to_path_buf());
         let mut a = args();
         a.config = Some(cfg);
-        assert_eq!(
-            resolve_registry(&ctx, &a),
-            "flag.example",
-            "the registry flag/env tier wins over the project config default"
-        );
+        let (registries, ..) = resolve_scope(&ctx, &a);
+        let urls: Vec<&str> = registries.iter().map(|r| r.url.as_str()).collect();
+        assert_eq!(urls, vec!["ghcr.io/acme", "registry.corp/team"]);
     }
 }

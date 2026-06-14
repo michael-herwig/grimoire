@@ -78,20 +78,15 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
         None => None,
     };
 
-    // Expand the reference against the effective default registry —
-    // precedence: --registry flag > GRIM_DEFAULT_REGISTRY > project config >
-    // global config (consulted only when this is a project-scope run) >
-    // the built-in fallback registry. The expanded
-    // identifier is always fully-qualified, so the config and lock persist
-    // the registry host explicitly — the default is a pure CLI-input
-    // convenience.
-    let global_default = super::global_config_default(ctx, scope.scope);
-    let default_registry = super::resolve_default_registry(
-        ctx,
-        scope.options.default_registry.as_deref(),
-        global_default.as_deref(),
-    );
-    let id = super::grim(parse_reference(&args.reference, Some(&default_registry)))?;
+    // Resolve the reference against the scope's registry set: a qualified
+    // `alias/repo` substitutes that alias's url, an explicit registry parses
+    // as-is, and a bare short id expands against the primary registry
+    // (precedence: --registry flag > GRIM_DEFAULT_REGISTRY > the declared
+    // `[[registries]]` / `[options].default_registry` > global config > the
+    // built-in fallback). The expanded identifier is always fully-qualified,
+    // so the config and lock persist the registry host explicitly.
+    let registries = super::registries_for_scope(ctx, &scope);
+    let id = super::grim(crate::config::resolve_reference(&args.reference, &registries))?;
     let id = if id.tag().is_none() && id.digest().is_none() {
         id.clone_with_tag("latest")
     } else {
@@ -116,7 +111,12 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     declare(&mut set, kind, name.clone(), id.clone());
 
     // Persist the edited config (re-serialize the parsed declaration).
-    super::grim(write_config(&scope.config_path, &scope.options, &set))?;
+    super::grim(write_config(
+        &scope.config_path,
+        &scope.options,
+        &scope.registries,
+        &set,
+    ))?;
 
     // Relock: a partial relock of just this entry when a previous lock
     // exists and is not stale; a full resolve otherwise (or when the
@@ -281,6 +281,7 @@ async fn infer_kind(access: &Arc<dyn OciAccess>, id: &Identifier) -> anyhow::Res
 pub(crate) fn write_config(
     path: &std::path::Path,
     options: &crate::config::declaration::ConfigOptions,
+    registries: &[crate::config::declaration::RegistryConfig],
     set: &crate::config::declaration::DesiredSet,
 ) -> Result<(), crate::config::config_error::ConfigError> {
     use std::fmt::Write as _;
@@ -299,6 +300,19 @@ pub(crate) fn write_config(
                 .collect::<Vec<_>>()
                 .join(", ");
             let _ = writeln!(out, "clients = [{list}]");
+        }
+        out.push('\n');
+    }
+    // Preserve declared `[[registries]]` verbatim — re-serializing the
+    // declaration must never silently drop a user's registry array.
+    for rc in registries {
+        out.push_str("[[registries]]\n");
+        if let Some(alias) = &rc.alias {
+            let _ = writeln!(out, "alias = \"{alias}\"");
+        }
+        let _ = writeln!(out, "url = \"{}\"", rc.url);
+        if rc.default {
+            let _ = writeln!(out, "default = true");
         }
         out.push('\n');
     }
@@ -355,7 +369,7 @@ mod tests {
             default_registry: Some("ghcr.io/acme".to_string()),
             clients: vec!["claude".to_string(), "opencode".to_string()],
         };
-        write_config(&path, &opts, &set).unwrap();
+        write_config(&path, &opts, &[], &set).unwrap();
 
         let body = std::fs::read_to_string(&path).unwrap();
         let cfg = ProjectConfig::from_toml_str(&body).expect("re-serialized config must parse");
@@ -367,11 +381,39 @@ mod tests {
     }
 
     #[test]
+    fn write_config_preserves_registries_array() {
+        // Regression guard: re-serializing a declaration must never drop a
+        // user's `[[registries]]` table (an `add`/`remove`/TUI edit would
+        // otherwise silently erase multi-registry config).
+        use crate::config::declaration::RegistryConfig;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("grimoire.toml");
+        let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
+        let registries = vec![
+            RegistryConfig {
+                alias: Some("acme".to_string()),
+                url: "ghcr.io/acme".to_string(),
+                default: true,
+            },
+            RegistryConfig {
+                alias: None,
+                url: "registry.corp/team".to_string(),
+                default: false,
+            },
+        ];
+        write_config(&path, &ConfigOptions::default(), &registries, &set).unwrap();
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        let cfg = ProjectConfig::from_toml_str(&body).expect("re-serialized config must parse");
+        assert_eq!(cfg.registries, registries, "registries must round-trip verbatim");
+    }
+
+    #[test]
     fn write_config_omits_options_when_empty() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("grimoire.toml");
         let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
-        write_config(&path, &ConfigOptions::default(), &set).unwrap();
+        write_config(&path, &ConfigOptions::default(), &[], &set).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(!body.contains("[options]"));
         assert!(ProjectConfig::from_toml_str(&body).is_ok());

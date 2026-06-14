@@ -38,6 +38,31 @@ pub struct ConfigOptions {
     pub clients: Vec<String>,
 }
 
+/// One configured registry in the top-level `[[registries]]` array.
+///
+/// Additive over the single `[options].default_registry`: a config that
+/// declares no `[[registries]]` keeps the legacy single-registry behavior.
+/// When present, the array is the authoritative browse set for
+/// `search`/`tui`/`mcp`, and its `default = true` entry (else the first)
+/// is the primary registry short identifiers expand against.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RegistryConfig {
+    /// Optional short alias used in qualified `alias/repo` references and
+    /// shown as the tree-root label. Must be non-empty when present and
+    /// unique across the array.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    /// The registry host (and optional namespace), e.g. `ghcr.io` or
+    /// `ghcr.io/acme`. Same shape as `[options].default_registry`.
+    pub url: String,
+    /// Marks this registry as the primary one short identifiers expand
+    /// against. At most one entry may set it; when none do, the first
+    /// entry is primary.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub default: bool,
+}
+
 /// The declared skills, rules, and agents.
 ///
 /// `skills` / `rules` / `agents` are `(name → fully-qualified identifier)`

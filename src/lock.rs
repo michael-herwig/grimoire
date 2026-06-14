@@ -9,6 +9,7 @@
 //! registry, `chrono` for RFC3339, and the atomic write delegated to the
 //! shared `store::atomic_write` primitive.
 
+pub mod advisory_lock;
 pub mod effective_set;
 pub mod file_lock;
 pub mod grimoire_lock;

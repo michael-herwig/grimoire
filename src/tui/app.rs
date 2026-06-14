@@ -547,7 +547,9 @@ async fn reload_into(ctx: &TuiContext, state: &mut TuiState, force: bool) {
     // The TUI browses a capped window (empty name-scope) and narrows
     // in-memory via the pure state filter; a registry-wide walk is a
     // cut-line shared with `search`.
-    match Catalog::load_or_refresh(&ctx.catalog_path, &ctx.registry, "", &ctx.access, ctx.offline, force).await {
+    match Catalog::load_or_refresh_coordinated(&ctx.catalog_path, &ctx.registry, "", &ctx.access, ctx.offline, force)
+        .await
+    {
         Ok(catalog) => {
             let (lock, install_state) = load_scope_for_badges(ctx);
             let rows = rows_from_catalog(&catalog, lock.as_ref(), &install_state, &ctx.roots);
@@ -933,8 +935,16 @@ fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
         true => Some(grim(ConfigFileLock::try_acquire(&ctx.config_path))?),
         false => None,
     };
-    let (options, mut set) = load_scope_declaration(ctx)?;
-    undeclare_and_unlock(&ctx.config_path, &ctx.lock_path, &options, &mut set, kind, &name)?;
+    let (options, registries, mut set) = load_scope_declaration(ctx)?;
+    undeclare_and_unlock(
+        &ctx.config_path,
+        &ctx.lock_path,
+        &options,
+        &registries,
+        &mut set,
+        kind,
+        &name,
+    )?;
     Ok(())
 }
 
@@ -983,9 +993,9 @@ async fn perform(ctx: &TuiContext, row: &TuiRow, is_update: bool) -> anyhow::Res
         true => Some(grim(ConfigFileLock::try_acquire(&ctx.config_path))?),
         false => None,
     };
-    let (options, mut set) = load_scope_declaration(ctx)?;
+    let (options, registries, mut set) = load_scope_declaration(ctx)?;
     declare(&mut set, kind, name.clone(), id);
-    grim(write_config(&ctx.config_path, &options, &set))?;
+    grim(write_config(&ctx.config_path, &options, &registries, &set))?;
 
     let previous = lock_io::load(&ctx.lock_path).ok();
     let new_lock = grim(relock_declared(&set, previous.as_ref(), kind, &name, &ctx.access, ctx.scope).await)?;
@@ -1060,7 +1070,7 @@ fn bundle_uninstall_targets(ctx: &TuiContext, binding: &str, repo: &str) -> Vec<
     let Ok(previous) = lock_io::load(&ctx.lock_path) else {
         return Vec::new();
     };
-    let Ok((_options, set_before)) = load_scope_declaration(ctx) else {
+    let Ok((_options, _registries, set_before)) = load_scope_declaration(ctx) else {
         return Vec::new();
     };
     let mut set_after = set_before.clone();
@@ -1086,15 +1096,25 @@ fn bundle_uninstall_targets(ctx: &TuiContext, binding: &str, repo: &str) -> Vec<
         .collect()
 }
 
-fn load_scope_declaration(ctx: &TuiContext) -> anyhow::Result<(ConfigOptions, DesiredSet)> {
+fn load_scope_declaration(
+    ctx: &TuiContext,
+) -> anyhow::Result<(
+    ConfigOptions,
+    Vec<crate::config::declaration::RegistryConfig>,
+    DesiredSet,
+)> {
     match ctx.scope {
         ConfigScope::Global => {
             let cfg = grim(GlobalConfig::load(&ctx.config_path))?;
-            Ok((cfg.options, cfg.set))
+            Ok((cfg.options, cfg.registries, cfg.set))
         }
         ConfigScope::Project => {
             let discovered = grim(ProjectConfig::discover(Some(&ctx.config_path)))?;
-            Ok((discovered.config.options, discovered.config.set))
+            Ok((
+                discovered.config.options,
+                discovered.config.registries,
+                discovered.config.set,
+            ))
         }
     }
 }

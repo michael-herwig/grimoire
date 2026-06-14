@@ -84,7 +84,12 @@ pub async fn run(ctx: &Context, args: &RemoveArgs) -> anyhow::Result<(RemoveRepo
     // Persist the edited config, then bring the lock to the post-edit
     // effective state: drop what no other declaration holds, keep shared
     // entries, restamp the hash unless an id-mismatch left the lock stale.
-    super::grim(write_config(&scope.config_path, &scope.options, &set))?;
+    super::grim(write_config(
+        &scope.config_path,
+        &scope.options,
+        &scope.registries,
+        &set,
+    ))?;
 
     if let Ok(previous) = lock_io::load(&scope.lock_path) {
         let outcome = drop_from_lock(&previous, kind, &args.name, &set_before, &set);

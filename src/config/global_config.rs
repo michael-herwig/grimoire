@@ -11,7 +11,7 @@
 use std::path::Path;
 
 use crate::config::config_error::{ConfigError, ConfigErrorKind};
-use crate::config::declaration::{ConfigOptions, DesiredSet};
+use crate::config::declaration::{ConfigOptions, DesiredSet, RegistryConfig};
 use crate::config::project_config::ProjectConfig;
 use crate::config::{self};
 
@@ -20,6 +20,8 @@ use crate::config::{self};
 pub struct GlobalConfig {
     /// Options table (`[options]`).
     pub options: ConfigOptions,
+    /// The declared registries (`[[registries]]`); empty when none declared.
+    pub registries: Vec<RegistryConfig>,
     /// The declared skills and rules (empty when the file is absent).
     pub set: DesiredSet,
 }
@@ -30,6 +32,7 @@ impl GlobalConfig {
         let parsed = ProjectConfig::from_toml_str(s)?;
         Ok(Self {
             options: parsed.options,
+            registries: parsed.registries,
             set: parsed.set,
         })
     }
@@ -53,6 +56,7 @@ impl GlobalConfig {
             }) if io.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Self {
                     options: ConfigOptions::default(),
+                    registries: Vec::new(),
                     set: DesiredSet::default(),
                 });
             }
@@ -67,6 +71,7 @@ impl GlobalConfig {
         })?;
         Ok(Self {
             options: parsed.options,
+            registries: parsed.registries,
             set: parsed.set,
         })
     }
@@ -114,5 +119,90 @@ rust-style = "ghcr.io/acme/rules/rust-style:v3"
         let err = GlobalConfig::load(&path).expect_err("unknown field rejects");
         assert!(matches!(err.kind, ConfigErrorKind::TomlParse(_)));
         assert_eq!(err.path, path);
+    }
+
+    #[test]
+    fn global_registries_duplicate_alias_rejected_via_from_toml_str() {
+        let err = GlobalConfig::from_toml_str(
+            r#"
+[[registries]]
+alias = "acme"
+url = "ghcr.io/acme"
+
+[[registries]]
+alias = "acme"
+url = "registry.corp/team"
+"#,
+        )
+        .expect_err("duplicate alias must reject for global config");
+        assert!(matches!(err.kind, ConfigErrorKind::RegistryInvalid { .. }));
+    }
+
+    #[test]
+    fn global_registries_duplicate_alias_rejected_via_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grimoire.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[registries]]
+alias = "acme"
+url = "ghcr.io/acme"
+
+[[registries]]
+alias = "acme"
+url = "registry.corp/team"
+"#,
+        )
+        .unwrap();
+        let err = GlobalConfig::load(&path).expect_err("duplicate alias must reject for global config load");
+        assert!(matches!(err.kind, ConfigErrorKind::RegistryInvalid { .. }));
+        assert_eq!(err.path, path);
+    }
+
+    #[test]
+    fn global_registries_alias_with_slash_rejected() {
+        let err = GlobalConfig::from_toml_str(
+            r#"
+[[registries]]
+alias = "a/b"
+url = "ghcr.io/acme"
+"#,
+        )
+        .expect_err("alias with '/' must reject for global config");
+        assert!(matches!(err.kind, ConfigErrorKind::RegistryInvalid { .. }));
+    }
+
+    #[test]
+    fn global_registries_alias_with_whitespace_rejected() {
+        let err = GlobalConfig::from_toml_str(
+            r#"
+[[registries]]
+alias = " acme"
+url = "ghcr.io/acme"
+"#,
+        )
+        .expect_err("alias with whitespace must reject for global config");
+        assert!(matches!(err.kind, ConfigErrorKind::RegistryInvalid { .. }));
+    }
+
+    #[test]
+    fn global_registries_valid_multi_registry_accepted() {
+        let cfg = GlobalConfig::from_toml_str(
+            r#"
+[[registries]]
+alias = "acme"
+url = "ghcr.io/acme"
+default = true
+
+[[registries]]
+alias = "corp"
+url = "registry.corp/team"
+"#,
+        )
+        .expect("valid multi-registry global config must parse");
+        assert_eq!(cfg.registries.len(), 2);
+        assert_eq!(cfg.registries[0].alias.as_deref(), Some("acme"));
+        assert_eq!(cfg.registries[1].alias.as_deref(), Some("corp"));
     }
 }

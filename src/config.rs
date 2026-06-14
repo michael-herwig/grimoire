@@ -15,18 +15,21 @@ pub mod declaration;
 pub mod global_config;
 pub mod hash;
 pub mod project_config;
+pub mod registry_resolve;
 pub mod scope;
 
 #[allow(unused_imports)]
 pub use config_error::{ConfigError, ConfigErrorKind};
 #[allow(unused_imports)]
-pub use declaration::{ConfigOptions, DesiredSet};
+pub use declaration::{ConfigOptions, DesiredSet, RegistryConfig};
 #[allow(unused_imports)]
 pub use global_config::GlobalConfig;
 #[allow(unused_imports)]
 pub use hash::{DECLARATION_HASH_VERSION, declaration_hash};
 #[allow(unused_imports)]
 pub use project_config::{DiscoveredConfig, ProjectConfig};
+#[allow(unused_imports)]
+pub use registry_resolve::{ResolvedRegistry, primary_registry, resolve_reference, resolve_registries};
 #[allow(unused_imports)]
 pub use scope::ConfigScope;
 

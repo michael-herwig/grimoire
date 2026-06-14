@@ -112,6 +112,7 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
         &scope.config_path,
         &scope.lock_path,
         &scope.options,
+        &scope.registries,
         &mut set,
         kind,
         &args.name,
@@ -147,6 +148,7 @@ pub(crate) fn undeclare_and_unlock(
     config_path: &std::path::Path,
     lock_path: &std::path::Path,
     options: &crate::config::declaration::ConfigOptions,
+    registries: &[crate::config::declaration::RegistryConfig],
     set: &mut crate::config::declaration::DesiredSet,
     kind: ArtifactKind,
     name: &str,
@@ -160,7 +162,7 @@ pub(crate) fn undeclare_and_unlock(
     };
     if declared {
         set.invalidate_declaration_hash_cache();
-        super::grim(write_config(config_path, options, set))?;
+        super::grim(write_config(config_path, options, registries, set))?;
     }
     if let Ok(previous) = lock_io::load(lock_path) {
         let outcome = super::remove::drop_from_lock(&previous, kind, name, &set_before, set);
@@ -258,7 +260,7 @@ mod tests {
         let lock_path = tmp.path().join("grimoire.lock");
 
         let mut set = declared_set(&["alpha", "beta"]);
-        write_config(&config_path, &ConfigOptions::default(), &set).unwrap();
+        write_config(&config_path, &ConfigOptions::default(), &[], &set).unwrap();
         let lock = lock_with_skills(set.declaration_hash_cached(), &[("alpha", 'a'), ("beta", 'b')]);
         lock_io::save(&lock_path, &lock, None).unwrap();
 
@@ -266,6 +268,7 @@ mod tests {
             &config_path,
             &lock_path,
             &ConfigOptions::default(),
+            &[],
             &mut set,
             ArtifactKind::Skill,
             "alpha",
@@ -305,7 +308,7 @@ mod tests {
             Identifier::parse("localhost:5000/acme/bundles/starter-pack:latest").unwrap(),
         );
         set.invalidate_declaration_hash_cache();
-        write_config(&config_path, &ConfigOptions::default(), &set).unwrap();
+        write_config(&config_path, &ConfigOptions::default(), &[], &set).unwrap();
 
         let mut lock = lock_with_skills(set.declaration_hash_cached(), &[("alpha", 'a')]);
         let mut member = LockedArtifact::direct("member".to_string(), ArtifactKind::Skill, pinned("acme/member", 'b'));
@@ -320,6 +323,7 @@ mod tests {
             &config_path,
             &lock_path,
             &ConfigOptions::default(),
+            &[],
             &mut set,
             ArtifactKind::Bundle,
             "starter-pack",
@@ -359,7 +363,7 @@ mod tests {
             );
         }
         set.invalidate_declaration_hash_cache();
-        write_config(&config_path, &ConfigOptions::default(), &set).unwrap();
+        write_config(&config_path, &ConfigOptions::default(), &[], &set).unwrap();
 
         let mut lock = lock_with_skills(set.declaration_hash_cached(), &[]);
         let mut member = LockedArtifact::direct("member".to_string(), ArtifactKind::Skill, pinned("acme/member", 'b'));
@@ -374,6 +378,7 @@ mod tests {
             &config_path,
             &lock_path,
             &ConfigOptions::default(),
+            &[],
             &mut set,
             ArtifactKind::Bundle,
             "pack-a",
@@ -403,7 +408,7 @@ mod tests {
         let lock_path = tmp.path().join("grimoire.lock");
 
         let mut set = declared_set(&[]);
-        write_config(&config_path, &ConfigOptions::default(), &set).unwrap();
+        write_config(&config_path, &ConfigOptions::default(), &[], &set).unwrap();
         // The drifted lock: an entry + a hash that matches nothing.
         let lock = lock_with_skills(&format!("sha256:{}", sha('f')), &[("ghost", 'c')]);
         lock_io::save(&lock_path, &lock, None).unwrap();
@@ -412,6 +417,7 @@ mod tests {
             &config_path,
             &lock_path,
             &ConfigOptions::default(),
+            &[],
             &mut set,
             ArtifactKind::Skill,
             "ghost",

@@ -76,8 +76,30 @@ impl GrimPaths {
     }
 
     /// The catalog cache file (`$GRIM_HOME/catalog.json`).
+    ///
+    /// Legacy single-registry location. Superseded by the per-registry
+    /// directory ([`Self::catalog_dir`] / [`Self::catalog_file_for`]);
+    /// retained only so [`Self::ensure_layout`] can reap it.
     pub fn catalog_file(&self) -> PathBuf {
         self.root.join("catalog.json")
+    }
+
+    /// The per-registry catalog cache directory (`$GRIM_HOME/catalog`).
+    pub fn catalog_dir(&self) -> PathBuf {
+        self.root.join("catalog")
+    }
+
+    /// The catalog cache file for `registry`: `catalog/<hash>.json`, where
+    /// `<hash>` is the first 16 hex chars of the SHA-256 of the registry url.
+    ///
+    /// One file per registry so multiple configured registries cache
+    /// independently and a refresh of one never clobbers another. The on-disk
+    /// `CatalogFile` is self-keyed by its `registry` field, so a hash
+    /// collision is still caught at read time (the file is rebuilt, never
+    /// mis-served).
+    pub fn catalog_file_for(&self, registry: &str) -> PathBuf {
+        let hash = crate::oci::digest::Algorithm::Sha256.hash(registry).hex()[..16].to_string();
+        self.catalog_dir().join(format!("{hash}.json"))
     }
 
     /// Create the root, `blobs`, `tags`, `state`, and `tmp` directories
@@ -97,8 +119,15 @@ impl GrimPaths {
         std::fs::create_dir_all(self.blobs_dir())?;
         std::fs::create_dir_all(self.tags_dir())?;
         std::fs::create_dir_all(self.state_dir())?;
+        std::fs::create_dir_all(self.catalog_dir())?;
         let tmp = self.tmp_dir();
         std::fs::create_dir_all(&tmp)?;
+
+        // Reap the legacy single-registry `catalog.json`, superseded by the
+        // per-registry `catalog/<hash>.json` files (no writer targets it any
+        // more). Best-effort: the catalog is a disposable TTL cache, so a
+        // leftover file is harmless and a removal failure never breaks the run.
+        let _ = std::fs::remove_file(self.catalog_file());
 
         #[cfg(unix)]
         {
@@ -132,6 +161,32 @@ mod tests {
         assert_eq!(p.state_dir(), Path::new("/data/grim/state"));
         assert_eq!(p.tmp_dir(), Path::new("/data/grim/tmp"));
         assert_eq!(p.catalog_file(), Path::new("/data/grim/catalog.json"));
+        assert_eq!(p.catalog_dir(), Path::new("/data/grim/catalog"));
+    }
+
+    #[test]
+    fn catalog_file_for_is_per_registry_under_catalog_dir() {
+        let p = GrimPaths::new("/data/grim");
+        let a = p.catalog_file_for("ghcr.io/acme");
+        let b = p.catalog_file_for("registry.corp/team");
+        // Distinct registries land in distinct files under catalog/.
+        assert_ne!(a, b);
+        assert!(a.starts_with("/data/grim/catalog"));
+        assert!(a.extension().is_some_and(|e| e == "json"));
+        // Stable: same input ⇒ same path.
+        assert_eq!(a, p.catalog_file_for("ghcr.io/acme"));
+    }
+
+    #[test]
+    fn ensure_layout_creates_catalog_dir_and_reaps_legacy_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = GrimPaths::new(dir.path().join("home"));
+        std::fs::create_dir_all(p.root()).unwrap();
+        // Plant a legacy catalog.json that ensure_layout must reap.
+        std::fs::write(p.catalog_file(), b"{}").unwrap();
+        p.ensure_layout().unwrap();
+        assert!(p.catalog_dir().is_dir());
+        assert!(!p.catalog_file().exists(), "legacy catalog.json must be reaped");
     }
 
     #[test]
