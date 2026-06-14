@@ -5,33 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.3] - 2026-06-14
 
 ### Added
 
-- Project install state now lives at `<workspace>/.grimoire/state.json`
-  (previously `$GRIM_HOME/state/projects/<sha256>.json`). The workspace
-  directory is the key — no content hash in the filename — so two projects
-  sharing a `GRIM_HOME` volume can no longer collide *(install)*
-- Grim self-manages `.grimoire/.gitignore` (contents: `*`) on first project
-  install, keeping state out of version control without touching the
-  consumer's root `.gitignore` *(install)*
-- Stored install paths are now anchor-relative (`AnchoredPath`) rather than
-  absolute, enabling portable state across machines with differing `$HOME`
-  or `$CLAUDE_CONFIG_DIR` values. New anchors: `Workspace`, `ClaudeRoot`,
-  `CopilotRoot`, `OpenCodeSkills`, `OpenCodeRoot`, `GrimHome` *(install)*
-- `OpenCodeRoot` anchor for global OpenCode agent paths
-  (`<opencode_root>/agents/<name>.md`) *(install)*
-
-### Changed
-
-- Install-state schema bumped from V1 to V2: `outputs` array replaces the
-  denormalized top-level `target`/`content_hash` fields and the old
-  `clients` array. V1 files are migrated in memory on first load; the next
-  mutating command (`install`/`update`/`uninstall`) or TUI install/delete
-  action persists V2 and reaps the legacy file *(install)*
-- Global install state path (`$GRIM_HOME/state/global.json`) is unchanged;
-  stored paths are now anchor-relative *(install)*
+- Add `grim schema` to emit JSON Schemas for the TOML formats *(cli)*
+- Portable anchor-relativized install state *(install)*
 
 ## [0.4.2] - 2026-06-13
 
@@ -45,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Checkout LFS logo so ocx describe publishes real PNG *(ci)*
 - Reap empty OpenCode rules dir on last uninstall *(install)*
 - Align table columns by chars, not bytes *(cli)*
+
+### Release
+
+- V0.4.2
 
 ## [0.4.1] - 2026-06-12
 
@@ -202,6 +185,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Make release-update.sh executable; add rolling-release regression tests
 - Contact loopback registries over plain HTTP on any port
+[0.4.3]: https://github.com/michael-herwig/grimoire/compare/v0.4.2..v0.4.3
 [0.4.2]: https://github.com/michael-herwig/grimoire/compare/v0.4.1..v0.4.2
 [0.4.1]: https://github.com/michael-herwig/grimoire/compare/v0.4.0..v0.4.1
 [0.4.0]: https://github.com/michael-herwig/grimoire/compare/v0.3.0..v0.4.0
