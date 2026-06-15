@@ -20,9 +20,22 @@ release infra, versioning, or the changelog.
 
 ### cargo-dist: Builds the Binary
 
-cargo-dist handles binary builds, archives, checksums, and GitHub Release
-creation for the single `grim` binary. Configuration lives in
-`dist-workspace.toml` (source of truth).
+cargo-dist handles binary builds, archives, checksums, the shell +
+PowerShell installers (`grimoire-installer.sh` / `.ps1`), and GitHub
+Release creation for the single `grim` binary. Configuration lives in
+`dist-workspace.toml` (source of truth); the `installers` key drives which
+installers are produced. The CI workflow is installer-agnostic — `dist
+plan` reads the config at release time — so toggling `installers` needs no
+`release.yml` change.
+
+The docs site hosts version-less front doors at `docs/src/install.{sh,ps1}`
+that fetch `releases/latest/download/grimoire-installer.{sh,ps1}` at run
+time (the cargo-dist script bakes in a pinned version, so it cannot be
+copied verbatim to the site). The recommended install path is [ocx][ocx]
+(`ocx package install --select ocx.sh/grim`); the curl-installer is the
+no-ocx fallback.
+
+[ocx]: https://ocx.sh
 
 ### Generated Workflows: Never Edit, Always Regenerate
 
