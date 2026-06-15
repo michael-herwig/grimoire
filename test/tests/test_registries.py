@@ -263,3 +263,129 @@ def test_search_single_default_registry_cold_cache(
         f"cold-cache search with legacy default_registry must find 'legacy-skill', "
         f"got repos: {repos}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 4 — partial failure: one unreachable registry degrades gracefully
+# ---------------------------------------------------------------------------
+
+
+def test_search_partial_registry_failure_degrades_to_reachable(
+    grim_at, project_dir: Path, registry: str
+) -> None:
+    """One unreachable ``[[registries]]`` entry must not fail the whole browse.
+
+    ``grim search`` fans out one task per declared registry and catches a
+    per-registry failure (degrading it to an empty group) rather than
+    propagating it. With two registries declared — one reachable, one pointing
+    at a dead port — the command must:
+
+    - exit 0 (the per-registry failure never becomes the process exit code)
+    - still surface the reachable registry's artifact
+
+    The unreachable entry uses ``localhost:9999`` (nothing listening), which
+    refuses the connection immediately, so the test stays fast and hermetic —
+    that namespace is never published to the shared registry.
+    """
+    ns_good = f"grim-test/{uuid.uuid4().hex[:12]}"
+
+    cfg_text = (
+        f'[[registries]]\n'
+        f'alias = "good"\n'
+        f'url = "{REGISTRY_HOST}/{ns_good}"\n'
+        f'default = true\n'
+        f'\n'
+        f'[[registries]]\n'
+        f'alias = "bad"\n'
+        f'url = "localhost:9999/grim-test/unreachable"\n'
+        f'\n'
+        f'[skills]\n'
+        f'\n'
+        f'[rules]\n'
+    )
+    (project_dir / "grimoire.toml").write_text(cfg_text)
+    runner = grim_at(project_dir)
+
+    make_artifact(
+        f"{ns_good}/reachable-skill",
+        "skill",
+        {"reachable-skill/SKILL.md": "---\nname: reachable-skill\ndescription: works\n---\n# OK\n"},
+        tag="latest",
+        annotations={"org.opencontainers.image.description": "Reachable artifact"},
+    )
+
+    result = runner.run("--format", "json", "search", "--refresh", check=False)
+    assert result.returncode == 0, (
+        f"search with one unreachable registry must still exit 0, "
+        f"got {result.returncode}; stderr: {result.stderr}"
+    )
+    rows = json.loads(result.stdout)
+    assert isinstance(rows, list), f"search must return a JSON array, got {rows!r}"
+
+    repos = [r.get("repo", "") for r in rows]
+    assert any("reachable-skill" in repo for repo in repos), (
+        f"search must surface the reachable registry's artifact despite the "
+        f"unreachable one, got repos: {repos}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 5 — no dedup: the same repo in two registries surfaces twice
+# ---------------------------------------------------------------------------
+
+
+def test_search_same_repo_in_two_registries_is_not_deduped(
+    grim_at, project_dir: Path, registry: str
+) -> None:
+    """The same repo name in two registries surfaces as two distinct rows.
+
+    The catalog is registry-grouped and flattened by fully-qualified
+    ``registry/repository`` reference with no dedup or precedence step, so a
+    repository published under the SAME bare name in two declared registries
+    must appear TWICE — once per registry — never collapsed to one winner.
+    This pins the "browse all, disambiguate by registry" contract: a future
+    accidental dedup-by-bare-name would silently hide a registry's copy.
+    """
+    ns1 = f"grim-test/{uuid.uuid4().hex[:12]}"
+    ns2 = f"grim-test/{uuid.uuid4().hex[:12]}"
+    shared = "shared-tool"
+
+    make_artifact(
+        f"{ns1}/{shared}",
+        "skill",
+        {f"{shared}/SKILL.md": f"---\nname: {shared}\ndescription: from reg1\n---\n# R1\n"},
+        tag="latest",
+        annotations={"org.opencontainers.image.description": "Shared tool, registry 1"},
+    )
+    make_artifact(
+        f"{ns2}/{shared}",
+        "skill",
+        {f"{shared}/SKILL.md": f"---\nname: {shared}\ndescription: from reg2\n---\n# R2\n"},
+        tag="latest",
+        annotations={"org.opencontainers.image.description": "Shared tool, registry 2"},
+    )
+
+    _two_namespace_config(project_dir, ns1, ns2)
+    runner = grim_at(project_dir)
+
+    result = runner.run("--format", "json", "search", "--refresh", check=False)
+    assert result.returncode == 0, (
+        f"multi-registry search must exit 0, got {result.returncode}; stderr: {result.stderr}"
+    )
+    rows = json.loads(result.stdout)
+    assert isinstance(rows, list), f"search must return a JSON array, got {rows!r}"
+
+    shared_repos = [r.get("repo", "") for r in rows if shared in r.get("repo", "")]
+    assert len(shared_repos) == 2, (
+        f"the same repo in two registries must surface twice (no dedup), "
+        f"got: {shared_repos}"
+    )
+    assert any(f"{REGISTRY_HOST}/{ns1}" in repo for repo in shared_repos), (
+        f"registry 1's copy of '{shared}' must appear, got: {shared_repos}"
+    )
+    assert any(f"{REGISTRY_HOST}/{ns2}" in repo for repo in shared_repos), (
+        f"registry 2's copy of '{shared}' must appear, got: {shared_repos}"
+    )
+    assert shared_repos[0] != shared_repos[1], (
+        f"the two copies must be distinct fully-qualified refs, got: {shared_repos}"
+    )

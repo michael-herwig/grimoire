@@ -12,21 +12,38 @@ from __future__ import annotations
 
 import json
 import subprocess
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 
+from src.helpers import make_artifact
+from src.registry import REGISTRY_HOST
 from src.runner import GrimRunner
 
 _PROTOCOL = "2025-06-18"
 
 
-def _drive(runner: GrimRunner, cwd: Path, requests: list[dict], *, allow_writes: bool = False) -> dict[int, dict]:
+def _drive(
+    runner: GrimRunner,
+    cwd: Path,
+    requests: list[dict],
+    *,
+    allow_writes: bool = False,
+    offline: bool = True,
+) -> dict[int, dict]:
     """Run `grim [--offline] mcp` feeding `requests`, return responses by id.
 
-    `--offline` keeps the embedded catalog browse off the network (a cold
-    cache degrades to empty), so the test is hermetic.
+    `offline=True` (the default) passes `--offline` so the embedded catalog
+    browse stays off the network — a cold cache degrades to empty, keeping a
+    test hermetic. Pass `offline=False` when the test must drive a real
+    multi-registry browse (the server then resolves live against the
+    configured `[[registries]]`); such a test must take the session
+    `registry` fixture and publish its artifacts first.
     """
-    args = [str(runner.binary), "--offline", "mcp"]
+    args = [str(runner.binary)]
+    if offline:
+        args.append("--offline")
+    args.append("mcp")
     if allow_writes:
         args.append("--allow-writes")
     payload = "".join(json.dumps(r) + "\n" for r in requests)
@@ -260,4 +277,150 @@ def test_mcp_search_ignores_agent_supplied_registry(
     )
     assert injected["content"][0]["text"] == baseline["content"][0]["text"], (
         "an agent-supplied registry must have no effect on the browse result"
+    )
+
+
+def _two_registry_config(project_dir: Path, ns1: str, ns2: str) -> None:
+    """Write a grimoire.toml declaring two ``[[registries]]`` (two namespaces).
+
+    Mirrors ``test_registries.py::_two_namespace_config``: the shared
+    ``localhost:5000`` registry stands in for two independent registries via
+    two distinct namespace prefixes declared as two ``[[registries]]`` entries.
+    """
+    (project_dir / "grimoire.toml").write_text(
+        f'[[registries]]\n'
+        f'alias = "reg1"\n'
+        f'url = "{REGISTRY_HOST}/{ns1}"\n'
+        f'default = true\n'
+        f'\n'
+        f'[[registries]]\n'
+        f'alias = "reg2"\n'
+        f'url = "{REGISTRY_HOST}/{ns2}"\n'
+        f'\n'
+        f'[skills]\n'
+        f'\n'
+        f'[rules]\n'
+    )
+
+
+def _call_search(
+    runner: GrimRunner, project_dir: Path, arguments: dict
+) -> dict:
+    """Drive a live (non-offline) ``grim_search`` tool call, return its result."""
+    responses = _drive(
+        runner,
+        project_dir,
+        [
+            _initialize(1),
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "grim_search", "arguments": arguments},
+            },
+        ],
+        offline=False,
+    )
+    return responses[2]["result"]
+
+
+def test_mcp_search_browses_all_declared_registries(
+    grim_at: Callable[[Path], GrimRunner], project_dir: Path, registry: str
+) -> None:
+    """``grim_search`` browses ALL declared ``[[registries]]``, like the CLI.
+
+    The MCP tool sets ``registry: None`` and routes through the shared
+    ``command::search::run`` -> ``registries_for_scope`` seam, so a project
+    declaring two ``[[registries]]`` makes the tool surface artifacts from
+    BOTH. This pins the MCP path of the multi-registry feature (the CLI path
+    is covered by ``test_registries.py``); a regression that defaulted the MCP
+    browse to a single registry would surface here.
+
+    Driven non-offline with ``refresh: true`` so the server performs a real
+    walk of both registries from a cold per-test cache.
+    """
+    ns1 = f"grim-test/{uuid.uuid4().hex[:12]}"
+    ns2 = f"grim-test/{uuid.uuid4().hex[:12]}"
+
+    make_artifact(
+        f"{ns1}/mcp-skill-ns1",
+        "skill",
+        {"mcp-skill-ns1/SKILL.md": "---\nname: mcp-skill-ns1\ndescription: from ns1\n---\n# S1\n"},
+        tag="latest",
+        annotations={"org.opencontainers.image.description": "Skill from namespace 1"},
+    )
+    make_artifact(
+        f"{ns2}/mcp-rule-ns2",
+        "rule",
+        {"mcp-rule-ns2.md": "---\npaths: ['**/*.rs']\n---\n# R2\n"},
+        tag="latest",
+        annotations={"org.opencontainers.image.description": "Rule from namespace 2"},
+    )
+
+    _two_registry_config(project_dir, ns1, ns2)
+    runner = grim_at(project_dir)
+
+    call = _call_search(runner, project_dir, {"refresh": True})
+    assert call["isError"] is False, (
+        f"multi-registry grim_search must not error, got: {call!r}"
+    )
+    rows = json.loads(call["content"][0]["text"])
+    assert isinstance(rows, list), f"grim_search payload must be a JSON array, got {rows!r}"
+
+    repos = [r.get("repo", "") for r in rows]
+    assert any("mcp-skill-ns1" in repo for repo in repos), (
+        f"grim_search must surface the artifact from registry 1 (reg1), got repos: {repos}"
+    )
+    assert any("mcp-rule-ns2" in repo for repo in repos), (
+        f"grim_search must surface the artifact from registry 2 (reg2), got repos: {repos}"
+    )
+
+
+def test_mcp_search_partial_registry_failure_degrades(
+    grim_at: Callable[[Path], GrimRunner], project_dir: Path, registry: str
+) -> None:
+    """A single unreachable ``[[registries]]`` entry must not error the tool.
+
+    With two registries declared — one reachable, one pointing at a dead port
+    — ``grim_search`` degrades the unreachable registry to an empty group and
+    still returns the reachable registry's rows. The tool result must report
+    ``isError: false`` (the per-registry failure never propagates), matching
+    the CLI's exit-0 contract in ``test_registries.py``.
+    """
+    ns_good = f"grim-test/{uuid.uuid4().hex[:12]}"
+
+    (project_dir / "grimoire.toml").write_text(
+        f'[[registries]]\n'
+        f'alias = "good"\n'
+        f'url = "{REGISTRY_HOST}/{ns_good}"\n'
+        f'default = true\n'
+        f'\n'
+        f'[[registries]]\n'
+        f'alias = "bad"\n'
+        f'url = "localhost:9999/grim-test/unreachable"\n'
+        f'\n'
+        f'[skills]\n'
+        f'\n'
+        f'[rules]\n'
+    )
+    runner = grim_at(project_dir)
+
+    make_artifact(
+        f"{ns_good}/mcp-reachable",
+        "skill",
+        {"mcp-reachable/SKILL.md": "---\nname: mcp-reachable\ndescription: works\n---\n# OK\n"},
+        tag="latest",
+    )
+
+    call = _call_search(runner, project_dir, {"refresh": True})
+    assert call["isError"] is False, (
+        f"grim_search must not error when one registry is unreachable, got: {call!r}"
+    )
+    rows = json.loads(call["content"][0]["text"])
+    assert isinstance(rows, list), f"grim_search payload must be a JSON array, got {rows!r}"
+
+    repos = [r.get("repo", "") for r in rows]
+    assert any("mcp-reachable" in repo for repo in repos), (
+        f"grim_search must still surface the reachable registry's artifact, got repos: {repos}"
     )
