@@ -39,10 +39,26 @@ def grim_binary() -> Path:
 def registry() -> str:
     """A reachable ``registry:2`` on ``localhost:5000``.
 
-    Reuses an already-running registry (the common CI / dev setup); if
-    none answers, starts a throwaway container and tears it down at the
-    end of the session. The repository namespace is isolated per test via
-    the ``unique_repo`` fixture, so a shared registry is safe.
+    Reuses an already-running registry (the common CI / dev setup); if none
+    answers, starts a throwaway container. The repository namespace is
+    isolated per test via the ``unique_repo`` fixture, so a shared registry
+    is safe.
+
+    **xdist-safe.** Under ``-n auto`` this session fixture runs once *per
+    worker*. Two design choices keep concurrent workers from fighting over
+    the single shared container:
+
+    1. A lost ``docker run --name`` race (another worker already created the
+       container — "name already in use") is not fatal: fall through to the
+       readiness wait instead of skipping, so every worker ends up using the
+       one registry whoever-won started.
+    2. The container is deliberately **not** torn down at session end. With a
+       per-worker ``docker rm -f`` the first worker to finish tore the shared
+       container down while sibling workers were still pushing, surfacing as
+       flaky ``Connection refused``. The throwaway ``registry:2`` on ``:5000``
+       is instead reused by the next run via the ``registry_reachable()``
+       fast path (stop it by hand with ``docker rm -f`` when done, or let CI
+       discard the runner).
     """
     if registry_reachable():
         yield REGISTRY_HOST
@@ -58,7 +74,10 @@ def registry() -> str:
         capture_output=True,
         text=True,
     )
-    if started.returncode != 0:
+    # A name-in-use failure means a sibling xdist worker won the start race;
+    # that is expected, not an error — wait for its container to come up.
+    name_in_use = "already in use" in (started.stderr or "").lower()
+    if started.returncode != 0 and not name_in_use:
         pytest.skip(
             f"no registry reachable and could not start one: "
             f"{started.stderr.strip()}"
@@ -70,17 +89,9 @@ def registry() -> str:
             break
         time.sleep(0.5)
     else:
-        subprocess.run(
-            ["docker", "rm", "-f", _REGISTRY_CONTAINER],
-            capture_output=True,
-        )
         pytest.skip("registry container did not become ready in time")
 
     yield REGISTRY_HOST
-
-    subprocess.run(
-        ["docker", "rm", "-f", _REGISTRY_CONTAINER], capture_output=True
-    )
 
 
 # ---------------------------------------------------------------------------
