@@ -101,7 +101,11 @@ pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseRe
     let manifest = OciManifest {
         media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
         artifact_type: Some(kind.artifact_type().to_string()),
-        config_media_type: Some(kind.config_media_type().to_string()),
+        // No config kind type on the wire (`adr_oci_empty_config_compat.md`):
+        // the push path stamps the OCI empty config type, and the kind rides
+        // on `artifactType` + the `com.grimoire.kind` annotation. Keep the
+        // in-memory manifest faithful to what is pushed.
+        config_media_type: None,
         layers: vec![Descriptor {
             digest: layer_digest.clone(),
             media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),
@@ -195,7 +199,8 @@ async fn release_bundle(
     let oci_manifest = OciManifest {
         media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
         artifact_type: Some(ArtifactKind::Bundle.artifact_type().to_string()),
-        config_media_type: Some(ArtifactKind::Bundle.config_media_type().to_string()),
+        // OCI empty config on the wire — see the skill/rule path in `run`.
+        config_media_type: None,
         layers: vec![Descriptor {
             digest: layer_digest.clone(),
             media_type: BUNDLE_LAYER_MEDIA_TYPE.to_string(),
@@ -429,7 +434,9 @@ mod tests {
         let m = OciManifest {
             media_type: None,
             artifact_type: Some(ArtifactKind::Skill.artifact_type().to_string()),
-            config_media_type: Some(ArtifactKind::Skill.config_media_type().to_string()),
+            // Mirrors the wire: no config kind type since
+            // `adr_oci_empty_config_compat.md`.
+            config_media_type: None,
             layers: vec![Descriptor {
                 digest: Algorithm::Sha256.hash(b"x"),
                 media_type: "t".to_string(),
@@ -444,7 +451,8 @@ mod tests {
         OciManifest {
             media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
             artifact_type: Some(ArtifactKind::Skill.artifact_type().to_string()),
-            config_media_type: Some(ArtifactKind::Skill.config_media_type().to_string()),
+            // OCI empty config on the wire — see `adr_oci_empty_config_compat.md`.
+            config_media_type: None,
             layers: vec![Descriptor {
                 digest: Algorithm::Sha256.hash(tar),
                 media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),

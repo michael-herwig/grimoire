@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from src.helpers import write_config
-from src.registry import tag_digest
+from src.registry import fetch_manifest, tag_digest
 
 
 def _write(p: Path, body: str) -> None:
@@ -28,6 +28,46 @@ def _local_skill(project_dir: Path, name: str = "code-review") -> Path:
     )
     _write(skill / "scripts/run.sh", "echo hi\n")
     return skill
+
+
+def test_release_wire_shape_empty_config_and_kind_annotation(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Issue #11 axis A: the pushed manifest's config descriptor uses the OCI
+    empty media type (universally allow-listed, GitLab-safe) — NOT a custom
+    grimoire config type. The kind still rides on the custom ``artifactType``
+    and is mirrored into the ``com.grimoire.kind`` fallback annotation.
+
+    This is the closest CI can get to the GitLab wire contract; ``registry:2``
+    accepts everything, so GitLab's allowlist rejection cannot be reproduced
+    here — only the wire shape that satisfies it.
+    """
+    skill = _local_skill(project_dir)
+    repo = f"{registry}/{unique_repo}/code-review"
+    repo_path = f"{unique_repo}/code-review"
+    runner = grim_at(project_dir)
+
+    out = runner.json("release", str(skill), f"{repo}:1.2.3")
+    assert out["pushed"] is True
+
+    manifest = fetch_manifest(repo_path, "1.2.3")
+    assert manifest["config"]["mediaType"] == "application/vnd.oci.empty.v1+json", (
+        "config descriptor must be the OCI empty type (GitLab allowlist), "
+        f"got {manifest['config']['mediaType']}"
+    )
+    # The empty config blob is the byte-identical `{}` (size 2).
+    assert manifest["config"]["size"] == 2, (
+        f"empty config blob must be 2 bytes, got {manifest['config']['size']}"
+    )
+    # Kind rides on the custom artifactType (unchanged by the fix).
+    assert manifest["artifactType"] == "application/vnd.grimoire.skill.v1", (
+        f"artifactType must be unchanged, got {manifest.get('artifactType')}"
+    )
+    # ...and is mirrored into the registry-agnostic fallback annotation.
+    annotations = manifest.get("annotations") or {}
+    assert annotations.get("com.grimoire.kind") == "skill", (
+        f"manifest must carry com.grimoire.kind=skill, got {annotations}"
+    )
 
 
 def test_release_pushes_with_cascade_tags(

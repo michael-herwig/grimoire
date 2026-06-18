@@ -897,7 +897,9 @@ mod tests {
         OciManifest {
             media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
             artifact_type: Some(crate::oci::ArtifactKind::Skill.artifact_type().to_string()),
-            config_media_type: Some(crate::oci::ArtifactKind::Skill.config_media_type().to_string()),
+            // OCI empty config — the actual wire shape since
+            // `adr_oci_empty_config_compat.md` (kind resolves via artifactType).
+            config_media_type: Some("application/vnd.oci.empty.v1+json".to_string()),
             layers: vec![Descriptor {
                 digest: Algorithm::Sha256.hash(b"payload"),
                 media_type: "application/vnd.grimoire.artifact.layer.v1.tar".to_string(),

@@ -6,6 +6,17 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The manifest annotation key carrying the artifact kind as a
+/// registry-agnostic fallback discriminator (`"skill"` / `"rule"` /
+/// `"agent"` / `"bundle"`). The authoritative wire discriminator is the OCI
+/// `artifactType`; this annotation is the third read tier (after
+/// `artifactType` and the legacy config media type) so a registry that only
+/// round-trips annotations — or that rejects the custom `artifactType` —
+/// still types the artifact. Re-introduced after
+/// `adr_oci_empty_config_compat.md`; the value matches the pre-ADR format so
+/// even older grim readers resolve a new artifact's kind.
+pub const KIND_ANNOTATION: &str = "com.grimoire.kind";
+
 /// A Grimoire-managed artifact kind.
 ///
 /// Closed internal enum: the binary is the only consumer, so matches stay
@@ -180,6 +191,14 @@ mod tests {
         // The generic OCI image config and foreign types are not a kind.
         assert_eq!(
             ArtifactKind::from_config_media_type("application/vnd.oci.image.config.v1+json"),
+            None
+        );
+        // The OCI empty config type (the new default config descriptor since
+        // `adr_oci_empty_config_compat.md`) is NOT a kind — the read path must
+        // fall through to the `artifactType` / annotation tiers, never infer a
+        // kind from the empty config blob.
+        assert_eq!(
+            ArtifactKind::from_config_media_type("application/vnd.oci.empty.v1+json"),
             None
         );
         assert_eq!(

@@ -4,11 +4,13 @@
 
 The suite pushes single-layer OCI artifacts to a local ``registry:2`` on
 ``localhost:5000`` over plain HTTP using only the standard library (no
-extra test dependency). This mirrors what a real publisher does: a tiny
-``{}`` config blob, one uncompressed-tar layer blob, and a manifest whose
-kind rides on the OCI ``artifactType`` and the config descriptor's media
-type (``application/vnd.grimoire.<kind>.v1`` /
-``application/vnd.grimoire.<kind>.config.v1+json``).
+extra test dependency). This mirrors what a real publisher (grim) does:
+a tiny ``{}`` config blob typed as the OCI empty config
+(``application/vnd.oci.empty.v1+json`` — GitLab-allowlist-safe), one
+uncompressed-tar layer blob, and a manifest whose kind rides on the OCI
+``artifactType`` (``application/vnd.grimoire.<kind>.v1``) and is mirrored
+into a ``com.grimoire.kind`` annotation (see
+``adr_oci_empty_config_compat.md``).
 """
 from __future__ import annotations
 
@@ -23,16 +25,17 @@ REGISTRY_BASE = f"http://{REGISTRY_HOST}"
 
 _MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
 _LAYER_MEDIA_TYPE = "application/vnd.grimoire.artifact.layer.v1.tar"
+# The OCI empty config descriptor media type — the config every Grimoire
+# manifest carries since ``adr_oci_empty_config_compat.md`` (the per-kind
+# custom config type was rejected by GitLab's referenced-media-type allowlist).
+_OCI_EMPTY_CONFIG_MEDIA_TYPE = "application/vnd.oci.empty.v1+json"
+# The registry-agnostic kind fallback annotation key.
+_KIND_ANNOTATION = "com.grimoire.kind"
 
 
 def _artifact_type(kind: str) -> str:
     """The OCI ``artifactType`` for a Grimoire ``kind``."""
     return f"application/vnd.grimoire.{kind}.v1"
-
-
-def _config_media_type(kind: str) -> str:
-    """The config-descriptor media type for a Grimoire ``kind``."""
-    return f"application/vnd.grimoire.{kind}.config.v1+json"
 
 
 def _kind_from_artifact_type(artifact_type: str) -> str:
@@ -112,21 +115,27 @@ def push_artifact(
     """Push a single-layer OCI artifact and tag it.
 
     ``tar_bytes`` is the uncompressed artifact tar the materializer
-    expects. The kind rides on the OCI ``artifactType`` and the config
-    descriptor's media type (per ``kind``); any extra ``annotations`` are
-    merged in as-is. Returns the published reference incl. the manifest
-    digest, so callers can assert ``@sha256`` pins.
+    expects. The kind rides on the OCI ``artifactType`` (per ``kind``) and
+    is mirrored into the ``com.grimoire.kind`` annotation; the config
+    descriptor is the OCI empty type. Any extra ``annotations`` are merged
+    in (and may override ``com.grimoire.kind``). Returns the published
+    reference incl. the manifest digest, so callers can assert ``@sha256``
+    pins.
     """
     config_blob = b"{}"
     config_digest = _push_blob(repo, config_blob)
     layer_digest = _push_blob(repo, tar_bytes)
+
+    merged_annotations = {_KIND_ANNOTATION: kind}
+    if annotations:
+        merged_annotations.update(annotations)
 
     manifest = {
         "schemaVersion": 2,
         "mediaType": _MANIFEST_MEDIA_TYPE,
         "artifactType": _artifact_type(kind),
         "config": {
-            "mediaType": _config_media_type(kind),
+            "mediaType": _OCI_EMPTY_CONFIG_MEDIA_TYPE,
             "digest": config_digest,
             "size": len(config_blob),
         },
@@ -137,9 +146,8 @@ def push_artifact(
                 "size": len(tar_bytes),
             }
         ],
+        "annotations": merged_annotations,
     }
-    if annotations:
-        manifest["annotations"] = dict(annotations)
     manifest_bytes = json.dumps(manifest).encode()
     manifest_digest = _sha256(manifest_bytes)
     _put(

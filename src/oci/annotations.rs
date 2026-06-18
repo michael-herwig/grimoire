@@ -8,9 +8,13 @@
 //! `org.opencontainers.image.{title,description,version,licenses,source}`
 //! keys plus the Grimoire-specific `com.grimoire.keywords` and an optional
 //! `com.grimoire.summary` (a short, single-line blurb for catalog display,
-//! distinct from the longer `description`). The artifact
-//! kind is NOT an annotation — it is carried by the OCI `artifactType`
-//! (see [`crate::oci::ArtifactKind::artifact_type`]). The mapping is
+//! distinct from the longer `description`). The artifact kind rides
+//! primarily on the OCI `artifactType` (see
+//! [`crate::oci::ArtifactKind::artifact_type`]); it is ALSO mirrored into a
+//! `com.grimoire.kind` annotation ([`KIND_ANNOTATION`]) as a
+//! registry-agnostic fallback discriminator — the config descriptor is now
+//! the OCI empty type and carries no kind signal
+//! (`adr_oci_empty_config_compat.md`). The mapping is
 //! **fully deterministic**: `org.opencontainers.image.created` is
 //! intentionally omitted because a wall-clock timestamp would make a
 //! re-release of identical content produce a different manifest digest,
@@ -29,6 +33,7 @@ use std::collections::BTreeMap;
 
 use crate::config::project_config::BundleMetadata;
 use crate::oci::ArtifactKind;
+use crate::oci::artifact_kind::KIND_ANNOTATION;
 use crate::oci::manifest::OciManifest;
 use crate::skill::{AgentFrontmatter, RuleFrontmatter, SkillFrontmatter};
 
@@ -59,11 +64,15 @@ pub fn validate_repository_url(value: &str) -> Result<(), RepositoryUrlError> {
     }
 }
 
-/// Infer the artifact kind from a pulled manifest's OCI type: the
-/// `artifactType` first, then the config descriptor's media type as a
-/// fallback. `None` when neither names a known Grimoire kind (e.g. a foreign
-/// image) — the single read path shared by `add` (kind inference) and the
-/// catalog.
+/// Infer the artifact kind from a pulled manifest, resolving three tiers in
+/// order: (1) the OCI `artifactType` (the authoritative discriminator),
+/// (2) the config descriptor's media type (the legacy
+/// `application/vnd.grimoire.<kind>.config.v1+json` written before
+/// `adr_oci_empty_config_compat.md`), then (3) the `com.grimoire.kind`
+/// annotation (the registry-agnostic fallback — also what pre-`artifactType`
+/// grim wrote and read). `None` when none names a known Grimoire kind (e.g. a
+/// foreign image) — the single read path shared by `add` (kind inference) and
+/// the catalog.
 pub fn kind_from_manifest(manifest: &OciManifest) -> Option<ArtifactKind> {
     manifest
         .artifact_type
@@ -74,6 +83,13 @@ pub fn kind_from_manifest(manifest: &OciManifest) -> Option<ArtifactKind> {
                 .config_media_type
                 .as_deref()
                 .and_then(ArtifactKind::from_config_media_type)
+        })
+        .or_else(|| {
+            manifest
+                .annotations
+                .get(KIND_ANNOTATION)
+                .map(String::as_str)
+                .and_then(ArtifactKind::from_kind_str)
         })
 }
 
@@ -98,6 +114,10 @@ pub fn annotations_for_skill(
         fm.description.to_string(),
     );
     a.insert("org.opencontainers.image.version".to_string(), version.to_string());
+    // Registry-agnostic kind fallback (`adr_oci_empty_config_compat.md`): the
+    // config descriptor no longer carries the kind, so mirror it here for any
+    // reader that cannot rely on the OCI `artifactType`.
+    a.insert(KIND_ANNOTATION.to_string(), ArtifactKind::Skill.to_string());
     if let Some(license) = &fm.license {
         a.insert("org.opencontainers.image.licenses".to_string(), license.clone());
     }
@@ -140,6 +160,8 @@ pub fn annotations_for_rule(
     let description = RuleFrontmatter::derive_description(body).unwrap_or_else(|| format!("grimoire rule {name}"));
     a.insert("org.opencontainers.image.description".to_string(), description);
     a.insert("org.opencontainers.image.version".to_string(), version.to_string());
+    // Registry-agnostic kind fallback — see `annotations_for_skill`.
+    a.insert(KIND_ANNOTATION.to_string(), ArtifactKind::Rule.to_string());
     if let Some(src) = string_from_extra(fm, "repository").or_else(|| fallback_source.map(str::to_string)) {
         a.insert("org.opencontainers.image.source".to_string(), src);
     }
@@ -172,6 +194,8 @@ pub fn annotations_for_agent(
         fm.description.to_string(),
     );
     a.insert("org.opencontainers.image.version".to_string(), version.to_string());
+    // Registry-agnostic kind fallback — see `annotations_for_skill`.
+    a.insert(KIND_ANNOTATION.to_string(), ArtifactKind::Agent.to_string());
     if let Some(src) = fm.metadata.get("repository").map(String::as_str).or(fallback_source) {
         a.insert("org.opencontainers.image.source".to_string(), src.to_string());
     }
@@ -210,6 +234,8 @@ pub fn annotations_for_bundle(
         .unwrap_or_else(|| format!("grimoire bundle of {member_count} members"));
     a.insert("org.opencontainers.image.description".to_string(), description);
     a.insert("org.opencontainers.image.version".to_string(), version.to_string());
+    // Registry-agnostic kind fallback — see `annotations_for_skill`.
+    a.insert(KIND_ANNOTATION.to_string(), ArtifactKind::Bundle.to_string());
     if let Some(src) = metadata.repository.as_deref().or(fallback_source) {
         a.insert("org.opencontainers.image.source".to_string(), src.to_string());
     }
@@ -250,8 +276,10 @@ mod tests {
         assert_eq!(a["org.opencontainers.image.licenses"], "Apache-2.0");
         assert_eq!(a["org.opencontainers.image.source"], "ghcr.io/acme/code-review:1.2.3");
         assert_eq!(a["com.grimoire.keywords"], "review,quality");
-        // The kind is NOT an annotation — it rides on the OCI artifactType.
-        assert!(!a.contains_key("com.grimoire.kind"));
+        // The kind rides on the OCI artifactType AND is mirrored into the
+        // `com.grimoire.kind` annotation as a registry-agnostic fallback
+        // (`adr_oci_empty_config_compat.md`).
+        assert_eq!(a["com.grimoire.kind"], "skill");
         // `created` is intentionally absent so re-release is idempotent.
         assert!(!a.contains_key("org.opencontainers.image.created"));
 
@@ -305,7 +333,7 @@ mod tests {
         assert_eq!(a["org.opencontainers.image.title"], "rust-style");
         assert_eq!(a["org.opencontainers.image.description"], "Rust Style");
         assert_eq!(a["org.opencontainers.image.version"], "3.0.0");
-        assert!(!a.contains_key("com.grimoire.kind"));
+        assert_eq!(a["com.grimoire.kind"], "rule");
     }
 
     #[test]
@@ -358,6 +386,77 @@ mod tests {
     }
 
     #[test]
+    fn kind_from_manifest_new_wire_shape_resolves_via_artifact_type() {
+        use crate::oci::manifest::OciManifest;
+        // The post-`adr_oci_empty_config_compat.md` wire shape: custom
+        // `artifactType`, the OCI empty config (no kind signal), and the
+        // `com.grimoire.kind` fallback annotation. Tier 1 (`artifactType`)
+        // wins; the empty config must NOT be mistaken for a kind.
+        let mut annotations = BTreeMap::new();
+        annotations.insert("com.grimoire.kind".to_string(), "skill".to_string());
+        let manifest = OciManifest {
+            media_type: None,
+            artifact_type: Some("application/vnd.grimoire.skill.v1".to_string()),
+            config_media_type: Some("application/vnd.oci.empty.v1+json".to_string()),
+            layers: vec![],
+            annotations,
+        };
+        assert_eq!(kind_from_manifest(&manifest), Some(crate::oci::ArtifactKind::Skill));
+    }
+
+    #[test]
+    fn kind_from_manifest_falls_back_to_annotation_tier3() {
+        use crate::oci::manifest::OciManifest;
+        // No `artifactType` and the OCI empty config (or any non-grimoire
+        // config) — the kind resolves from the `com.grimoire.kind` annotation
+        // alone. This is the GitLab contingency path (registry drops/rejects
+        // `artifactType`) and the pre-`artifactType` grim read path.
+        let mut annotations = BTreeMap::new();
+        annotations.insert("com.grimoire.kind".to_string(), "agent".to_string());
+        let manifest = OciManifest {
+            media_type: None,
+            artifact_type: None,
+            config_media_type: Some("application/vnd.oci.empty.v1+json".to_string()),
+            layers: vec![],
+            annotations,
+        };
+        assert_eq!(kind_from_manifest(&manifest), Some(crate::oci::ArtifactKind::Agent));
+    }
+
+    #[test]
+    fn kind_from_manifest_legacy_config_only_still_resolves() {
+        use crate::oci::manifest::OciManifest;
+        // A legacy artifact (custom config type, no `artifactType`, no
+        // annotation) still types via tier 2 — old published artifacts stay
+        // readable.
+        let manifest = OciManifest {
+            media_type: None,
+            artifact_type: None,
+            config_media_type: Some("application/vnd.grimoire.rule.config.v1+json".to_string()),
+            layers: vec![],
+            annotations: BTreeMap::new(),
+        };
+        assert_eq!(kind_from_manifest(&manifest), Some(crate::oci::ArtifactKind::Rule));
+    }
+
+    #[test]
+    fn kind_from_manifest_unknown_annotation_value_is_none() {
+        use crate::oci::manifest::OciManifest;
+        // A `com.grimoire.kind` annotation that is not a known kind must not
+        // resolve — the read path stays strict (caller falls back to --kind).
+        let mut annotations = BTreeMap::new();
+        annotations.insert("com.grimoire.kind".to_string(), "widget".to_string());
+        let manifest = OciManifest {
+            media_type: None,
+            artifact_type: None,
+            config_media_type: Some("application/vnd.oci.empty.v1+json".to_string()),
+            layers: vec![],
+            annotations,
+        };
+        assert_eq!(kind_from_manifest(&manifest), None);
+    }
+
+    #[test]
     fn rule_keywords_from_extra_string() {
         let doc = "---\npaths: [\"a\"]\nkeywords: rust,style\n---\nbody\n";
         let parsed = RuleFrontmatter::parse_doc(doc, Path::new("r.md")).unwrap();
@@ -386,6 +485,7 @@ mod tests {
         assert_eq!(a["org.opencontainers.image.source"], "ghcr.io/acme/code-reviewer:1.0.0");
         assert_eq!(a["com.grimoire.keywords"], "review,agent");
         assert_eq!(a["com.grimoire.summary"], "terse blurb");
+        assert_eq!(a["com.grimoire.kind"], "agent");
         assert!(!a.contains_key("org.opencontainers.image.created"));
         let b = annotations_for_agent(&parsed.frontmatter, "1.0.0", Some("ghcr.io/acme/code-reviewer:1.0.0"));
         assert_eq!(a, b);
@@ -417,6 +517,7 @@ mod tests {
         );
         assert_eq!(a["com.grimoire.summary"], "Python dev stack");
         assert_eq!(a["com.grimoire.keywords"], "python,lint");
+        assert_eq!(a["com.grimoire.kind"], "bundle");
     }
 
     #[test]

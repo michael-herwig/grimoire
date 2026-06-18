@@ -39,9 +39,13 @@ pub struct OciManifest {
     /// The OCI `artifactType`, if present — the authoritative kind
     /// discriminator (`application/vnd.grimoire.<kind>.v1`).
     pub artifact_type: Option<String>,
-    /// The config descriptor's media type — the fallback kind discriminator
-    /// read when `artifactType` is absent
-    /// (`application/vnd.grimoire.<kind>.config.v1+json`).
+    /// The config descriptor's media type, as read from a pulled manifest.
+    /// The second kind-resolution tier (after `artifactType`, before the
+    /// `com.grimoire.kind` annotation): for artifacts published before
+    /// `adr_oci_empty_config_compat.md` this is the legacy
+    /// `application/vnd.grimoire.<kind>.config.v1+json`; new artifacts carry
+    /// the OCI empty type (`application/vnd.oci.empty.v1+json`), which is not a
+    /// kind. See [`crate::oci::annotations::kind_from_manifest`].
     pub config_media_type: Option<String>,
     /// The layer descriptors (the artifact payload lives here).
     pub layers: Vec<Descriptor>,

@@ -43,8 +43,10 @@ def test_add_infers_kind_and_name_from_manifest(
 def test_published_manifest_types_kind_via_artifact_type(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
-    """The wire contract: kind rides on `artifactType` + config media type,
-    not the retired `com.grimoire.kind` annotation, and `grim add` infers it."""
+    """The wire contract (`adr_oci_empty_config_compat.md`): kind rides on
+    `artifactType` and is mirrored into the `com.grimoire.kind` annotation; the
+    config descriptor is the OCI empty type (GitLab-allowlist-safe), not a
+    custom Grimoire config type. `grim add` infers the kind from `artifactType`."""
     repo = f"{unique_repo}/rust-style"
     ru = make_artifact(
         repo,
@@ -57,11 +59,12 @@ def test_published_manifest_types_kind_via_artifact_type(
     assert manifest["artifactType"] == "application/vnd.grimoire.rule.v1", (
         f"manifest must carry the Grimoire artifactType, got {manifest.get('artifactType')!r}"
     )
-    assert manifest["config"]["mediaType"] == "application/vnd.grimoire.rule.config.v1+json", (
-        f"config media type must be the Grimoire kind config type, got {manifest['config']['mediaType']!r}"
+    assert manifest["config"]["mediaType"] == "application/vnd.oci.empty.v1+json", (
+        f"config descriptor must be the OCI empty type, got {manifest['config']['mediaType']!r}"
     )
-    assert "com.grimoire.kind" not in manifest.get("annotations", {}), (
-        "the com.grimoire.kind annotation must no longer be published"
+    assert manifest.get("annotations", {}).get("com.grimoire.kind") == "rule", (
+        f"manifest must carry the com.grimoire.kind fallback annotation, "
+        f"got {manifest.get('annotations', {})!r}"
     )
 
     # End-to-end: kind inference works off the type alone (no annotation).

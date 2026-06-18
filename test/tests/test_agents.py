@@ -143,9 +143,16 @@ def test_release_with_kind_agent_publishes_agent_artifact_type(
         f"agent release must set artifactType=application/vnd.grimoire.agent.v1, "
         f"got {manifest.get('artifactType')!r}"
     )
-    assert manifest["config"]["mediaType"] == "application/vnd.grimoire.agent.config.v1+json", (
-        f"config mediaType must be the agent config type, "
+    # Config descriptor is the OCI empty type (GitLab-allowlist-safe) since
+    # adr_oci_empty_config_compat.md; the kind rides on artifactType (above)
+    # and the com.grimoire.kind annotation (below), never the config type.
+    assert manifest["config"]["mediaType"] == "application/vnd.oci.empty.v1+json", (
+        f"config mediaType must be the OCI empty type, "
         f"got {manifest['config']['mediaType']!r}"
+    )
+    assert manifest.get("annotations", {}).get("com.grimoire.kind") == "agent", (
+        f"agent release must carry com.grimoire.kind=agent, "
+        f"got {manifest.get('annotations', {})!r}"
     )
 
     # End-to-end: grim add infers kind "agent" from the manifest.
