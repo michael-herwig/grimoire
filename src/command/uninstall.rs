@@ -95,14 +95,17 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
 
     // Converge vendor-owned config for every client the removed record
     // carried (e.g. drops OpenCode's managed `instructions` glob when the
-    // last OpenCode rule is gone).
+    // last OpenCode rule is gone). The files and install state are already
+    // gone/persisted, so a config-sync failure is warn-only — the uninstall
+    // succeeds, never a hard failure after the primary action.
     for client in involved_clients {
-        super::grim(
-            client
-                .vendor()
-                .sync_config(&state, &scope.workspace, scope.scope)
-                .map_err(|e| crate::install::install_error::InstallError::config_sync(client.to_string(), e)),
-        )?;
+        if let Err(e) = client.vendor().sync_config(&state, &scope.workspace, scope.scope) {
+            tracing::warn!(
+                client = %client,
+                error = %e,
+                "vendor config sync failed; uninstall completed, deregistration skipped"
+            );
+        }
     }
 
     // 2. Undeclare from the config + lock (the `remove` half), so a later

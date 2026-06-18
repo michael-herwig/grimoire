@@ -67,13 +67,20 @@ pub enum UninstallError {
 /// tree) is removed recursively; a file (a rule) is unlinked. An absent
 /// target is tolerated (idempotent).
 ///
+/// A recorded output whose anchor root is absent on this machine (an
+/// out-of-scope client — e.g. a global client whose vendor root is unset) is
+/// tolerated and skipped: uninstall converges on "not installed" from any
+/// state, dropping the record regardless.
+///
 /// # Errors
 ///
-/// A [`UninstallError`] from resolving a corrupt anchored target, or from
-/// deleting a target that *is* present (other than not-found). A present
+/// A [`UninstallError`] from a genuine containment failure resolving an
+/// anchored target (a tampered `relative` — traversal / escaped anchor), or
+/// from deleting a target that *is* present (other than not-found). A present
 /// target is operated on through its resolved (canonicalized) path,
 /// guaranteed contained within its anchor root; a missing target is operated
-/// on via the raw anchor join.
+/// on via the raw anchor join. An anchor whose root is unresolvable is skipped
+/// (see above), never an error.
 pub fn uninstall(
     state: &mut InstallState,
     kind: ArtifactKind,
@@ -89,12 +96,25 @@ pub fn uninstall(
 
     let mut removed = Vec::new();
     for out in &record.outputs {
+        // Tolerant resolve: a recorded output whose anchor root is absent on
+        // this machine names a client out of scope here (e.g. a global client
+        // whose vendor root is unset). Skip it — uninstall converges on "not
+        // installed" from any state, and we can neither resolve nor delete
+        // what we cannot anchor. A genuine containment failure (traversal /
+        // escaped anchor) or an I/O error still surfaces.
+        let target = match out.resolved_target(roots) {
+            Ok(target) => target,
+            Err(AnchorError::AnchorRootAbsent { .. }) => continue,
+            Err(e) => return Err(e.into()),
+        };
         // The index/target first, then a multi-file rule's sibling support
         // directory (`<parent>/<name>/`) so the whole footprint is reaped.
-        let target = out.resolved_target(roots)?;
         remove_output(&target, &mut removed)?;
-        if let Some(support_dir) = out.resolved_support_dir(roots)? {
-            remove_output(&support_dir, &mut removed)?;
+        match out.resolved_support_dir(roots) {
+            Ok(Some(support_dir)) => remove_output(&support_dir, &mut removed)?,
+            Ok(None) => {}
+            Err(AnchorError::AnchorRootAbsent { .. }) => {}
+            Err(e) => return Err(e.into()),
         }
     }
 
@@ -298,31 +318,49 @@ mod tests {
         assert!(st.get(ArtifactKind::Skill, "ghost").is_none());
     }
 
-    // T10 spec: unresolvable AnchoredPath (anchor root absent) during uninstall
-    // propagates as UninstallError::Anchor (never silently drops the record).
-    // This tests the contract that mutating paths return Err on AnchorError.
+    // C5: an unresolvable recorded client anchor (anchor root absent on this
+    // machine — an out-of-scope client) is TOLERATED during uninstall: the
+    // resolvable client's files are removed and the record is dropped, rather
+    // than `?`-propagating an `AnchorError` and aborting the idempotent
+    // uninstall. (Supersedes the prior intolerant contract.)
     #[test]
-    fn unresolvable_anchor_root_propagates_anchor_error() {
+    fn uninstall_tolerates_unresolvable_client_anchor() {
         let dir = tempfile::tempdir().unwrap();
         let ws = dir.path();
         let st_path = ws.join("s.json");
+
+        // claude file present (workspace-anchored); copilot output anchored to
+        // CopilotRoot, which is unresolvable here (copilot_root = None).
+        let claude_file = ws.join(".claude/rules/orphan.md");
+        std::fs::create_dir_all(claude_file.parent().unwrap()).unwrap();
+        std::fs::write(&claude_file, b"# rule\n").unwrap();
+
         let mut st = InstallState::empty(&st_path);
-        // Record with ClaudeRoot anchor but roots has claude_root = None.
         st.record(InstallRecord {
             kind: ArtifactKind::Rule,
             name: "orphan".to_string(),
             pinned: pinned("acme/orphan"),
-            outputs: vec![ClientOutput {
-                client: "claude".to_string(),
-                target: AnchoredPath {
-                    anchor: PathAnchor::ClaudeRoot,
-                    relative: "rules/orphan.md".to_string(),
+            outputs: vec![
+                ClientOutput {
+                    client: "claude".to_string(),
+                    target: AnchoredPath {
+                        anchor: PathAnchor::Workspace,
+                        relative: ".claude/rules/orphan.md".to_string(),
+                    },
+                    content_hash: Digest::Sha256("a".repeat(64)),
+                    support_dir: None,
                 },
-                content_hash: Digest::Sha256("c".repeat(64)),
-                support_dir: None,
-            }],
+                ClientOutput {
+                    client: "copilot".to_string(),
+                    target: AnchoredPath {
+                        anchor: PathAnchor::CopilotRoot,
+                        relative: "rules/orphan.md".to_string(),
+                    },
+                    content_hash: Digest::Sha256("c".repeat(64)),
+                    support_dir: None,
+                },
+            ],
         });
-        // Roots with no claude_root: resolving ClaudeRoot → AnchorRootAbsent.
         let roots = AnchorRoots {
             workspace: ws.to_path_buf(),
             grim_home: ws.to_path_buf(),
@@ -330,10 +368,13 @@ mod tests {
             copilot_root: None,
             opencode_skills: None,
         };
-        let result = uninstall(&mut st, ArtifactKind::Rule, "orphan", &roots);
+        let result = uninstall(&mut st, ArtifactKind::Rule, "orphan", &roots)
+            .expect("an unresolvable client anchor must be tolerated, not error");
+        assert_eq!(result.outcome, UninstallOutcome::Removed);
+        assert!(!claude_file.exists(), "the resolvable claude file is removed");
         assert!(
-            result.is_err(),
-            "unresolvable anchor root must propagate as UninstallError::Anchor"
+            st.get(ArtifactKind::Rule, "orphan").is_none(),
+            "the record is dropped despite the unresolvable copilot output"
         );
     }
 }

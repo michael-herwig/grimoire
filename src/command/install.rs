@@ -103,14 +103,18 @@ pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallRe
     )?;
 
     // Converge vendor-owned config on the new state (e.g. OpenCode's
-    // managed `instructions` glob) for every involved client.
+    // managed `instructions` glob) for every involved client. The artifacts
+    // and install state are already persisted, so a config-sync failure (an
+    // unparseable / unreadable vendor config) is warn-only: the install
+    // succeeds, registration is skipped, never a hard command failure.
     for client in target.clients() {
-        super::grim(
-            client
-                .vendor()
-                .sync_config(&state, &scope.workspace, scope.scope)
-                .map_err(|e| crate::install::install_error::InstallError::config_sync(client.to_string(), e)),
-        )?;
+        if let Err(e) = client.vendor().sync_config(&state, &scope.workspace, scope.scope) {
+            tracing::warn!(
+                client = %client,
+                error = %e,
+                "vendor config sync failed; artifacts installed and state saved, registration skipped"
+            );
+        }
     }
 
     finish(outcomes)

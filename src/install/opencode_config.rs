@@ -156,10 +156,17 @@ pub fn sync_for_state(state: &InstallState, workspace: &Path, scope: ConfigScope
 /// - Removing an entry from an absent/never-registered config is a no-op.
 /// - Other config keys and other `instructions` entries are preserved.
 ///
+/// Removal (`want == false`) is tolerant: an absent, unparseable, or
+/// wrong-typed (`instructions` not an array) config has nothing grim-managed
+/// to remove, so it converges as [`InstructionsSync::Unchanged`] rather than
+/// failing. Adding (`want == true`) stays strict — grim never rewrites a file
+/// it cannot parse or whose `instructions` is an unexpected type.
+///
 /// # Errors
 ///
-/// An I/O failure, or `InvalidData` when the existing content is not a
-/// JSON/JSONC object (grim never rewrites a file it cannot parse).
+/// An I/O failure, or — **only when adding** (`want == true`) — `InvalidData`
+/// when the existing content is not a JSON/JSONC object, or its `instructions`
+/// key is not an array (grim never clobbers an unknown-schema file).
 pub fn sync_managed_instruction(config_path: &Path, entry: &str, want: bool) -> io::Result<InstructionsSync> {
     let raw = match std::fs::read_to_string(config_path) {
         Ok(s) => Some(s),
@@ -169,13 +176,25 @@ pub fn sync_managed_instruction(config_path: &Path, entry: &str, want: bool) -> 
 
     let (mut doc, had_jsonc_extras) = match &raw {
         None => (serde_json::Map::new(), false),
-        Some(raw) => parse_object(raw, config_path)?,
+        Some(raw) => match parse_object(raw, config_path) {
+            Ok(parsed) => parsed,
+            // Removal is tolerant (`want == false`): a config grim cannot parse
+            // has nothing grim-managed to remove, so converge as `Unchanged`
+            // rather than fail a command whose primary action already ran.
+            // Adding stays strict (never rewrite an unknown-schema file).
+            Err(_) if !want => return Ok(InstructionsSync::Unchanged),
+            Err(e) => return Err(e),
+        },
     };
 
     let instructions = doc.get("instructions");
     let mut entries: Vec<serde_json::Value> = match instructions {
         None => Vec::new(),
         Some(serde_json::Value::Array(items)) => items.clone(),
+        // A non-array `instructions` is an unknown schema. On removal there is
+        // nothing grim-managed to take out → `Unchanged`; on add, refuse to
+        // edit rather than clobber the user's value.
+        Some(_) if !want => return Ok(InstructionsSync::Unchanged),
         Some(_) => {
             return Err(invalid_data(format!(
                 "'{}': 'instructions' is not an array; refusing to edit",
@@ -429,6 +448,62 @@ mod tests {
             std::fs::read_to_string(&broken).unwrap(),
             "not json at all {{{",
             "unparseable config must never be rewritten"
+        );
+    }
+
+    // ── C6/C7: tolerant removal, strict add ─────────────────────────────────
+
+    /// C6: removing the managed glob from an unparseable config converges as
+    /// `Unchanged` (nothing grim-managed to remove) and never rewrites it.
+    #[test]
+    fn remove_tolerates_unparseable_opencode_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("opencode.json");
+        let garbage = "not json at all {{{";
+        std::fs::write(&cfg, garbage).unwrap();
+
+        let out = sync_managed_instruction(&cfg, ".opencode/rules/*.md", false).unwrap();
+        assert_eq!(out, InstructionsSync::Unchanged);
+        assert_eq!(
+            std::fs::read_to_string(&cfg).unwrap(),
+            garbage,
+            "an unparseable config must never be rewritten, even on removal"
+        );
+    }
+
+    /// C7: removing the managed glob when `instructions` is not an array
+    /// converges as `Unchanged` rather than hard-failing.
+    #[test]
+    fn remove_tolerates_non_array_instructions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("opencode.json");
+        let body = r#"{"instructions": "x"}"#;
+        std::fs::write(&cfg, body).unwrap();
+
+        let out = sync_managed_instruction(&cfg, ".opencode/rules/*.md", false).unwrap();
+        assert_eq!(out, InstructionsSync::Unchanged);
+        assert_eq!(
+            std::fs::read_to_string(&cfg).unwrap(),
+            body,
+            "a non-array instructions value is left untouched on removal"
+        );
+    }
+
+    /// C6/C7 guard: adding stays strict — an unparseable config is refused
+    /// (never clobbered) so an unknown schema is preserved.
+    #[test]
+    fn add_rejects_unparseable_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("opencode.json");
+        let garbage = "not json at all {{{";
+        std::fs::write(&cfg, garbage).unwrap();
+
+        let err = sync_managed_instruction(&cfg, ".opencode/rules/*.md", true).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            std::fs::read_to_string(&cfg).unwrap(),
+            garbage,
+            "adding must never clobber an unparseable config"
         );
     }
 

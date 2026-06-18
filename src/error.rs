@@ -173,7 +173,7 @@ fn classify_install(err: &InstallError) -> ExitCode {
         InstallErrorKind::IntegrityMismatch { .. }
         | InstallErrorKind::BlobDigestMismatch { .. }
         | InstallErrorKind::MaterializeFailed(_) => ExitCode::DataError,
-        InstallErrorKind::TargetIo { source, .. } | InstallErrorKind::ConfigSync { source, .. } => classify_io(source),
+        InstallErrorKind::TargetIo { source, .. } => classify_io(source),
         InstallErrorKind::UnsupportedClient(_) => ExitCode::ConfigError,
     }
 }
