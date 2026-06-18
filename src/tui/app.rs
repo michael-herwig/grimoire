@@ -18,7 +18,6 @@ use std::io::{self};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Context as _;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -950,13 +949,13 @@ fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
             .map_err(|e| anyhow::Error::new(e).context("install-state persist failed"))?;
     }
     // Converge vendor-owned config for every client the removed record
-    // carried, mirroring `command::uninstall`. `with_context` keeps the
-    // `io::Error` source chain (kind, config path) intact for the popup.
+    // carried, mirroring `command::uninstall`. The files and install state are
+    // already gone/persisted, so a config-sync failure is warn-only — the
+    // delete completed, never a hard failure after the primary action.
     for client in involved_clients {
-        client
-            .vendor()
-            .sync_config(&install_state, &ctx.workspace, ctx.scope)
-            .with_context(|| format!("vendor config sync failed for client '{client}'"))?;
+        if let Err(e) = client.vendor().sync_config(&install_state, &ctx.workspace, ctx.scope) {
+            tracing::warn!(client = %client, error = %e, "vendor config sync failed; delete completed, deregistration skipped");
+        }
     }
 
     // Undeclare from the config + lock through the `grim uninstall` seam
@@ -1075,13 +1074,13 @@ async fn perform(ctx: &TuiContext, row: &TuiRow, is_update: bool) -> anyhow::Res
         .map_err(|e| anyhow::Error::new(e).context("install-state persist failed"))?;
 
     // Converge vendor-owned config on the new state, mirroring
-    // `command::install`. `with_context` keeps the `io::Error` source
-    // chain (kind, config path) intact for the popup.
+    // `command::install`. The artifacts and install state are already
+    // persisted, so a config-sync failure is warn-only — the install
+    // completed, never a hard failure after the primary action.
     for client in target.clients() {
-        client
-            .vendor()
-            .sync_config(&install_state, &ctx.workspace, ctx.scope)
-            .with_context(|| format!("vendor config sync failed for client '{client}'"))?;
+        if let Err(e) = client.vendor().sync_config(&install_state, &ctx.workspace, ctx.scope) {
+            tracing::warn!(client = %client, error = %e, "vendor config sync failed; install completed, registration skipped");
+        }
     }
 
     let mut label = "unchanged".to_string();
