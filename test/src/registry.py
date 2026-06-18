@@ -4,13 +4,20 @@
 
 The suite pushes single-layer OCI artifacts to a local ``registry:2`` on
 ``localhost:5000`` over plain HTTP using only the standard library (no
-extra test dependency). This mirrors what a real publisher (grim) does:
-a tiny ``{}`` config blob typed as the OCI empty config
-(``application/vnd.oci.empty.v1+json`` — GitLab-allowlist-safe), one
-uncompressed-tar layer blob, and a manifest whose kind rides on the OCI
-``artifactType`` (``application/vnd.grimoire.<kind>.v1``) and is mirrored
-into a ``com.grimoire.kind`` annotation (see
-``adr_oci_empty_config_compat.md``).
+extra test dependency): a tiny ``{}`` config blob typed as the OCI empty
+config (``application/vnd.oci.empty.v1+json``), one uncompressed-tar layer
+blob, and a manifest carrying the OCI ``artifactType``
+(``application/vnd.grimoire.<kind>.v1``) plus a ``com.grimoire.kind``
+annotation.
+
+Note this is intentionally a *richer* manifest than grim's own output:
+grim drops ``artifactType`` on the wire because GitLab rejects it (see
+``adr_oci_empty_config_compat.md``), but ``registry:2`` accepts it, so the
+harness keeps it to exercise the read path's tier-1 ``artifactType``
+resolution (how new grim reads legacy / non-GitLab artifacts). grim's own
+GitLab-safe output — empty config, NO ``artifactType``, kind via the
+annotation — is asserted by the ``grim release`` / ``grim publish``
+wire-shape tests.
 """
 from __future__ import annotations
 

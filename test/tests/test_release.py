@@ -33,14 +33,14 @@ def _local_skill(project_dir: Path, name: str = "code-review") -> Path:
 def test_release_wire_shape_empty_config_and_kind_annotation(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
-    """Issue #11 axis A: the pushed manifest's config descriptor uses the OCI
-    empty media type (universally allow-listed, GitLab-safe) — NOT a custom
-    grimoire config type. The kind still rides on the custom ``artifactType``
-    and is mirrored into the ``com.grimoire.kind`` fallback annotation.
+    """Issue #11 axis A: the GitLab-safe wire contract. GitLab's media-type
+    allowlist rejects both the custom config type AND the custom top-level
+    ``artifactType`` (confirmed against real GitLab SaaS), so the pushed
+    manifest carries the OCI empty config and NO ``artifactType`` — the kind
+    rides solely on the ``com.grimoire.kind`` annotation.
 
-    This is the closest CI can get to the GitLab wire contract; ``registry:2``
-    accepts everything, so GitLab's allowlist rejection cannot be reproduced
-    here — only the wire shape that satisfies it.
+    ``registry:2`` accepts everything, so this asserts the wire shape that
+    satisfies GitLab, not GitLab's rejection itself.
     """
     skill = _local_skill(project_dir)
     repo = f"{registry}/{unique_repo}/code-review"
@@ -59,11 +59,12 @@ def test_release_wire_shape_empty_config_and_kind_annotation(
     assert manifest["config"]["size"] == 2, (
         f"empty config blob must be 2 bytes, got {manifest['config']['size']}"
     )
-    # Kind rides on the custom artifactType (unchanged by the fix).
-    assert manifest["artifactType"] == "application/vnd.grimoire.skill.v1", (
-        f"artifactType must be unchanged, got {manifest.get('artifactType')}"
+    # No custom artifactType on the wire — GitLab rejects it.
+    assert "artifactType" not in manifest, (
+        "manifest must NOT carry a custom artifactType (GitLab rejects it), "
+        f"got {manifest.get('artifactType')}"
     )
-    # ...and is mirrored into the registry-agnostic fallback annotation.
+    # The kind rides solely on the registry-agnostic fallback annotation.
     annotations = manifest.get("annotations") or {}
     assert annotations.get("com.grimoire.kind") == "skill", (
         f"manifest must carry com.grimoire.kind=skill, got {annotations}"

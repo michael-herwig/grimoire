@@ -1001,8 +1001,9 @@ def test_publish_wire_shape_empty_config(
         f"published config descriptor must be the OCI empty type, "
         f"got {manifest['config']['mediaType']!r}"
     )
-    assert manifest["artifactType"] == "application/vnd.grimoire.skill.v1", (
-        f"published manifest must carry the skill artifactType, "
+    # No custom artifactType on the wire — GitLab rejects it.
+    assert "artifactType" not in manifest, (
+        f"published manifest must NOT carry a custom artifactType, "
         f"got {manifest.get('artifactType')!r}"
     )
     assert manifest.get("annotations", {}).get("com.grimoire.kind") == "skill", (

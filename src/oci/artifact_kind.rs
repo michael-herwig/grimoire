@@ -71,9 +71,11 @@ impl ArtifactKind {
         }
     }
 
-    /// The OCI `artifactType` media type stamped on a published manifest and
-    /// read back to infer the kind. The authoritative wire discriminator and
-    /// the single source of truth for the per-kind type string.
+    /// The OCI `artifactType` media type for this kind. No longer stamped on
+    /// the wire (GitLab's allowlist rejects a custom `artifactType`, see
+    /// `adr_oci_empty_config_compat.md`); used only on the READ path to type
+    /// artifacts published before that change. The single source of truth for
+    /// the per-kind type string.
     pub fn artifact_type(self) -> &'static str {
         match self {
             Self::Skill => "application/vnd.grimoire.skill.v1",

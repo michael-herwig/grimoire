@@ -100,11 +100,12 @@ pub async fn run(ctx: &Context, args: &ReleaseArgs) -> anyhow::Result<(ReleaseRe
     let layer_digest = Algorithm::Sha256.hash(&packed.tar);
     let manifest = OciManifest {
         media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
-        artifact_type: Some(kind.artifact_type().to_string()),
-        // No config kind type on the wire (`adr_oci_empty_config_compat.md`):
-        // the push path stamps the OCI empty config type, and the kind rides
-        // on `artifactType` + the `com.grimoire.kind` annotation. Keep the
+        // GitLab rejects both a custom config media type AND a custom
+        // `artifactType` (`adr_oci_empty_config_compat.md`), so the wire carries
+        // neither: the push stamps the OCI empty config and no `artifactType`,
+        // and the kind rides on the `com.grimoire.kind` annotation. Keep the
         // in-memory manifest faithful to what is pushed.
+        artifact_type: None,
         config_media_type: None,
         layers: vec![Descriptor {
             digest: layer_digest.clone(),
@@ -198,8 +199,8 @@ async fn release_bundle(
     let annotations = annotations_for_bundle(&name, version, manifest.members.len(), Some(source), &metadata);
     let oci_manifest = OciManifest {
         media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
-        artifact_type: Some(ArtifactKind::Bundle.artifact_type().to_string()),
-        // OCI empty config on the wire — see the skill/rule path in `run`.
+        // No `artifactType`, OCI empty config — see the skill/rule path in `run`.
+        artifact_type: None,
         config_media_type: None,
         layers: vec![Descriptor {
             digest: layer_digest.clone(),

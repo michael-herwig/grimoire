@@ -8,13 +8,14 @@
 //! `org.opencontainers.image.{title,description,version,licenses,source}`
 //! keys plus the Grimoire-specific `com.grimoire.keywords` and an optional
 //! `com.grimoire.summary` (a short, single-line blurb for catalog display,
-//! distinct from the longer `description`). The artifact kind rides
-//! primarily on the OCI `artifactType` (see
-//! [`crate::oci::ArtifactKind::artifact_type`]); it is ALSO mirrored into a
-//! `com.grimoire.kind` annotation ([`KIND_ANNOTATION`]) as a
-//! registry-agnostic fallback discriminator — the config descriptor is now
-//! the OCI empty type and carries no kind signal
-//! (`adr_oci_empty_config_compat.md`). The mapping is
+//! distinct from the longer `description`). The artifact kind is carried on
+//! the wire by the `com.grimoire.kind` annotation ([`KIND_ANNOTATION`]):
+//! GitLab's media-type allowlist rejects both a custom config media type and
+//! a custom OCI `artifactType`, so neither is written, and the config
+//! descriptor is the OCI empty type (`adr_oci_empty_config_compat.md`). The
+//! `artifactType` (see [`crate::oci::ArtifactKind::artifact_type`]) is still
+//! resolved on the READ path as the first tier, to type artifacts published
+//! before this change. The mapping is
 //! **fully deterministic**: `org.opencontainers.image.created` is
 //! intentionally omitted because a wall-clock timestamp would make a
 //! re-release of identical content produce a different manifest digest,
@@ -65,12 +66,12 @@ pub fn validate_repository_url(value: &str) -> Result<(), RepositoryUrlError> {
 }
 
 /// Infer the artifact kind from a pulled manifest, resolving three tiers in
-/// order: (1) the OCI `artifactType` (the authoritative discriminator),
-/// (2) the config descriptor's media type (the legacy
-/// `application/vnd.grimoire.<kind>.config.v1+json` written before
-/// `adr_oci_empty_config_compat.md`), then (3) the `com.grimoire.kind`
-/// annotation (the registry-agnostic fallback — also what pre-`artifactType`
-/// grim wrote and read). `None` when none names a known Grimoire kind (e.g. a
+/// order: (1) the OCI `artifactType` and (2) the config descriptor's media
+/// type (`application/vnd.grimoire.<kind>.config.v1+json`) — both written by
+/// grim *before* `adr_oci_empty_config_compat.md` and retained here so those
+/// artifacts stay readable — then (3) the `com.grimoire.kind` annotation, the
+/// discriminator grim writes today (the wire carries no `artifactType` because
+/// GitLab rejects it). `None` when none names a known Grimoire kind (e.g. a
 /// foreign image) — the single read path shared by `add` (kind inference) and
 /// the catalog.
 pub fn kind_from_manifest(manifest: &OciManifest) -> Option<ArtifactKind> {
@@ -386,12 +387,13 @@ mod tests {
     }
 
     #[test]
-    fn kind_from_manifest_new_wire_shape_resolves_via_artifact_type() {
+    fn kind_from_manifest_artifact_type_tier_wins_when_present() {
         use crate::oci::manifest::OciManifest;
-        // The post-`adr_oci_empty_config_compat.md` wire shape: custom
-        // `artifactType`, the OCI empty config (no kind signal), and the
-        // `com.grimoire.kind` fallback annotation. Tier 1 (`artifactType`)
-        // wins; the empty config must NOT be mistaken for a kind.
+        // A legacy / non-GitLab artifact that still carries `artifactType`
+        // alongside the OCI empty config and the `com.grimoire.kind` annotation:
+        // tier 1 (`artifactType`) wins, and the empty config must NOT be
+        // mistaken for a kind. (grim's own output today carries no
+        // `artifactType` — that path is the tier-3 test below.)
         let mut annotations = BTreeMap::new();
         annotations.insert("com.grimoire.kind".to_string(), "skill".to_string());
         let manifest = OciManifest {

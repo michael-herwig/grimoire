@@ -114,19 +114,17 @@ def _detect_all_clients(project_dir: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# a. release --kind agent publishes with agent artifactType
+# a. release --kind agent publishes with the agent kind annotation
 # ---------------------------------------------------------------------------
 
 
-def test_release_with_kind_agent_publishes_agent_artifact_type(
+def test_release_with_kind_agent_publishes_agent_kind(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
-    """``grim release --kind agent`` pushes with
-    ``artifactType = application/vnd.grimoire.agent.v1``.
-
-    Uses ``fetch_manifest`` (the same wire-contract verification used in
-    ``test_add_infer.py``) and ``grim add`` kind inference to assert the
-    OCI manifest carries the correct type.
+    """``grim release --kind agent`` produces the GitLab-safe wire shape: OCI
+    empty config, NO custom ``artifactType`` (GitLab rejects it), and the kind
+    carried by the ``com.grimoire.kind`` annotation. ``grim add`` then infers
+    the kind from that annotation.
     """
     agent_file = project_dir / "my-agent.md"
     _write(agent_file, _agent_doc("my-agent"))
@@ -137,19 +135,18 @@ def test_release_with_kind_agent_publishes_agent_artifact_type(
     out = runner.json("release", "--kind", "agent", str(agent_file), f"{repo}:1.0.0")
     assert out["pushed"] is True
 
-    # Wire-level assertion: manifest carries the agent artifactType.
     manifest = fetch_manifest(repo_path, "1.0.0")
-    assert manifest["artifactType"] == "application/vnd.grimoire.agent.v1", (
-        f"agent release must set artifactType=application/vnd.grimoire.agent.v1, "
+    # No custom artifactType on the wire — GitLab rejects it.
+    assert "artifactType" not in manifest, (
+        f"manifest must NOT carry a custom artifactType (GitLab rejects it), "
         f"got {manifest.get('artifactType')!r}"
     )
-    # Config descriptor is the OCI empty type (GitLab-allowlist-safe) since
-    # adr_oci_empty_config_compat.md; the kind rides on artifactType (above)
-    # and the com.grimoire.kind annotation (below), never the config type.
+    # Config descriptor is the OCI empty type (GitLab-allowlist-safe).
     assert manifest["config"]["mediaType"] == "application/vnd.oci.empty.v1+json", (
         f"config mediaType must be the OCI empty type, "
         f"got {manifest['config']['mediaType']!r}"
     )
+    # The kind rides solely on the com.grimoire.kind annotation.
     assert manifest.get("annotations", {}).get("com.grimoire.kind") == "agent", (
         f"agent release must carry com.grimoire.kind=agent, "
         f"got {manifest.get('annotations', {})!r}"

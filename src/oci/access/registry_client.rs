@@ -245,10 +245,9 @@ fn oci_descriptor(d: &Descriptor) -> OciDescriptor {
 impl RegistryClient {
     /// A tiny, deterministic config blob (`{}`, digest
     /// `sha256:44136fa3...8a`, size 2 — the OCI empty descriptor). The
-    /// artifact's identity is carried by the manifest `artifactType` and the
-    /// `com.grimoire.kind` annotation, and its metadata by the manifest
-    /// annotations — the config blob itself only has to exist and be
-    /// content-addressable, so it stays the OCI empty config
+    /// artifact's kind is carried by the `com.grimoire.kind` annotation and its
+    /// metadata by the other manifest annotations — the config blob itself only
+    /// has to exist and be content-addressable, so it stays the OCI empty config
     /// ([`OCI_EMPTY_CONFIG_MEDIA_TYPE`]) rather than masquerading as a runnable
     /// image config or carrying a custom type a registry allowlist may reject.
     fn config_blob() -> Vec<u8> {
@@ -437,13 +436,16 @@ impl OciAccess for RegistryClient {
             .store_auth_if_needed(registry_ref.resolve_registry(), &auth)
             .await;
 
-        // The config blob is pushed inline; the kind rides on the manifest
-        // `artifactType` + the `com.grimoire.kind` annotation, not the config
-        // blob bytes. The config descriptor's media type is ALWAYS the OCI
-        // empty type (ignoring `manifest.config_media_type`): a custom per-kind
-        // config type is off GitLab's referenced-media-type allowlist and made
-        // GitLab reject the whole manifest. The empty type is universally
-        // allow-listed (`adr_oci_empty_config_compat.md`).
+        // GitLab Container Registry validates EVERY referenced media type
+        // against an allowlist and rejects custom ones with `400
+        // MANIFEST_INVALID`. Confirmed against real GitLab SaaS: it rejects
+        // both the custom config media type AND the custom top-level
+        // `artifactType` (`application/vnd.grimoire.<kind>.v1`), but accepts the
+        // custom layer media type. So the pushed manifest carries the OCI empty
+        // config (universally allow-listed) and NO `artifactType` (see below);
+        // the kind rides solely on the `com.grimoire.kind` annotation
+        // (`adr_oci_empty_config_compat.md`). The empty config blob is the
+        // byte-identical `{}` — only the descriptor's media type matters here.
         let config = Self::config_blob();
         let config_digest = self.push_blob(repo, &config).await?;
 
@@ -460,7 +462,11 @@ impl OciAccess for RegistryClient {
             },
             layers: manifest.layers.iter().map(oci_descriptor).collect(),
             subject: None,
-            artifact_type: manifest.artifact_type.clone(),
+            // Never written: GitLab rejects a custom `artifactType` (see above).
+            // The kind is carried by the `com.grimoire.kind` annotation; the
+            // `OciManifest.artifact_type` field is retained only on the READ
+            // path to type pre-`adr_oci_empty_config_compat.md` artifacts.
+            artifact_type: None,
             annotations: if manifest.annotations.is_empty() {
                 None
             } else {

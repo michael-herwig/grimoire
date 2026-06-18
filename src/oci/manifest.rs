@@ -36,8 +36,12 @@ pub struct Descriptor {
 pub struct OciManifest {
     /// The manifest media type, if the registry reported one.
     pub media_type: Option<String>,
-    /// The OCI `artifactType`, if present — the authoritative kind
-    /// discriminator (`application/vnd.grimoire.<kind>.v1`).
+    /// The OCI `artifactType`, as read from a pulled manifest — the first
+    /// kind-resolution tier (`application/vnd.grimoire.<kind>.v1`). grim no
+    /// longer writes it (GitLab rejects a custom `artifactType`, see
+    /// `adr_oci_empty_config_compat.md`), so it is present only on artifacts
+    /// published before that change; new artifacts type via the
+    /// `com.grimoire.kind` annotation.
     pub artifact_type: Option<String>,
     /// The config descriptor's media type, as read from a pulled manifest.
     /// The second kind-resolution tier (after `artifactType`, before the
