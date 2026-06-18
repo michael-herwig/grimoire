@@ -165,7 +165,7 @@ async fn install_one<M: ArtifactMaterializer>(
         let covers_targets = target
             .clients()
             .iter()
-            .all(|c| rec.outputs.iter().any(|out| out.client == c.to_string()));
+            .all(|c| rec.outputs.iter().any(|out| out.client == c.as_str()));
         if all_intact && covers_targets && rec.pinned.eq_content(&artifact.pinned) {
             return Ok(InstallOutcome::AlreadyInstalled);
         }
@@ -255,10 +255,36 @@ async fn install_one<M: ArtifactMaterializer>(
         _ => None,
     };
 
-    // Materialize into every selected client's final path, replacing any
-    // prior output, and hash each client output for the integrity record.
-    let mut client_records: Vec<ClientOutput> = Vec::with_capacity(target.clients().len());
-    for client in target.clients() {
+    // Effective materialize set: the explicit `--client` targets PLUS — only
+    // when the pin changed — every still-active recorded client. Version is an
+    // artifact-level property: all clients in a record move to the new pin
+    // together, so a subset `--client` install at a NEW version re-materializes
+    // the other active clients too. This keeps the invariant "every output in a
+    // record is at `record.pinned`" true. When the pin is unchanged the set
+    // stays equal to the target, so other active clients are re-attached at
+    // their existing (same-pin, non-stale) hash by the merge step below.
+    let pin_changed = recorded
+        .as_ref()
+        .is_some_and(|rec| !rec.pinned.eq_content(&artifact.pinned));
+    let mut materialize_set: Vec<crate::install::client_target::ClientTarget> = target.clients().to_vec();
+    if pin_changed && let Some(rec) = &recorded {
+        for out in &rec.outputs {
+            let Ok(client) = out.client.parse::<crate::install::client_target::ClientTarget>() else {
+                continue;
+            };
+            // An out-of-scope client (anchor root absent on this machine) cannot
+            // be re-materialized; leave it dropped, as today. Only re-materialize
+            // a still-active recorded client not already in the target set.
+            if out.target.anchor.root(roots).is_some() && !materialize_set.contains(&client) {
+                materialize_set.push(client);
+            }
+        }
+    }
+
+    // Materialize into every client in the effective set, replacing any prior
+    // output, and hash each client output for the integrity record.
+    let mut client_records: Vec<ClientOutput> = Vec::with_capacity(materialize_set.len());
+    for client in &materialize_set {
         let dest = target.path_for(*client, kind, &artifact.name);
         // Copilot documents no user-level instructions location: a
         // global-scope rule lands in the workspace layout, which Copilot
@@ -339,19 +365,28 @@ async fn install_one<M: ArtifactMaterializer>(
         });
     }
 
-    // Merge with the prior record so an additive `--client` install (or a
-    // client re-enabled since the last install) accumulates instead of
-    // clobbering the other clients' outputs. Re-attach every recorded output
-    // for a client NOT in this target; a freshly materialized target client
-    // is already in `client_records`. A recorded non-target output whose
-    // anchor root is absent on this machine names an out-of-scope client —
-    // drop it (it cannot be resolved or verified, and re-attaching it would
-    // re-introduce the desync the read paths must tolerate).
+    // Merge with the prior record so an additive same-pin `--client` install (or
+    // a client re-enabled since the last install) accumulates instead of
+    // clobbering the other clients' outputs. Re-attach prior outputs ONLY when
+    // the pin is unchanged: on a pin change every resolvable recorded client was
+    // added to `materialize_set` and freshly materialized above, so the record
+    // already holds them at the new pin. Any output NOT materialized on a pin
+    // change is stale at the old pin — an out-of-scope client (anchor root
+    // absent) or an unparsable/legacy client string that cannot be
+    // re-materialized — and must not be carried forward under the new pin; that
+    // would re-introduce the very desync this fix removes. Dropping the record
+    // entry leaves the on-disk files untouched (D3).
     let mut outputs = client_records;
-    if let Some(rec) = &recorded {
+    if !pin_changed && let Some(rec) = &recorded {
         for out in &rec.outputs {
-            let in_target = target.clients().iter().any(|c| out.client == c.to_string());
-            if in_target || out.target.anchor.root(roots).is_none() {
+            // Already materialized (in the effective set) — the fresh output is
+            // already in `outputs` at `record.pinned`; skip the stale copy.
+            if materialize_set.iter().any(|c| out.client == c.as_str()) {
+                continue;
+            }
+            // Out-of-scope: the client's anchor root is absent on this machine,
+            // so the output can be neither resolved nor verified — drop it.
+            if out.target.anchor.root(roots).is_none() {
                 continue;
             }
             outputs.push(out.clone());
@@ -1013,10 +1048,21 @@ mod tests {
         assert_eq!(clients, vec!["claude", "copilot"], "record covers both clients");
     }
 
-    /// C3: installing a subset of clients must preserve the other clients'
-    /// recorded outputs (merge-on-write), not clobber them.
+    /// BLOCK-1 (option-b): when the pin changes, a subset `--client` install must
+    /// re-materialize ALL currently-active recorded clients to the new pin, not
+    /// just the target client.  Version is an artifact-level property; all clients
+    /// move together.
+    ///
+    /// Prior state: `[claude, copilot]@A`.
+    /// Action:      `install [claude]@B` (pin change ⇒ version bump path).
+    /// Expected:    record `pinned=B`; BOTH outputs' `content_hash` == B-hash;
+    ///              BOTH on-disk files contain B content.
+    ///              A follow-up `install [copilot]@B` returns `AlreadyInstalled`.
+    ///
+    /// On current HEAD this FAILS because copilot stays at A-hash/A-content
+    /// (merge-on-write preserves it verbatim instead of re-materializing it).
     #[tokio::test]
-    async fn partial_client_update_preserves_other_client_outputs() {
+    async fn version_bump_subset_install_rematerializes_all_active_clients() {
         let dir = tempfile::tempdir().unwrap();
         let m = DefaultMaterializer;
         let roots = roots(dir.path());
@@ -1040,6 +1086,15 @@ mod tests {
             false,
         )
         .await;
+
+        // Capture copilot's recorded A-hash so step 2 can prove it was
+        // re-materialized to B (its hash must change). Cross-vendor hash
+        // equality (copilot vs claude) is NOT a valid contract: the two
+        // vendors produce different files — claude copies the index
+        // verbatim, copilot prepends a provenance header and uses a
+        // different file name — so their footprint hashes never match even
+        // at the same pin. The option-b invariant is "copilot moved off its
+        // stale A-hash", not "copilot == claude".
         let copilot_hash_a = state
             .get(ArtifactKind::Rule, "rust-style")
             .unwrap()
@@ -1050,10 +1105,117 @@ mod tests {
             .content_hash
             .clone();
 
-        // 2. Install claude-only at version B (different digest ⇒ Updated).
+        // 2. Install claude-only at version B (different digest ⇒ pin change).
         let blob_b = rule_tar("rust-style", b"vB\n");
         let lock_b = lock_of(vec![locked_rule("rust-style", &blob_b)]);
+        let access_b = arc(BlobMock { blob: blob_b.clone() });
         let t_claude = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Claude]);
+        let r = install_all(&lock_b, &access_b, &m, &t_claude, &mut state, &roots, false).await;
+        assert_eq!(
+            *r[0].result.as_ref().unwrap(),
+            InstallOutcome::Updated,
+            "claude install must be Updated"
+        );
+
+        // Derive the expected B-hash from the actual installed file (claude path).
+        let claude_path = dir.path().join(".claude/rules/rust-style.md");
+        assert_eq!(
+            std::fs::read(&claude_path).unwrap(),
+            b"vB\n",
+            "claude file must contain vB content"
+        );
+
+        let rec = state.get(ArtifactKind::Rule, "rust-style").unwrap();
+
+        // OPTION-B CONTRACT: record.pinned must advance to B.
+        // (On current HEAD this passes — pinned IS updated.)
+        let copilot_out = rec
+            .outputs
+            .iter()
+            .find(|o| o.client == "copilot")
+            .expect("copilot output must still be in record (was active at install time)");
+
+        // OPTION-B CONTRACT: copilot's content_hash must have moved off its
+        // stale A-hash — proof it was re-materialized to B alongside the
+        // claude target. On current HEAD this FAILS: merge-on-write preserves
+        // the copilot output verbatim, so its hash stays at A.
+        assert_ne!(
+            copilot_out.content_hash, copilot_hash_a,
+            "BLOCK-1: copilot output must be re-materialized to B when pin changes; \
+             on current HEAD copilot stays at A-hash (merge-on-write bug)"
+        );
+
+        // OPTION-B CONTRACT: copilot on-disk file must NOT contain vA content.
+        // On current HEAD this FAILS: the file on disk still has vA bytes because
+        // merge-on-write preserved the copilot output verbatim without re-writing
+        // the file.
+        let copilot_path = dir.path().join(".github/instructions/rust-style.instructions.md");
+        let copilot_bytes = std::fs::read(&copilot_path).unwrap();
+        assert!(
+            !copilot_bytes.windows(2).any(|w| w == b"vA"),
+            "BLOCK-1: copilot file must not contain vA content after version bump to B; \
+             on current HEAD the file still has vA (copilot was not re-materialized)"
+        );
+    }
+
+    /// BLOCK-1 hardening (cross-model finding): on a pin change, a recorded
+    /// output whose `client` string cannot be parsed as a `ClientTarget`
+    /// (a corrupted or forward-incompatible state file) cannot be
+    /// re-materialized, so it must be DROPPED from the new record rather than
+    /// re-attached at its stale old-pin hash — re-attaching would violate the
+    /// invariant "every output in a record is at `record.pinned`". On-disk files
+    /// are left untouched (D3).
+    ///
+    /// On pre-fix code the merge re-attaches the legacy output verbatim, so it
+    /// lingers at its A-hash under `pinned=B` ⇒ this test FAILS.
+    #[tokio::test]
+    async fn version_bump_drops_unmaterializable_legacy_client_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = DefaultMaterializer;
+        let roots = roots(dir.path());
+        let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
+
+        // 1. Install claude at version A.
+        let blob_a = rule_tar("rust-style", b"vA\n");
+        let lock_a = lock_of(vec![locked_rule("rust-style", &blob_a)]);
+        let t_claude = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Claude]);
+        install_all(
+            &lock_a,
+            &arc(BlobMock { blob: blob_a.clone() }),
+            &m,
+            &t_claude,
+            &mut state,
+            &roots,
+            false,
+        )
+        .await;
+
+        // Inject a recorded output for an unparsable/legacy client whose anchor
+        // root resolves (Workspace) — mimicking a corrupted or forward-written
+        // state file. Pre-fix the merge re-attaches this verbatim at the new pin.
+        let rec = state.get(ArtifactKind::Rule, "rust-style").unwrap();
+        let claude_out = rec.outputs.iter().find(|o| o.client == "claude").unwrap().clone();
+        let hash_a = claude_out.content_hash.clone();
+        let pinned = rec.pinned.clone();
+        let legacy = ClientOutput {
+            client: "legacy-vendor".to_string(),
+            target: AnchoredPath {
+                anchor: PathAnchor::Workspace,
+                relative: ".legacy/rust-style.md".to_string(),
+            },
+            content_hash: hash_a.clone(),
+            support_dir: None,
+        };
+        state.record(InstallRecord {
+            kind: ArtifactKind::Rule,
+            name: "rust-style".to_string(),
+            pinned,
+            outputs: vec![claude_out, legacy],
+        });
+
+        // 2. Install claude at version B (pin change).
+        let blob_b = rule_tar("rust-style", b"vB\n");
+        let lock_b = lock_of(vec![locked_rule("rust-style", &blob_b)]);
         let r = install_all(
             &lock_b,
             &arc(BlobMock { blob: blob_b.clone() }),
@@ -1067,27 +1229,210 @@ mod tests {
         assert_eq!(*r[0].result.as_ref().unwrap(), InstallOutcome::Updated);
 
         let rec = state.get(ArtifactKind::Rule, "rust-style").unwrap();
-        let claude = rec
-            .outputs
-            .iter()
-            .find(|o| o.client == "claude")
-            .expect("claude output present");
-        let copilot = rec
+        // The unparsable legacy client is dropped — it cannot be re-materialized
+        // to B and must not linger at its stale A-hash under `pinned=B`.
+        assert!(
+            rec.outputs.iter().all(|o| o.client != "legacy-vendor"),
+            "an unmaterializable legacy client output must be dropped on a pin change, not \
+             carried forward stale: {:?}",
+            rec.outputs.iter().map(|o| o.client.as_str()).collect::<Vec<_>>()
+        );
+        // claude is present and re-materialized to B (off its A-hash).
+        let claude_out = rec.outputs.iter().find(|o| o.client == "claude").unwrap();
+        assert_ne!(claude_out.content_hash, hash_a, "claude must be re-materialized to B");
+    }
+
+    /// BLOCK-1 guard (same-pin path): when the pin is UNCHANGED, a subset
+    /// `--client` install must NOT needlessly re-materialize other clients.
+    /// Option-b fires only on pin change; same-pin subset install is a
+    /// guard to avoid spurious churn.
+    ///
+    /// Prior state: `[claude, copilot]@A`.
+    /// Action:      `install [claude]@A` (SAME pin).
+    /// Expected:    result is `AlreadyInstalled` OR copilot content_hash is
+    ///              unchanged (no re-materialization triggered).
+    ///
+    /// This test is expected to PASS on current HEAD (same-pin short-circuit
+    /// works) and continue to pass after the option-b fix (the fix must not
+    /// accidentally always re-materialize).
+    ///
+    /// NOTE: this test will also pass if the outcome is `Updated` but copilot
+    /// hash stays the same — either is acceptable for the same-pin case; the
+    /// key invariant is that copilot is NOT churned unnecessarily.
+    #[tokio::test]
+    async fn subset_install_same_pin_does_not_rematerialize_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = DefaultMaterializer;
+        let roots = roots(dir.path());
+        let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
+
+        // 1. Install claude+copilot at version A.
+        let blob_a = rule_tar("rust-style", b"vA\n");
+        let lock_a = lock_of(vec![locked_rule("rust-style", &blob_a)]);
+        let t_both = InstallTarget::new(
+            dir.path(),
+            ConfigScope::Project,
+            vec![ClientTarget::Claude, ClientTarget::Copilot],
+        );
+        install_all(
+            &lock_a,
+            &arc(BlobMock { blob: blob_a.clone() }),
+            &m,
+            &t_both,
+            &mut state,
+            &roots,
+            false,
+        )
+        .await;
+
+        let copilot_hash_a = state
+            .get(ArtifactKind::Rule, "rust-style")
+            .unwrap()
             .outputs
             .iter()
             .find(|o| o.client == "copilot")
-            .expect("copilot output preserved (merge-on-write)");
+            .unwrap()
+            .content_hash
+            .clone();
+        let copilot_path = dir.path().join(".github/instructions/rust-style.instructions.md");
+        let copilot_bytes_before = std::fs::read(&copilot_path).unwrap();
+
+        // 2. Re-install claude-only at the SAME pin A.
+        let t_claude = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Claude]);
+        let r = install_all(
+            &lock_a,
+            &arc(BlobMock { blob: blob_a.clone() }),
+            &m,
+            &t_claude,
+            &mut state,
+            &roots,
+            false,
+        )
+        .await;
+
+        // The outcome can be AlreadyInstalled or Updated (for claude); either is fine.
+        // The key invariant: copilot hash is unchanged (same-pin ⇒ no re-materialization).
+        let rec = state.get(ArtifactKind::Rule, "rust-style").unwrap();
+        let copilot_out = rec
+            .outputs
+            .iter()
+            .find(|o| o.client == "copilot")
+            .expect("copilot output must still be in record");
         assert_eq!(
-            copilot.content_hash, copilot_hash_a,
-            "copilot output preserved at version A"
+            copilot_out.content_hash, copilot_hash_a,
+            "same-pin subset install must NOT re-materialize copilot (hash must stay at A)"
         );
-        assert_ne!(
-            claude.content_hash, copilot.content_hash,
-            "claude advanced to version B"
-        );
+        // On-disk file also unchanged.
         assert_eq!(
-            std::fs::read(dir.path().join(".claude/rules/rust-style.md")).unwrap(),
-            b"vB\n"
+            std::fs::read(&copilot_path).unwrap(),
+            copilot_bytes_before,
+            "same-pin subset install must NOT rewrite the copilot file on disk"
+        );
+
+        // Result must be ok (no error), either AlreadyInstalled or Updated.
+        assert!(
+            r[0].result.is_ok(),
+            "same-pin subset install must not error: {:?}",
+            r[0].result
+        );
+    }
+
+    /// BLOCK-1 follow-up: after a version-bump subset install re-materializes
+    /// all active clients (option-b), a subsequent subset install targeting one
+    /// of those clients at the SAME new pin must return `AlreadyInstalled`
+    /// (the client is legitimately already at B).
+    ///
+    /// Prior state: after `version_bump_subset_install_rematerializes_all_active_clients`
+    /// has run: record is `[claude, copilot]@B` with both files at B.
+    /// Action:  `install [copilot]@B` (same pin, copilot already at B).
+    /// Expected: `AlreadyInstalled`.
+    ///
+    /// On current HEAD this FAILS: copilot was left at A, so `install [copilot]@B`
+    /// triggers a new install (Updated) rather than short-circuiting.
+    #[tokio::test]
+    async fn subset_install_after_version_bump_is_already_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = DefaultMaterializer;
+        let roots = roots(dir.path());
+        let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
+
+        // 1. Install claude+copilot at version A.
+        let blob_a = rule_tar("rust-style", b"vA\n");
+        let lock_a = lock_of(vec![locked_rule("rust-style", &blob_a)]);
+        let t_both = InstallTarget::new(
+            dir.path(),
+            ConfigScope::Project,
+            vec![ClientTarget::Claude, ClientTarget::Copilot],
+        );
+        install_all(
+            &lock_a,
+            &arc(BlobMock { blob: blob_a.clone() }),
+            &m,
+            &t_both,
+            &mut state,
+            &roots,
+            false,
+        )
+        .await;
+
+        // 2. Bump to version B via claude-only install.
+        let blob_b = rule_tar("rust-style", b"vB\n");
+        let lock_b = lock_of(vec![locked_rule("rust-style", &blob_b)]);
+        let t_claude = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Claude]);
+        let r_bump = install_all(
+            &lock_b,
+            &arc(BlobMock { blob: blob_b.clone() }),
+            &m,
+            &t_claude,
+            &mut state,
+            &roots,
+            false,
+        )
+        .await;
+        assert_eq!(
+            *r_bump[0].result.as_ref().unwrap(),
+            InstallOutcome::Updated,
+            "step 2 (version bump) must be Updated"
+        );
+
+        // 3. Now install copilot-only at B. After option-b fix, copilot was
+        //    already re-materialized to B in step 2, so this must short-circuit.
+        let t_copilot = InstallTarget::new(dir.path(), ConfigScope::Project, vec![ClientTarget::Copilot]);
+        let r_follow_up = install_all(
+            &lock_b,
+            &arc(BlobMock { blob: blob_b.clone() }),
+            &m,
+            &t_copilot,
+            &mut state,
+            &roots,
+            false,
+        )
+        .await;
+
+        // OPTION-B CONTRACT: copilot is already at B ⇒ AlreadyInstalled.
+        // On current HEAD, `install [copilot]@B` also returns AlreadyInstalled
+        // but for the WRONG REASON: copilot's file is at A (content A), its
+        // recorded hash is A-hash, and those match ⇒ intact, even though the
+        // record.pinned is B. This is the BLOCK-1 "status lies" bug.
+        // After the fix, copilot is at B (re-materialized in step 2), so
+        // AlreadyInstalled is correct.
+        assert_eq!(
+            *r_follow_up[0].result.as_ref().unwrap(),
+            InstallOutcome::AlreadyInstalled,
+            "BLOCK-1: follow-up copilot install must be AlreadyInstalled"
+        );
+
+        // KEY DISCRIMINANT: verify that AlreadyInstalled is legitimate (copilot
+        // file is at B), not spurious (copilot file still at A, matching the
+        // buggy pre-fix record hash).  On current HEAD this FAILS because the
+        // copilot file still contains vA.
+        let copilot_path = dir.path().join(".github/instructions/rust-style.instructions.md");
+        let copilot_bytes = std::fs::read(&copilot_path).unwrap();
+        assert!(
+            !copilot_bytes.windows(2).any(|w| w == b"vA"),
+            "BLOCK-1: copilot file must contain B content (AlreadyInstalled is legitimate); \
+             on current HEAD copilot was not re-materialized so the file still has vA content, \
+             meaning the prior AlreadyInstalled was a false short-circuit"
         );
     }
 

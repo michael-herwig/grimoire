@@ -501,6 +501,75 @@ mod tests {
         );
     }
 
+    /// W7: when the record contains outputs only for clients that are NOT in
+    /// the active set (e.g., the only recorded client was `opencode` but the
+    /// active set is `[claude]`), `derive_state` must return `Missing`.
+    ///
+    /// This prevents BLOCK-1 status lying: after a partial-client version bump
+    /// (pre-fix) copilot was left at A while `record.pinned==B`; when copilot
+    /// is the only remaining recorded client and claude is the active one, the
+    /// artifact must not report `Installed` — it is genuinely not present for
+    /// the active client.
+    ///
+    /// This is a regression anchor: the C4 `active_outputs` filter already
+    /// returns `Missing` here (opencode is not in the active set), so the test
+    /// passes on the current implementation. It exists to catch a future
+    /// regression that weakened `active_outputs` — e.g. treating an empty
+    /// active set as "all clients".
+    ///
+    /// Per the plan: "W7 no all-clients-removed → Missing test (status.rs)".
+    /// The spec says: record `[opencode]` only, active set `[Claude]` → Missing.
+    #[test]
+    fn all_clients_removed_yields_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let roots = roots(ws);
+
+        // Write an opencode file on disk (so it's not a file-missing scenario —
+        // the file IS present, but the active client is claude, not opencode).
+        let opencode_target = ws.join(".opencode/rules/x.md");
+        std::fs::create_dir_all(opencode_target.parent().unwrap()).unwrap();
+        std::fs::write(&opencode_target, b"canonical\n").unwrap();
+        let opencode_hash = crate::install::content_hash::content_hash(&opencode_target).unwrap();
+
+        let mut st = InstallState::load(&ws.join("s.json")).unwrap();
+        // Record contains ONLY the opencode client output.
+        st.record(InstallRecord {
+            kind: ArtifactKind::Rule,
+            name: "x".to_string(),
+            pinned: pinned('a'),
+            outputs: vec![ClientOutput {
+                client: "opencode".to_string(),
+                target: AnchoredPath {
+                    anchor: PathAnchor::Workspace,
+                    relative: ".opencode/rules/x.md".to_string(),
+                },
+                content_hash: opencode_hash,
+                support_dir: None,
+            }],
+        });
+
+        // Active set is [Claude] only — opencode was removed.
+        // active_outputs filters to only the intersection of record clients and
+        // active set; since the record only has opencode and active is [claude],
+        // the result is empty ⇒ Missing.
+        let state = derive_state(
+            ArtifactKind::Rule,
+            "x",
+            Some(&locked('a')),
+            &st,
+            &roots,
+            &[ClientTarget::Claude],
+            true,
+        );
+        assert_eq!(
+            state,
+            ArtifactStatus::Missing,
+            "W7: record with only out-of-scope clients must report Missing \
+             (not Installed) when the active set is entirely different"
+        );
+    }
+
     /// C4 guard: a present (active) client whose file is missing still flags
     /// `missing` — tolerance must never mask a genuinely broken install.
     #[test]

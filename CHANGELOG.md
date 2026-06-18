@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Tolerate removed or unresolvable clients across install, status, and uninstall *(install)*
+- Warn-only vendor-config sync so a failed sync never fails a completed action *(install)*
+- Re-materialize all active clients on a partial-client version bump, so no client is silently left stale *(install)*
+
 ## [0.4.3] - 2026-06-14
 
 ### Added

@@ -67,7 +67,22 @@ impl std::str::FromStr for ClientTarget {
 
 impl std::fmt::Display for ClientTarget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.vendor().name())
+        f.write_str(self.as_str())
+    }
+}
+
+impl ClientTarget {
+    /// The canonical lowercase name for this client (`claude` / `opencode` /
+    /// `copilot`). Zero-alloc form of [`Display`]; round-trips through
+    /// [`std::str::FromStr`]. Used to compare against the stored
+    /// [`super::install_state::ClientOutput::client`] string without an
+    /// intermediate allocation.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::OpenCode => "opencode",
+            Self::Copilot => "copilot",
+        }
     }
 }
 
