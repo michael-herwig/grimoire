@@ -5,13 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.0] - 2026-06-19
+
+### Added
+
+- Multi-registry support, shared catalog core, and grim mcp server
+- Add shell and PowerShell installers hosted on the docs site *(release)*
+- Support repository_prefix / per-entry repository in publish.toml *(publish)*
+
+### Documentation
+
+- Document grim mcp and multi-registry config
+- Lead the install page with ocx, then the install script
+- Supersede artifact-type ADR with empty-config compatibility *(adr)*
+- Document registry compatibility for catalog discovery
+- Record that GitLab rejects the custom artifactType *(adr)*
 
 ### Fixed
 
-- Tolerate removed or unresolvable clients across install, status, and uninstall *(install)*
-- Warn-only vendor-config sync so a failed sync never fails a completed action *(install)*
-- Re-materialize all active clients on a partial-client version bump, so no client is silently left stale *(install)*
+- Reconcile install state against the active client set *(install)*
+- Tolerate destroyed or malformed state when removing and syncing *(install)*
+- Re-materialize all active clients on a partial-client version bump *(install)*
+- Warn instead of failing on vendor-config sync after install/uninstall *(tui)*
+- Use the OCI empty config media type so GitLab accepts manifests *(oci)*
+- Drop the custom artifactType too — GitLab rejects it *(oci)*
+- Apply swarm-review remediations across gitlab-registry-compat
 
 ## [0.4.3] - 2026-06-14
 
@@ -19,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add `grim schema` to emit JSON Schemas for the TOML formats *(cli)*
 - Portable anchor-relativized install state *(install)*
+
+### Release
+
+- V0.4.3
 
 ## [0.4.2] - 2026-06-13
 
@@ -193,6 +215,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Make release-update.sh executable; add rolling-release regression tests
 - Contact loopback registries over plain HTTP on any port
+[0.5.0]: https://github.com/michael-herwig/grimoire/compare/v0.4.3..v0.5.0
 [0.4.3]: https://github.com/michael-herwig/grimoire/compare/v0.4.2..v0.4.3
 [0.4.2]: https://github.com/michael-herwig/grimoire/compare/v0.4.1..v0.4.2
 [0.4.1]: https://github.com/michael-herwig/grimoire/compare/v0.4.0..v0.4.1
