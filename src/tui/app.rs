@@ -22,7 +22,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
-use crate::catalog::registry_catalog::Catalog;
+use crate::catalog::registry_catalog::{CATALOG_GATED_REGISTRIES, Catalog, REGISTRY_COMPAT_DOCS_URL};
 use crate::command::add::{declare, relock_declared, write_config};
 use crate::command::grim;
 use crate::command::uninstall::undeclare_and_unlock;
@@ -570,13 +570,16 @@ async fn reload_into(ctx: &TuiContext, state: &mut TuiState, force: bool) {
                 format!("offline — {n} cached entr{} ", if n == 1 { "y" } else { "ies" })
             } else if n == 0 {
                 // An online build that yields nothing is most often a
-                // registry that gates the `_catalog` browse endpoint
-                // (GitLab SaaS, GHCR, Docker Hub) — say so, name the
-                // registries, and point at the registry-compatibility docs so
-                // an empty list reads as expected, not an error. Explicit-ref
-                // ops (install/add/release) work on those registries regardless.
-                "0 entries — GitLab SaaS, GHCR and Docker Hub gate `_catalog` browse (expected, not an error); explicit-ref ops still work. See docs: configuration#registry-compatibility"
-                    .to_string()
+                // registry that gates the `_catalog` browse endpoint — say so,
+                // name the registries, and point at the registry-compatibility
+                // docs so an empty list reads as expected, not an error.
+                // Explicit-ref ops (install/add/release) work on those
+                // registries regardless. Registry list + docs URL are shared
+                // with the `grim search` warning (single source of truth).
+                format!(
+                    "0 entries — {CATALOG_GATED_REGISTRIES} gate `_catalog` browse (expected, not an error); \
+                     explicit-ref ops still work. See {REGISTRY_COMPAT_DOCS_URL}"
+                )
             } else {
                 format!("{n} entr{}", if n == 1 { "y" } else { "ies" })
             });

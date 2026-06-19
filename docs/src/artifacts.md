@@ -14,19 +14,25 @@ looks like. This page is that reference. Narrative background stays in
 
 ## The four kinds {#kinds}
 
-Every artifact is typed on the wire with an OCI `artifactType` plus a
-Grimoire config media type, so registries and tooling can distinguish
-kinds without downloading layers.
+Every artifact carries its kind in a `com.grimoire.kind` manifest
+annotation, so registries and tooling can distinguish kinds without
+downloading layers.
 
-| Kind | Source shape | OCI `artifactType` | Installs as |
-|------|--------------|--------------------|-------------|
-| **Skill** | Directory with a `SKILL.md` index | `application/vnd.grimoire.skill.v1` | Directory tree under the client's `skills/` dir |
-| **Rule** | Single `.md` file (+ optional sibling support directory) | `application/vnd.grimoire.rule.v1` | `rules/<name>.md` (+ `rules/<name>/…`), per-client transform |
-| **Agent** | Single `.md` file | `application/vnd.grimoire.agent.v1` | One agent file per client, per-client rendering |
-| **Bundle** | `.toml` member list | `application/vnd.grimoire.bundle.v1` | Never materializes itself — expands to its members |
+| Kind | Source shape | `com.grimoire.kind` | Installs as |
+|------|--------------|---------------------|-------------|
+| **Skill** | Directory with a `SKILL.md` index | `skill` | Directory tree under the client's `skills/` dir |
+| **Rule** | Single `.md` file (+ optional sibling support directory) | `rule` | `rules/<name>.md` (+ `rules/<name>/…`), per-client transform |
+| **Agent** | Single `.md` file | `agent` | One agent file per client, per-client rendering |
+| **Bundle** | `.toml` member list | `bundle` | Never materializes itself — expands to its members |
 
-The config media type follows the same pattern:
-`application/vnd.grimoire.<kind>.config.v1+json`.
+The manifest's config descriptor is the OCI empty config
+(`application/vnd.oci.empty.v1+json`) — universally allow-listed, including
+on GitLab Container Registry, which rejects custom config and `artifactType`
+media types (see [Registry compatibility](./configuration.md#registry-compatibility)).
+Earlier releases instead stamped a custom OCI `artifactType`
+(`application/vnd.grimoire.<kind>.v1`) and a per-kind config media type;
+grim still reads those when present, so artifacts published before this
+change resolve their kind unchanged.
 
 `grim build` and `grim release` infer the kind from the path — a directory
 is a skill, a `.md` file is a rule, a `.toml` file is a bundle. Agents are

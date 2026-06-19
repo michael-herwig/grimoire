@@ -25,6 +25,7 @@ use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
 use crate::error::classify_error;
 use crate::oci::ArtifactKind;
+use crate::oci::identifier::{MAX_REPOSITORY_LENGTH, RepositoryPathIssue, repository_path_issue};
 
 /// `grim publish` arguments.
 #[derive(Debug, Args)]
@@ -135,6 +136,11 @@ pub(crate) struct PlannedEntry {
     pub reference: String,
     /// Whether to pin bundle members.
     pub pin: bool,
+    /// True when a per-entry `repository` override was used verbatim and its
+    /// last path segment is **not** the entry name — i.e. the name was not
+    /// appended. Drives a `--dry-run`-only preview hint so a user who expected
+    /// `repository_prefix` append-semantics notices the difference.
+    pub name_not_appended: bool,
 }
 
 /// Strict `X.Y.Z` semver check: no prerelease, no build metadata, no
@@ -209,42 +215,39 @@ fn validate_registry_value(registry: &str, manifest_path: &std::path::Path) -> a
 /// attributed to the manifest (mirrors [`validate_entry_name`] /
 /// [`validate_registry_value`]).
 ///
-/// Each `/`-separated segment must start with `[a-z0-9]` and contain only
-/// `[a-z0-9._-]` (the OCI repository-path alphabet). Rejects an empty value,
-/// a leading/trailing `/`, an empty `//` segment, `.`/`..` segments (caught by
-/// the head-char rule), uppercase, and an embedded `:` (which would smuggle a
-/// tag into the reference). `field` is the human label for the message
+/// Delegates the path alphabet to the canonical [`repository_path_issue`]
+/// gate in the `oci` layer (single source of truth, shared with the
+/// distribution-spec name grammar) and renders the manifest-attributed
+/// message. Rejects an empty value, an embedded `:` (which would smuggle a tag
+/// into the reference), a leading/trailing `/`, an empty `//` segment, a
+/// segment violating the OCI path-component grammar (`.`/`..`, uppercase,
+/// leading/trailing/doubled separators, foreign characters), and a path longer
+/// than [`MAX_REPOSITORY_LENGTH`]. `field` is the human label for the message
 /// (`"repository_prefix"` or `"entry '<name>': repository"`).
 fn validate_repository_path(value: &str, field: &str, manifest_path: &std::path::Path) -> anyhow::Result<()> {
-    if value.is_empty() {
-        return Err(data_error_at(manifest_path, format!("{field}: must not be empty")));
-    }
-    if value.contains(':') {
-        return Err(data_error_at(
-            manifest_path,
-            format!("{field} '{value}': must not contain ':' (the tag comes from the entry version)"),
-        ));
-    }
-    if value.starts_with('/') || value.ends_with('/') {
-        return Err(data_error_at(
-            manifest_path,
-            format!("{field} '{value}': must not start or end with '/'"),
-        ));
-    }
-    for segment in value.split('/') {
-        let mut chars = segment.chars();
-        let head_ok = chars
-            .next()
-            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
-        let tail_ok = chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.'));
-        if !(head_ok && tail_ok) {
-            return Err(data_error_at(
-                manifest_path,
-                format!("{field} '{value}': each path segment must start with [a-z0-9] and contain only [a-z0-9._-]"),
-            ));
+    let Some(issue) = repository_path_issue(value) else {
+        return Ok(());
+    };
+    let detail = match issue {
+        RepositoryPathIssue::Empty => format!("{field}: must not be empty"),
+        RepositoryPathIssue::ContainsColon => {
+            format!("{field} '{value}': must not contain ':' (the tag comes from the entry version)")
         }
-    }
-    Ok(())
+        RepositoryPathIssue::LeadingOrTrailingSlash => {
+            format!("{field} '{value}': must not start or end with '/'")
+        }
+        RepositoryPathIssue::EmptySegment => {
+            format!("{field} '{value}': must not contain an empty '//' path segment")
+        }
+        RepositoryPathIssue::SegmentGrammar => format!(
+            "{field} '{value}': each path segment must match the OCI name grammar — \
+             [a-z0-9] runs joined by '.', '_', '__', or '-', with no leading, trailing, or doubled separator"
+        ),
+        RepositoryPathIssue::TooLong => {
+            format!("{field} '{value}': repository path must be at most {MAX_REPOSITORY_LENGTH} characters")
+        }
+    };
+    Err(data_error_at(manifest_path, detail))
 }
 
 /// Run `grim publish`.
@@ -288,6 +291,23 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
     )?;
 
     let entries = plan_entries(&manifest, &manifest_dir, &registry, &args.only, args.tag.as_deref());
+
+    // Dry-run preview only: flag entries whose per-entry `repository` is used
+    // verbatim and does not end in the entry name (the name was not appended).
+    // Surfaced here — not as a publish-time warning — so a real publish of a
+    // deliberately-renamed repository stays quiet while a `--dry-run` preview
+    // still catches a user who expected `repository_prefix` append-semantics.
+    if args.dry_run {
+        for planned in &entries {
+            if planned.name_not_appended {
+                tracing::info!(
+                    "entry '{}': repository '{}' is used verbatim — the entry name is not appended (use repository_prefix to append the name)",
+                    planned.name,
+                    planned.reference,
+                );
+            }
+        }
+    }
 
     let mut report_entries: Vec<PublishEntry> = Vec::new();
 
@@ -742,12 +762,19 @@ fn plan_entries(
                 let publish_tag = tag.unwrap_or(&spec.version);
                 let repo = entry_repository(name, $kind, spec, manifest.repository_prefix.as_deref());
                 let reference = format!("{registry}/{repo}:{publish_tag}");
+                // Only a verbatim per-entry `repository` can drop the name; the
+                // prefix and default branches always append it.
+                let name_not_appended = spec
+                    .repository
+                    .as_deref()
+                    .is_some_and(|r| r.rsplit('/').next() != Some(name.as_str()));
                 entries.push(PlannedEntry {
                     kind: $kind,
                     name: name.clone(),
                     path: src,
                     reference,
                     pin: spec.pin,
+                    name_not_appended,
                 });
             }
         };
@@ -1223,19 +1250,30 @@ mod tests {
         .expect("nested lowercase path valid");
         validate_repository_path("a/b_c/d.e/f-g", "repository_prefix", Path::new("t.toml"))
             .expect("OCI path alphabet valid");
+        // The OCI grammar also blesses a double underscore and runs of dashes
+        // between alnum runs.
+        validate_repository_path("a__b/c--d", "repository_prefix", Path::new("t.toml"))
+            .expect("__ and -- separators valid");
     }
 
     #[test]
     fn validate_repository_path_rejects_bad_values() {
+        let long = format!("a/{}", "b".repeat(crate::oci::identifier::MAX_REPOSITORY_LENGTH));
         for bad in [
-            "",           // empty
-            "/leading",   // leading slash
-            "trailing/",  // trailing slash
-            "a//b",       // empty segment
-            "../evil",    // parent-dir traversal
-            "a/./b",      // cur-dir segment
-            "UPPER/case", // uppercase
-            "has:tag",    // embedded tag separator
+            "",             // empty
+            "/leading",     // leading slash
+            "trailing/",    // trailing slash
+            "a//b",         // empty segment
+            "../evil",      // parent-dir traversal
+            "a/./b",        // cur-dir segment
+            "UPPER/case",   // uppercase
+            "has:tag",      // embedded tag separator
+            "group-/proj",  // trailing separator in a segment (Codex bypass class)
+            "group./proj",  // trailing dot in a segment
+            "grp/-leading", // leading separator in a segment
+            "a..b/c",       // doubled dot separator
+            "a._b/c",       // mixed doubled separator
+            long.as_str(),  // exceeds MAX_REPOSITORY_LENGTH
         ] {
             let err = validate_repository_path(bad, "repository_prefix", Path::new("t.toml")).unwrap_err();
             assert_eq!(
@@ -1257,7 +1295,10 @@ mod tests {
     #[test]
     fn validate_manifest_rejects_bad_entry_repository() {
         let (mut manifest, dir, _tmp) = make_manifest_dir();
-        manifest.skills.get_mut("my-skill").unwrap().repository = Some("has:colon".to_string());
+        // A segment-grammar violation (trailing separator), not the `:` early
+        // guard — proves the per-entry `repository` actually flows into the
+        // shared OCI segment validation, not just the colon check.
+        manifest.skills.get_mut("my-skill").unwrap().repository = Some("group-/my-skill".to_string());
         let err = validate_manifest(&manifest, &dir, Path::new("test.toml"), &[], None).unwrap_err();
         assert_eq!(crate::error::classify_error(&err), ExitCode::DataError);
     }
@@ -1342,6 +1383,33 @@ mod tests {
             entries[0].reference,
             "registry.gitlab.com/durzn-technology/hearth/skill/hearth:0.1.0"
         );
+        // Last repo segment == entry name → the name is effectively present, no
+        // dry-run hint.
+        assert!(!entries[0].name_not_appended);
+    }
+
+    #[test]
+    fn plan_entries_flags_name_not_appended_for_renamed_repository() {
+        // A per-entry `repository` whose last segment differs from the entry
+        // name is used verbatim (name dropped) → `name_not_appended` is set so
+        // a `--dry-run` preview can hint about it. The prefix case never sets it.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        write(
+            &dir.join("skills/hearth/SKILL.md"),
+            "---\nname: hearth\ndescription: d.\n---\n",
+        );
+        let manifest: PublishManifest = toml::from_str(
+            "registry = \"registry.gitlab.com\"\n\n\
+             [skills.hearth]\nversion = \"0.1.0\"\nrepository = \"durzn-technology/hearth/skill\"\n",
+        )
+        .unwrap();
+        let entries = plan_entries(&manifest, dir, "registry.gitlab.com", &[], None);
+        assert_eq!(
+            entries[0].reference,
+            "registry.gitlab.com/durzn-technology/hearth/skill:0.1.0"
+        );
+        assert!(entries[0].name_not_appended);
     }
 
     // ── validate_manifest: unknown --only name rejected ───────────────────

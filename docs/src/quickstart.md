@@ -19,8 +19,8 @@ grim init --registry ghcr.io/acme
 
 `grim add` records a skill or rule in `grimoire.toml` and immediately pins it
 in `grimoire.lock`. The only required argument is the reference to fetch; the
-kind is inferred from the artifact's OCI `artifactType` and the binding name
-defaults to the reference's last path segment:
+kind is inferred from the artifact's `com.grimoire.kind` manifest annotation
+and the binding name defaults to the reference's last path segment:
 
 ```sh
 grim add ghcr.io/acme/code-review:1

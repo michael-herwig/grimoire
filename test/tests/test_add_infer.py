@@ -40,13 +40,16 @@ def test_add_infers_kind_and_name_from_manifest(
     assert "@sha256:" in out["pinned"]
 
 
-def test_published_manifest_types_kind_via_artifact_type(
+def test_legacy_shaped_manifest_types_kind_via_artifact_type(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
-    """The wire contract (`adr_oci_empty_config_compat.md`): kind rides on
-    `artifactType` and is mirrored into the `com.grimoire.kind` annotation; the
-    config descriptor is the OCI empty type (GitLab-allowlist-safe), not a
-    custom Grimoire config type. `grim add` infers the kind from `artifactType`."""
+    """Read tier 1 (`adr_oci_empty_config_compat.md`): a legacy-shaped manifest
+    that still carries the custom `artifactType` resolves its kind from that
+    tier. The harness (`registry.py push_artifact`) deliberately emits a richer
+    manifest than grim's own output — it stamps `artifactType` AND the
+    `com.grimoire.kind` annotation over the OCI empty config — so this exercises
+    the backward-compat read path. grim's own writes carry only the annotation
+    (see `test_release_wire_shape_*`)."""
     repo = f"{unique_repo}/rust-style"
     ru = make_artifact(
         repo,
@@ -67,7 +70,8 @@ def test_published_manifest_types_kind_via_artifact_type(
         f"got {manifest.get('annotations', {})!r}"
     )
 
-    # End-to-end: kind inference works off the type alone (no annotation).
+    # End-to-end: kind inference resolves at the artifactType read tier on this
+    # harness-built legacy-shaped manifest.
     write_config(project_dir)
     out = grim_at(project_dir).json("add", ru.fq)
     assert out["kind"] == "rule"

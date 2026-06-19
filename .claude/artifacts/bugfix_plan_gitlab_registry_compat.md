@@ -4,8 +4,8 @@
 
 - **Plan:** bugfix_gitlab_registry_compat
 - **Active phase:** 7 — Commit & Document (complete)
-- **Step:** awaiting /finalize (GitLab confirmed; human merges + closes #11)
-- **Last update:** 2026-06-19 (after cc11b6b: confirmed end-to-end against real GitLab SaaS — release/add/publish succeed; GitLab also rejected the custom artifactType, now dropped)
+- **Step:** awaiting /finalize (review-fix loop applied all 5 clusters + both deferred items; uncommitted)
+- **Last update:** 2026-06-19 (max-tier swarm-review + Codex gate, then review-fix: cleared all 5 clusters; then both deferred items — dry-run preview hint for verbatim-repository name-mismatch, and wired Identifier::parse to the shared OCI grammar (release/add/install now fail-fast, asymmetry closed). Gate green: 982 unit + 279 acceptance, clippy -D warnings)
 
 ---
 
@@ -42,9 +42,10 @@ all confirmed by code investigation:
 ## Fix Approach (by axis)
 
 - **Axis A** — config descriptor `mediaType` → `application/vnd.oci.empty.v1+json`
-  (const `OCI_EMPTY_CONFIG_MEDIA_TYPE`), keep custom `artifactType`, re-add
-  `com.grimoire.kind` annotation. Read path becomes 3-tier: `artifactType` →
-  legacy `config.mediaType` → `com.grimoire.kind` annotation.
+  (const `OCI_EMPTY_CONFIG_MEDIA_TYPE`); **drop the custom `artifactType`**
+  (GitLab rejects it — confirmed against real SaaS), kind carried by the re-added
+  `com.grimoire.kind` annotation. Read path is 3-tier (backward-compat):
+  legacy `artifactType` → legacy `config.mediaType` → `com.grimoire.kind` annotation.
 - **Axis B** — `repository_prefix` (manifest) + `repository` (per-entry) on
   `publish.toml`; `entry_repository` resolver: per-entry > prefix/{name} >
   kind-subdir/{name}. Charset/structural validation, exit 65.

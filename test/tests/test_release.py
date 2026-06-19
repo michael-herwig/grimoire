@@ -71,6 +71,33 @@ def test_release_wire_shape_empty_config_and_kind_annotation(
     )
 
 
+def test_release_then_add_infers_skill_kind_from_real_wire_shape(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    """Issue #11 axis A, the publish-then-read-back guarantee for a *skill*.
+
+    The harness (`registry.py push_artifact`) deliberately stamps a legacy
+    `artifactType`, so the `make_artifact`-based add tests resolve kind via
+    read tier 1 — they never exercise grim's actual annotation-only output.
+    This releases a real skill through `grim release` (no `artifactType`, kind
+    in `com.grimoire.kind` only) and then `grim add`s it back with no `--kind`,
+    proving grim can still type an artifact it published. Previously only the
+    `agent` kind had this end-to-end coverage (`test_agents.py`).
+    """
+    skill = _local_skill(project_dir)
+    repo = f"{registry}/{unique_repo}/code-review"
+    runner = grim_at(project_dir)
+
+    out = runner.json("release", str(skill), f"{repo}:1.2.3")
+    assert out["pushed"] is True
+
+    write_config(project_dir)
+    added = runner.json("add", f"{repo}:1.2.3")
+    assert added["kind"] == "skill", (
+        f"grim must infer skill from its own annotation-only manifest, got {added.get('kind')!r}"
+    )
+
+
 def test_release_pushes_with_cascade_tags(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:

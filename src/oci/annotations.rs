@@ -389,21 +389,38 @@ mod tests {
     #[test]
     fn kind_from_manifest_artifact_type_tier_wins_when_present() {
         use crate::oci::manifest::OciManifest;
-        // A legacy / non-GitLab artifact that still carries `artifactType`
-        // alongside the OCI empty config and the `com.grimoire.kind` annotation:
-        // tier 1 (`artifactType`) wins, and the empty config must NOT be
-        // mistaken for a kind. (grim's own output today carries no
-        // `artifactType` — that path is the tier-3 test below.)
+        // CONFLICTING tiers prove the precedence ORDER, not just that some tier
+        // resolves: `artifactType` says skill, the legacy config type says rule,
+        // the annotation says agent. Tier 1 (`artifactType`) must win → skill.
+        // A reordered resolver (annotation- or config-first) fails this.
         let mut annotations = BTreeMap::new();
-        annotations.insert("com.grimoire.kind".to_string(), "skill".to_string());
+        annotations.insert("com.grimoire.kind".to_string(), "agent".to_string());
         let manifest = OciManifest {
             media_type: None,
             artifact_type: Some("application/vnd.grimoire.skill.v1".to_string()),
-            config_media_type: Some("application/vnd.oci.empty.v1+json".to_string()),
+            config_media_type: Some("application/vnd.grimoire.rule.config.v1+json".to_string()),
             layers: vec![],
             annotations,
         };
         assert_eq!(kind_from_manifest(&manifest), Some(crate::oci::ArtifactKind::Skill));
+    }
+
+    #[test]
+    fn kind_from_manifest_config_tier_wins_over_annotation() {
+        use crate::oci::manifest::OciManifest;
+        // No `artifactType`; the legacy config type (tier 2) and the annotation
+        // (tier 3) disagree — tier 2 must win. Locks the tier-2-over-tier-3
+        // order so the legacy-config read path cannot be silently demoted.
+        let mut annotations = BTreeMap::new();
+        annotations.insert("com.grimoire.kind".to_string(), "agent".to_string());
+        let manifest = OciManifest {
+            media_type: None,
+            artifact_type: None,
+            config_media_type: Some("application/vnd.grimoire.rule.config.v1+json".to_string()),
+            layers: vec![],
+            annotations,
+        };
+        assert_eq!(kind_from_manifest(&manifest), Some(crate::oci::ArtifactKind::Rule));
     }
 
     #[test]

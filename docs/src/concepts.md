@@ -48,10 +48,12 @@ addressed by content digest, exactly like a container image layer. Identical
 content is stored once and is immutable: a `sha256:…` digest always names the
 same bytes.
 
-Each artifact declares its kind through its OCI `artifactType` —
-`application/vnd.grimoire.skill.v1`, `…rule.v1`, `…agent.v1`, or `…bundle.v1` —
-rather than a custom annotation. A registry, `grim`, or any OCI-aware tool can therefore tell
-a Grimoire artifact apart from an ordinary container image without unpacking it.
+Each artifact declares its kind through a `com.grimoire.kind` manifest
+annotation — `skill`, `rule`, `agent`, or `bundle` — so `grim` (or any
+OCI-aware tool that reads manifest annotations) can tell a Grimoire artifact
+apart without unpacking it. The manifest's config descriptor is the OCI empty
+config, which keeps the wire format acceptable to every registry, including
+GitLab (see [Registry compatibility](./configuration.md#registry-compatibility)).
 
 This is why Grimoire needs no server of its own. Any registry that speaks the
 [distribution spec][oci] — [GHCR][ghcr], [Docker Hub][hub], a private

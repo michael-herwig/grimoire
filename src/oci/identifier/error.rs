@@ -48,4 +48,10 @@ pub enum IdentifierErrorKind {
     /// The identifier contains a directory traversal segment (`.` or `..`).
     #[error("identifier must not use '.' or '..' as a path segment")]
     DirectoryTraversal,
+    /// The repository portion violates the OCI name-component grammar
+    /// (illegal character, or a misplaced/doubled separator).
+    #[error(
+        "repository must match the OCI name grammar: lowercase [a-z0-9] runs joined by '.', '_', '__', or '-', with no leading, trailing, or doubled separator"
+    )]
+    RepositoryGrammar,
 }

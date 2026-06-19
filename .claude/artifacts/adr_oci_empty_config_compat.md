@@ -162,18 +162,39 @@ deterministic `{}`.
   against GitLab Container Registry SaaS without any server-side configuration
   — confirmed against `registry.gitlab.com/michael-herwig/grimoire-registry-test`
   on 2026-06-19.
-- Wire format is spec-blessed: OCI image-spec "Guidance for an Empty
-  Descriptor" + ORAS convention.
+- Wire format uses the spec-blessed OCI empty config descriptor (OCI
+  image-spec "Guidance for an Empty Descriptor"). Precision: the empty config
+  *blob* is spec-blessed, but OCI image-spec v1.1.0 says `artifactType` MUST be
+  set when the config media type is the empty value, and the ORAS convention
+  pairs the empty config *with* an `artifactType`. Emitting the empty config
+  with NO `artifactType` (forced by GitLab's allowlist) is therefore a
+  deliberate, documented spec deviation — see Negative/Risks. The per-registry
+  follow-up that re-adds `artifactType` where accepted restores conformance.
 - Full backward compatibility on both read directions (see table above).
 
 **Negative / Risks:**
 - Manifest shape change → existing published artifacts get new digests on
   re-release. Acceptable: provisional project, no install base to migrate.
 - Dropping `artifactType` loses OCI-native type discrimination: Referrers API
-  filtering, signatures, SBOMs, and attestations all key on `artifactType`. grim
-  does not use any of these today. A per-registry strategy (emit `artifactType`
-  only to registries known to accept it) is a safe, non-breaking follow-up if
-  needed.
+  *type filtering* keys on `artifactType`. With it absent, a referrers response
+  descriptor falls back to the config media type (`application/vnd.oci.empty.v1+json`)
+  — non-discriminating — so filtering grim artifacts by kind via
+  `?artifactType=…` will not work. This affects not only signatures/SBOMs/
+  attestations but also any future `grim list --remote` that would enumerate
+  grim artifacts by kind. grim uses none of these today. Note (precision):
+  cosign can still sign a grim artifact — `cosign sign <digest>` works by
+  subject digest and requires no `artifactType` on the subject; what is lost is
+  referrers-API *discovery* of those signatures by type. A per-registry strategy
+  (emit `artifactType` only to registries known to accept it) is a safe,
+  non-breaking follow-up if needed.
+- Kind discrimination now rests entirely on a Grimoire-private manifest
+  annotation (`com.grimoire.kind`), which any publisher can set — it is
+  trivially forgeable, with no registry-allowlist semantics behind it. The read
+  path is strict (an unknown/mismatched annotation yields `None` → `grim add`
+  asks for `--kind`), so this is not a correctness defect, but it does narrow
+  the trust model versus an OCI-native discriminator. This relocates a
+  pre-existing property (the old `artifactType` was equally publisher-set), not
+  a new weakness; payload-shape cross-validation remains a possible follow-up.
 
 ## Validation
 
@@ -212,3 +233,4 @@ deterministic `{}`.
 |------|--------|--------|
 | 2026-06-19 | Michael Herwig | Initial draft, accepted; supersedes adr_oci_artifact_type.md |
 | 2026-06-19 | Michael Herwig | Revised after real-GitLab testing: drop the custom artifactType too (GitLab rejects it); kind rides on the com.grimoire.kind annotation |
+| 2026-06-19 | Michael Herwig | Precision amendments (max-tier review): note the empty-config-without-artifactType spec deviation (OCI 1.1 MUST); expand the Referrers/cosign forward-cost (sign-by-digest still works; type-filtering + future `grim list --remote` lost); record that kind now rests on a forgeable annotation (pre-existing trust model, relocated) |

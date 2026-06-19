@@ -110,6 +110,12 @@ Key behaviors — confirmed invariants, not subject to minor-release drift:
   resume from a specific entry.
 - **`pin = true` is bundle-only.** Setting it on a skill, rule, or agent
   entry is a validation error (exit 65).
+- **Namespace overrides.** By default an entry publishes to
+  `{registry}/{kind-subdir}/{name}`. A manifest-level `repository_prefix`
+  replaces the `{kind-subdir}` segment (`{prefix}/{name}`); a per-entry
+  `repository` is used verbatim (name not appended) and wins over the prefix.
+  Needed for registries that require a group/project path, e.g. GitLab.
+  Full schema and charset rules: [Batch publishing with a manifest][batch-publish].
 
 Common flags — confirm current spelling with `grim publish --help`:
 

@@ -40,8 +40,9 @@ const GRIMOIRE_LAYER_MEDIA_TYPE: &str = "application/vnd.grimoire.artifact.layer
 /// per-kind config type the project used before `adr_oci_empty_config_compat.md`
 /// is off GitLab's referenced-media-type allowlist and made GitLab reject the
 /// manifest (`400 MANIFEST_INVALID`); the empty type is on every registry's
-/// allowlist. The kind now rides on the `artifactType` plus the
-/// `com.grimoire.kind` annotation, never the config descriptor.
+/// allowlist. The kind rides solely on the `com.grimoire.kind` annotation —
+/// no `artifactType` is written either (GitLab rejects a custom one) — and the
+/// config descriptor never carries it (`adr_oci_empty_config_compat.md`).
 const OCI_EMPTY_CONFIG_MEDIA_TYPE: &str = "application/vnd.oci.empty.v1+json";
 /// The media type of an OCI image manifest.
 const OCI_MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
@@ -455,7 +456,9 @@ impl OciAccess for RegistryClient {
             config: OciDescriptor {
                 media_type: OCI_EMPTY_CONFIG_MEDIA_TYPE.to_string(),
                 digest: config_digest.to_string(),
-                size: i64::try_from(config.len()).unwrap_or(i64::MAX),
+                // The empty config blob is the 2-byte `{}`; its length fits an
+                // i64 exactly, so this cast can never wrap.
+                size: config.len() as i64,
                 urls: None,
                 annotations: None,
                 artifact_type: None,

@@ -21,6 +21,7 @@
 use clap::Args;
 
 use crate::api::search_report::{SearchEntry, SearchReport};
+use crate::catalog::registry_catalog::{CATALOG_GATED_REGISTRIES, REGISTRY_COMPAT_DOCS_URL};
 use crate::catalog::{BadgeContext, SearchQuery};
 use crate::cli::exit_code::ExitCode;
 use crate::context::Context;
@@ -135,17 +136,12 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
     // quiet.
     if warn_unsupported_browse(ctx.offline(), entries.is_empty()) {
         tracing::warn!(
-            "no catalog entries; some registries (GitLab SaaS, GHCR, Docker Hub) gate the `_catalog` browse endpoint and an empty list is expected — install/add/release by explicit reference works regardless; see {REGISTRY_COMPAT_DOCS}"
+            "no catalog entries; some registries ({CATALOG_GATED_REGISTRIES}) gate the `_catalog` browse endpoint and an empty list is expected — install/add/release by explicit reference works regardless; see {REGISTRY_COMPAT_DOCS_URL}"
         );
     }
 
     Ok((SearchReport::new(entries), ExitCode::Success))
 }
-
-/// Docs anchor for the registry-compatibility table (which registries support
-/// `_catalog` browse vs. explicit-reference operations).
-const REGISTRY_COMPAT_DOCS: &str =
-    "https://michael-herwig.github.io/grimoire/configuration.html#registry-compatibility";
 
 /// Whether to warn that a registry's `_catalog` browse may be unsupported.
 ///

@@ -145,9 +145,8 @@ Publishing runs the same gate as skills and rules: every
 `<vendor>.<field>` metadata key is validated against the vendor
 registries, and an invalid literal (say `claude.permission-mode: yolo`)
 fails the release with exit 65 before anything reaches the registry. The
-artifact publishes with `artifactType`
-`application/vnd.grimoire.agent.v1`, so [`grim add`](./commands.md#add)
-infers the kind with no flag.
+artifact publishes with a `com.grimoire.kind` annotation of `agent`, so
+[`grim add`](./commands.md#add) infers the kind with no flag.
 
 Catalog metadata (`summary`, `keywords`) is authored in the `metadata`
 map, like a skill — see [catalog metadata](./publishing.md#metadata).
@@ -160,7 +159,7 @@ table of `grimoire.toml`; the lock carries `[[agent]]` entries; and
 and rules:
 
 ```sh
-grim add ghcr.io/acme/code-reviewer:1     # kind inferred from artifactType
+grim add ghcr.io/acme/code-reviewer:1     # kind inferred from com.grimoire.kind
 grim install                               # projects into every selected client
 grim status                                # shows the agent row
 grim uninstall agent code-reviewer         # removes files + declaration

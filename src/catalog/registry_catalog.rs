@@ -49,6 +49,18 @@ pub const CATALOG_TTL_SECONDS: i64 = 3600;
 /// repositories. Walking the entire registry is an explicit cut-line.
 pub const MAX_CATALOG_REPOS: usize = 500;
 
+/// Registries that gate the host-level OCI `_catalog` browse endpoint, so a
+/// `grim search` browse against them legitimately returns nothing. Single
+/// source of truth for the user-facing list shared by `grim search` (stderr
+/// warning) and the TUI (status line).
+pub const CATALOG_GATED_REGISTRIES: &str = "GitLab SaaS, GHCR, Docker Hub";
+
+/// Docs anchor for the registry-compatibility table (which registries support
+/// `_catalog` browse vs. explicit-reference operations). Single source of truth
+/// for the link emitted by `grim search` and the TUI.
+pub const REGISTRY_COMPAT_DOCS_URL: &str =
+    "https://michael-herwig.github.io/grimoire/configuration.html#registry-compatibility";
+
 /// On-disk catalog envelope version.
 ///
 /// Closed internal on-disk discriminant — not `#[non_exhaustive]`, per the
@@ -894,11 +906,15 @@ mod tests {
             "org.opencontainers.image.source".to_string(),
             "https://github.com/acme/code-review".to_string(),
         );
+        // grim's REAL wire shape since `adr_oci_empty_config_compat.md`: NO
+        // `artifactType`, OCI empty config, kind carried solely by the
+        // `com.grimoire.kind` annotation. Catalog kind resolution therefore
+        // exercises read tier 3 here — the path grim actually publishes —
+        // rather than the legacy `artifactType` tier.
+        annotations.insert("com.grimoire.kind".to_string(), "skill".to_string());
         OciManifest {
             media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
-            artifact_type: Some(crate::oci::ArtifactKind::Skill.artifact_type().to_string()),
-            // OCI empty config — the actual wire shape since
-            // `adr_oci_empty_config_compat.md` (kind resolves via artifactType).
+            artifact_type: None,
             config_media_type: Some("application/vnd.oci.empty.v1+json".to_string()),
             layers: vec![Descriptor {
                 digest: Algorithm::Sha256.hash(b"payload"),

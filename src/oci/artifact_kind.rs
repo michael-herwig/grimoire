@@ -6,15 +6,14 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The manifest annotation key carrying the artifact kind as a
-/// registry-agnostic fallback discriminator (`"skill"` / `"rule"` /
-/// `"agent"` / `"bundle"`). The authoritative wire discriminator is the OCI
-/// `artifactType`; this annotation is the third read tier (after
-/// `artifactType` and the legacy config media type) so a registry that only
-/// round-trips annotations — or that rejects the custom `artifactType` —
-/// still types the artifact. Re-introduced after
-/// `adr_oci_empty_config_compat.md`; the value matches the pre-ADR format so
-/// even older grim readers resolve a new artifact's kind.
+/// The manifest annotation key carrying the artifact kind (`"skill"` /
+/// `"rule"` / `"agent"` / `"bundle"`). Since `adr_oci_empty_config_compat.md`
+/// this is the **sole discriminator grim writes** — no custom `artifactType`
+/// or config media type reaches the wire (GitLab rejects both). On the read
+/// path it is the third (last) resolution tier, after the legacy `artifactType`
+/// and legacy config media type that pre-ADR artifacts still carry. The value
+/// matches the pre-ADR format so even older grim readers resolve a new
+/// artifact's kind.
 pub const KIND_ANNOTATION: &str = "com.grimoire.kind";
 
 /// A Grimoire-managed artifact kind.
@@ -58,9 +57,9 @@ impl ArtifactKind {
 
     /// Parse the lowercase kind string (`skill`/`rule`/`agent`/`bundle`)
     /// into a kind.
-    /// `None` for any other string. Used to interpret the `--kind` CLI flag;
-    /// the on-the-wire discriminator is the OCI `artifactType` (see
-    /// [`Self::artifact_type`]), not this string.
+    /// `None` for any other string. Used to interpret the `--kind` CLI flag
+    /// and the `com.grimoire.kind` annotation (the on-the-wire discriminator,
+    /// see [`KIND_ANNOTATION`]); this string is not itself the wire format.
     pub fn from_kind_str(s: &str) -> Option<Self> {
         match s {
             "skill" => Some(Self::Skill),
@@ -85,8 +84,11 @@ impl ArtifactKind {
         }
     }
 
-    /// The OCI config-descriptor media type stamped on a published manifest;
-    /// the pre-1.1 fallback discriminator read when `artifactType` is absent.
+    /// The legacy per-kind OCI config-descriptor media type. No longer stamped
+    /// on the wire (new manifests carry the OCI empty config — GitLab rejects a
+    /// custom config type, see `adr_oci_empty_config_compat.md`); used only on
+    /// the READ path as the second kind-resolution tier for artifacts published
+    /// before that change.
     pub fn config_media_type(self) -> &'static str {
         match self {
             Self::Skill => "application/vnd.grimoire.skill.config.v1+json",

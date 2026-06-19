@@ -62,8 +62,9 @@ declares a skill, rule, [agent](./agents.md), or bundle and immediately pins it
 in the lock. `<reference>` is the only required argument —
 `registry/repo:tag` or `registry/repo@sha256:…`.
 
-When `--kind` is omitted, the kind is inferred from the artifact's OCI
-`artifactType` (`application/vnd.grimoire.<kind>.v1`) set at release time. When
+When `--kind` is omitted, the kind is inferred from the artifact's
+`com.grimoire.kind` manifest annotation set at release time (artifacts
+published by older grim are still typed from their legacy `artifactType`). When
 `--name` is omitted, the binding name defaults to the reference's last path
 segment. If the kind cannot be inferred (for example, a non-Grimoire image),
 `add` errors and asks you to supply `--kind` explicitly.

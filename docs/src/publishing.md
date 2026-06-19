@@ -325,8 +325,9 @@ that does not set its own `repository`. The published repository becomes
 **Per-entry `repository`** — a string inside a `[skills.<name>]`,
 `[rules.<name>]`, `[agents.<name>]`, or `[bundles.<name>]` sub-table.
 The value is used verbatim as the full repository path; the entry name is
-**not** appended (same behavior as the `--registry` path in
-`grim release`). Wins over `repository_prefix` when both are set.
+**not** appended — the same way `grim release` uses the repository portion
+of its positional `registry/repo:version` reference verbatim. Wins over
+`repository_prefix` when both are set.
 
 Resolution precedence per entry (highest first):
 
@@ -353,12 +354,13 @@ The reporter's working example: registry `registry.gitlab.com`, prefix
 `durzn-technology/hearth/skill`, skill `hearth` → resolves to
 `registry.gitlab.com/durzn-technology/hearth/skill/hearth`.
 
-**Charset rules** — each `/`-separated segment of both fields must start
-with a character in `[a-z0-9]` and contain only `[a-z0-9._-]`. Leading
-or trailing `/`, empty `//` segments, `.` or `..` segments, and embedded
-`:` are all rejected at manifest validation time with exit 65 (data
-error). An invalid prefix or repository aborts the whole manifest before
-any push.
+**Charset rules** — each `/`-separated segment of both fields must match
+the OCI name grammar: runs of `[a-z0-9]` joined by a single `.` or `_`, a
+double `__`, or a run of `-`, with no leading, trailing, or doubled
+separator. A leading or trailing `/`, empty `//` segments, `.` or `..`
+segments, an embedded `:`, uppercase, and a path longer than 255 characters
+are all rejected at manifest validation time with exit 65 (data error). An
+invalid prefix or repository aborts the whole manifest before any push.
 
 A manifest with neither field is unchanged: `grim.ocx.sh/skills/grim-usage`
 style paths are the default and remain fully backward compatible.

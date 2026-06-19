@@ -16,7 +16,102 @@ use serde::{Deserialize, Serialize};
 use super::Digest;
 use error::{IdentifierError, IdentifierErrorKind};
 
-const MAX_REPOSITORY_LENGTH: usize = 255;
+/// Maximum repository-path length accepted by the OCI distribution spec.
+pub(crate) const MAX_REPOSITORY_LENGTH: usize = 255;
+
+/// Why an authored OCI repository path is rejected by [`repository_path_issue`].
+///
+/// The caller renders the user-facing message (e.g. `grim publish` attributes
+/// it to the manifest and exits 65), so this enum carries only the reason, not
+/// a formatted string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RepositoryPathIssue {
+    /// The value is the empty string.
+    Empty,
+    /// The value embeds a `:` — that would smuggle a tag into the reference.
+    ContainsColon,
+    /// The value starts or ends with `/`.
+    LeadingOrTrailingSlash,
+    /// The value contains an empty `//` path segment.
+    EmptySegment,
+    /// A `/`-separated segment violates the OCI path-component grammar.
+    SegmentGrammar,
+    /// The value exceeds [`MAX_REPOSITORY_LENGTH`].
+    TooLong,
+}
+
+/// Validate an authored OCI repository path (no tag, no digest) against the
+/// distribution-spec name grammar and length limit. `None` when valid.
+///
+/// This is the single source of truth for the repository-path alphabet, so an
+/// authoring-time gate (`grim publish`'s `repository_prefix` / per-entry
+/// `repository`) and any other consumer reject the same set. Each
+/// `/`-separated component must match the OCI grammar
+/// `[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*`: lowercase-alnum runs joined by a
+/// single `.`/`_`, a `__`, or a run of `-`, with no leading, trailing, or
+/// otherwise-doubled separator. Total length is bounded by
+/// [`MAX_REPOSITORY_LENGTH`].
+///
+/// Both [`Identifier::parse`] (so `grim release`/`add`/`install` fail fast on a
+/// malformed repository instead of at push) and `grim publish`'s authoring-time
+/// gate call this, so every entry point rejects the same set.
+pub(crate) fn repository_path_issue(value: &str) -> Option<RepositoryPathIssue> {
+    if value.is_empty() {
+        return Some(RepositoryPathIssue::Empty);
+    }
+    if value.contains(':') {
+        return Some(RepositoryPathIssue::ContainsColon);
+    }
+    if value.starts_with('/') || value.ends_with('/') {
+        return Some(RepositoryPathIssue::LeadingOrTrailingSlash);
+    }
+    if value.len() > MAX_REPOSITORY_LENGTH {
+        return Some(RepositoryPathIssue::TooLong);
+    }
+    for segment in value.split('/') {
+        if segment.is_empty() {
+            return Some(RepositoryPathIssue::EmptySegment);
+        }
+        if !is_valid_repository_segment(segment) {
+            return Some(RepositoryPathIssue::SegmentGrammar);
+        }
+    }
+    None
+}
+
+/// Whether `segment` is one OCI path component:
+/// `[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*`. Lowercase-alnum runs joined by a
+/// single `.` or `_`, a double `__`, or a run of `-`; no leading or trailing
+/// separator, no foreign characters.
+fn is_valid_repository_segment(segment: &str) -> bool {
+    let is_alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    let bytes = segment.as_bytes();
+    match (bytes.first(), bytes.last()) {
+        (Some(&first), Some(&last)) if is_alnum(first) && is_alnum(last) => {}
+        _ => return false,
+    }
+    let mut i = 0;
+    while i < bytes.len() {
+        if is_alnum(bytes[i]) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && matches!(bytes[i], b'.' | b'_' | b'-') {
+            i += 1;
+        }
+        if i == start {
+            // A character that is neither alnum nor a known separator.
+            return false;
+        }
+        let sep = &segment[start..i];
+        let separator_ok = sep == "." || sep == "_" || sep == "__" || sep.bytes().all(|c| c == b'-');
+        if !separator_ok {
+            return false;
+        }
+    }
+    true
+}
 
 /// A parsed OCI identifier with registry, repository, optional tag, and
 /// optional digest.
@@ -253,6 +348,19 @@ fn parse_internal(input: &str, default_registry: &str) -> Result<Identifier, Ide
             kind: IdentifierErrorKind::RepositoryTooLong,
         });
     }
+    // Enforce the full OCI name-component grammar via the shared predicate so
+    // `grim release`/`add`/`install` reject a malformed repository at parse
+    // time (clean error) instead of deep at push (opaque registry 400) — and
+    // so they reject the same paths `grim publish` does. Uppercase, length, and
+    // `.`/`..` traversal are reported above (and by `validate_segments`) with
+    // more specific kinds; this catches the remaining grammar violations
+    // (misplaced/doubled separators, illegal characters, empty/edge segments).
+    if repository_path_issue(&repository).is_some() {
+        return Err(IdentifierError {
+            input: input.to_string(),
+            kind: IdentifierErrorKind::RepositoryGrammar,
+        });
+    }
 
     Ok(Identifier {
         registry,
@@ -323,6 +431,51 @@ fn prepend_domain(name: &str, domain: &str) -> String {
 mod tests {
     use super::*;
 
+    // ── Repository-path grammar predicate ────────────────────────────
+
+    #[test]
+    fn repository_path_issue_accepts_valid_oci_paths() {
+        for ok in [
+            "hearth",
+            "durzn-technology/hearth/skill/hearth",
+            "a/b_c/d.e/f-g",
+            "a__b/c--d", // double underscore + dash run are valid separators
+            "skills/grim-usage",
+        ] {
+            assert_eq!(repository_path_issue(ok), None, "{ok:?} should be valid");
+        }
+    }
+
+    #[test]
+    fn repository_path_issue_flags_each_violation() {
+        use RepositoryPathIssue::*;
+        let cases: &[(&str, RepositoryPathIssue)] = &[
+            ("", Empty),
+            ("has:tag", ContainsColon),
+            ("/leading", LeadingOrTrailingSlash),
+            ("trailing/", LeadingOrTrailingSlash),
+            ("a//b", EmptySegment),
+            ("group-/proj", SegmentGrammar),  // trailing separator (Codex bypass)
+            ("group./proj", SegmentGrammar),  // trailing dot
+            ("grp/-leading", SegmentGrammar), // leading separator
+            ("a..b/c", SegmentGrammar),       // doubled dot
+            ("a._b/c", SegmentGrammar),       // mixed doubled separator
+            ("UPPER/case", SegmentGrammar),   // uppercase
+            ("a/b@c", SegmentGrammar),        // foreign character
+        ];
+        for (value, want) in cases {
+            assert_eq!(repository_path_issue(value), Some(*want), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn repository_path_issue_enforces_length_limit() {
+        let at_limit = "b".repeat(MAX_REPOSITORY_LENGTH);
+        assert_eq!(repository_path_issue(&at_limit), None);
+        let over = "b".repeat(MAX_REPOSITORY_LENGTH + 1);
+        assert_eq!(repository_path_issue(&over), Some(RepositoryPathIssue::TooLong));
+    }
+
     // ── Strict parse (explicit registry required) ────────────────────
 
     #[test]
@@ -371,6 +524,39 @@ mod tests {
     fn parse_rejects_dot_traversal() {
         let err = Identifier::parse("ghcr.io/org/./evil").unwrap_err();
         assert!(matches!(err.kind, IdentifierErrorKind::DirectoryTraversal));
+    }
+
+    #[test]
+    fn parse_rejects_bad_repository_grammar() {
+        // Misplaced/doubled separators and illegal characters in the repository
+        // now fail fast at parse with RepositoryGrammar (previously slipped
+        // through to a registry 400 at push). Registry hosts and tags are
+        // unaffected.
+        for bad in [
+            "ghcr.io/group-/proj",  // trailing separator in a segment
+            "ghcr.io/group./proj",  // trailing dot
+            "ghcr.io/grp/-leading", // leading separator
+            "ghcr.io/org/a..b",     // doubled dot separator
+        ] {
+            let err = Identifier::parse(bad).unwrap_err();
+            assert!(
+                matches!(err.kind, IdentifierErrorKind::RepositoryGrammar),
+                "{bad:?} should fail with RepositoryGrammar, got {:?}",
+                err.kind
+            );
+        }
+    }
+
+    #[test]
+    fn parse_accepts_valid_repository_grammar() {
+        // The grammar gate must not reject legitimate OCI repositories.
+        for ok in [
+            "ghcr.io/acme/code-review",
+            "registry.gitlab.com/durzn-technology/hearth/skill/hearth",
+            "ghcr.io/a__b/c--d/e.f/g_h",
+        ] {
+            Identifier::parse(ok).unwrap_or_else(|e| panic!("{ok:?} should parse, got {e:?}"));
+        }
     }
 
     #[test]
