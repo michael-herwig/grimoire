@@ -79,11 +79,19 @@ fn snapshot_registry<'a>(ctx: &'a Context, explicit: Option<&'a str>) -> Option<
 /// entry with `default = true` — the canonical on-disk shape the resolver
 /// treats as authoritative. When none is given, emit only the empty
 /// `[skills]` / `[rules]` tables (no `[[registries]]`, no `[options]`).
+///
+/// The registry URL is TOML-escaped via `toml::Value::String` to handle any
+/// embedded quotes or backslashes in the URL (e.g. from unusual registry
+/// configurations).
 fn render_config(registry: Option<&str>) -> String {
     let mut out = String::new();
     if let Some(reg) = registry {
+        // TOML-escape the url value so quotes or backslashes in the registry
+        // string produce valid TOML, consistent with how `write_config` in
+        // `add.rs` escapes tree_separators.
+        let escaped_url = toml::Value::String(reg.to_string()).to_string();
         out.push_str("[[registries]]\n");
-        out.push_str(&format!("url = \"{reg}\"\n"));
+        out.push_str(&format!("url = {escaped_url}\n"));
         out.push_str("default = true\n\n");
     }
     out.push_str("[skills]\n\n[rules]\n");
@@ -155,6 +163,30 @@ mod tests {
         let ctx = Context::new(&opts);
         assert_eq!(snapshot_registry(&ctx, None), Some("flag.example"));
         assert_eq!(snapshot_registry(&ctx, Some("init.example")), Some("init.example"));
+    }
+
+    #[test]
+    fn render_config_toml_escapes_url_with_special_chars() {
+        // S1 (CWE-116): a registry url containing a backslash or quote must
+        // produce valid TOML that round-trips to the same string — not break
+        // the TOML parser or silently truncate the url.
+        let url_with_backslash = r"example.io/org\repo";
+        let url_with_quote = r#"example.io/org"repo"#;
+
+        for url in &[url_with_backslash, url_with_quote] {
+            let body = render_config(Some(url));
+            let cfg = crate::config::project_config::ProjectConfig::from_toml_str(&body)
+                .unwrap_or_else(|e| panic!("render_config({url:?}) produced invalid TOML: {e}"));
+            assert_eq!(
+                cfg.registries.len(),
+                1,
+                "must have exactly one [[registries]] entry for url={url:?}"
+            );
+            assert_eq!(
+                cfg.registries[0].url, *url,
+                "url must round-trip through TOML escaping for url={url:?}"
+            );
+        }
     }
 
     #[test]
