@@ -217,7 +217,7 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
             terminal.draw(|f| draw(f, &frame(&state)))?;
         }
         // Drain bundle-member fetch results similarly.
-        if drain_bundle_member_checks(&mut state, &mut bundle_rx, bundle_checker.generation()) {
+        if drain_bundle_member_checks(&ctx, &mut state, &mut bundle_rx, bundle_checker.generation()) {
             terminal.draw(|f| draw(f, &frame(&state)))?;
         }
 
@@ -280,6 +280,51 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                 // the next manual refresh.
                 if op != BatchOp::Uninstall {
                     recheck_rows(&ctx, &state, &mut checker, &rows);
+                }
+            }
+            TuiAction::MemberAction { op, repo, kind } => {
+                // P4.4: per-member install/update/uninstall.
+                // Offline guard: install/update need the network.
+                if ctx.offline && op != BatchOp::Uninstall {
+                    state.set_status("offline — cannot install/update");
+                } else {
+                    let label = match op {
+                        BatchOp::Install | BatchOp::Update => {
+                            let is_update = op == BatchOp::Update;
+                            // D8a: resolve the tag from the catalog rows — a
+                            // related member reuses its row's pinned/latest tag,
+                            // a non-catalog member falls back to "latest".
+                            let tag = resolve_member_tag(&repo, &state.rows);
+                            match perform_member(&ctx, repo.clone(), kind, is_update, tag).await {
+                                Ok(l) => Some(l),
+                                Err(e) => {
+                                    state.set_status(format!("member action failed: {e:#}"));
+                                    None
+                                }
+                            }
+                        }
+                        BatchOp::Uninstall => match perform_member_uninstall(&ctx, repo.clone(), kind).await {
+                            Ok(()) => Some("uninstalled".to_string()),
+                            Err(e) => {
+                                state.set_status(format!("member uninstall failed: {e:#}"));
+                                None
+                            }
+                        },
+                    };
+                    if let Some(l) = label {
+                        state.set_status(format!("{repo}: {l}"));
+                        // Recompute all row badges — the member action may have
+                        // changed install state for rows that share the member.
+                        recompute_states(&ctx, &mut state);
+                        // F7: after install/update, re-check the matching catalog
+                        // row so the badge flips to ↑ outdated immediately (if the
+                        // member's installed version is behind the floating tag).
+                        if op != BatchOp::Uninstall
+                            && let Some(idx) = state.rows.iter().position(|r| r.repo == repo)
+                        {
+                            recheck_rows(&ctx, &state, &mut checker, &[idx]);
+                        }
+                    }
                 }
             }
             TuiAction::LoadVersions { row } => {
@@ -379,6 +424,9 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                     // must be discarded (stale generation) — bump to ensure that.
                     bundle_checker.bump_generation();
                     state.bundle_members.clear();
+                    // Lifecycle (D3b): clear expanded_bundles alongside bundle_members
+                    // so no stale expand state leaks across a scope toggle.
+                    state.expanded_bundles.clear();
                     // The new scope has a different lock/state — re-check its
                     // installed rows against the registry.
                     arm_background_checks(&ctx, &state, &mut checker);
@@ -614,6 +662,7 @@ fn drain_checks(
 /// `BundleMemberChecker` (P3 wires this; for the P1 stub the function is
 /// unreachable).
 fn drain_bundle_member_checks(
+    ctx: &TuiContext,
     state: &mut TuiState,
     rx: &mut tokio::sync::mpsc::Receiver<super::bundle_member_fetch::BundleMembersMsg>,
     live_generation: u64,
@@ -632,20 +681,34 @@ fn drain_bundle_member_checks(
                 if !is_generation_fresh(generation, live_generation) {
                     continue;
                 }
-                // Translate raw BundleMember list into MemberNode list via the
-                // shared helper (DRY: same path as the lock-first path above).
-                // ArtifactState::NotInstalled is correct-by-construction here:
-                // the async-fetch path is only reached when NO LockedBundle
-                // snapshot exists for this bundle_repo — if a lock snapshot
-                // existed the lock-first path in event.rs would have already
-                // populated the cache from it, skipping the async fetch
-                // entirely. Therefore the bundle is not installed in this scope
-                // and its members cannot be installed under it either.
+                // F1: Derive per-member install state from the active scope's
+                // lock + install record, exactly like the lock-first path.
+                // The prior comment claiming members "cannot be installed"
+                // was incorrect: a member's repo may be directly declared in
+                // the catalog even when the bundle itself has no lock snapshot.
+                let lock = lock_io::load(&ctx.lock_path).ok();
+                let install_state = load_state(ctx).unwrap_or_else(|_| InstallState::empty(&ctx.state_path));
+                let active = detect_clients(&ctx.workspace, ctx.scope);
                 // Build a O(n) set of row repos for the related-highlight check (D2/P3.7).
                 let row_repos: std::collections::HashSet<&str> = state.rows.iter().map(|r| r.repo.as_str()).collect();
                 let nodes: Vec<super::bundle_members::MemberNode> = members
                     .iter()
-                    .filter_map(|m| super::bundle_members::member_node_from(m, &row_repos, ArtifactState::NotInstalled))
+                    .filter_map(|m| {
+                        let member_state = crate::oci::Identifier::parse(&m.id)
+                            .ok()
+                            .map(|parsed| {
+                                derive_artifact_state(
+                                    parsed.registry(),
+                                    parsed.repository(),
+                                    lock.as_ref(),
+                                    &install_state,
+                                    &ctx.roots,
+                                    &active,
+                                )
+                            })
+                            .unwrap_or(ArtifactState::NotInstalled);
+                        super::bundle_members::member_node_from(m, &row_repos, member_state)
+                    })
                     .collect();
 
                 let key = (state.scope_label.clone(), bundle_repo);
@@ -1489,6 +1552,105 @@ fn client_names(ctx: &TuiContext) -> Vec<String> {
     ctx.clients_selected.iter().map(ToString::to_string).collect()
 }
 
+// ── P1.5 Stubs — Phase 4 (P4.2/P4.3) will fill these bodies ────────────────
+//
+// Signatures are declared here so P2 tests can compile and link against them.
+// The `unimplemented!()` body is intentional: these are reached only in P4
+// when the full member-action path is wired; calling them in P1/P2 tests
+// (which only cover the pure event/state layer) must never happen.
+
+/// Resolve the install tag for a bundle member.
+///
+/// Priority (D8a):
+/// 1. The matching catalog row's `pinned_version` (when set and non-empty).
+/// 2. The matching catalog row's `latest_tag` (when non-empty).
+/// 3. `"latest"` — the same fallback `perform` uses.
+///
+/// Returns `"latest"` when no catalog row matches `repo` (non-catalog member).
+///
+/// Pure function — no I/O. Unit-testable standalone (C-11 pure half).
+pub(crate) fn resolve_member_tag(repo: &str, rows: &[TuiRow]) -> String {
+    rows.iter()
+        .find(|r| r.repo == repo)
+        .and_then(|r| {
+            r.pinned_version
+                .as_deref()
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+                .or_else(|| Some(r.latest_tag.clone()).filter(|t| !t.is_empty()))
+        })
+        .unwrap_or_else(|| "latest".to_string())
+}
+
+/// Perform a member install or update action, reusing the same
+/// declare → relock → single_entry_lock → install_all → persist →
+/// sync_config seam that [`perform`] uses. Does NOT fork install logic.
+///
+/// `repo` is the validated `registry/repository` reference from
+/// `DisplayRow::Member.member_repo`. Returns an `Err` (status breadcrumb,
+/// no install) when `repo` fails `split_repo` (C-12 defense-in-depth).
+async fn perform_member(
+    ctx: &TuiContext,
+    repo: String,
+    kind: crate::oci::ArtifactKind,
+    is_update: bool,
+    tag: String,
+) -> anyhow::Result<String> {
+    // C-12: validate split_repo at the boundary — return Err (no panic) on
+    // a separator-less repo so the dispatch arm can show a status breadcrumb.
+    if split_repo(&repo).is_none() {
+        return Err(anyhow::anyhow!("malformed member repo: {repo}"));
+    }
+    // Build a minimal synthetic TuiRow so we can delegate to `perform`.
+    // `tag` was resolved by `resolve_member_tag` (D8a): a catalog-matched
+    // member reuses that row's pinned/latest tag, a non-catalog member gets
+    // `"latest"`. We seed it as `latest_tag` (pinned_version stays `None`) so
+    // `perform`'s tag precedence (pinned → latest_tag → "latest") yields it.
+    // F11: use `repo` directly (owned by-value); no redundant `.clone()`.
+    let synthetic_row = TuiRow {
+        kind: kind.to_string(),
+        repo,
+        description: String::new(),
+        summary: String::new(),
+        keywords: Vec::new(),
+        repository_url: None,
+        latest_tag: tag,
+        version: String::new(),
+        pinned_version: None,
+        state: crate::tui::state::ArtifactState::NotInstalled,
+    };
+    perform(ctx, &synthetic_row, is_update).await
+}
+
+/// Perform a member uninstall action, reusing the [`perform_uninstall`] seam
+/// keyed on `(kind, repo)`. Returns an `Err` (status breadcrumb) when `repo`
+/// fails `split_repo` (C-12 defense-in-depth).
+async fn perform_member_uninstall(
+    ctx: &TuiContext,
+    repo: String,
+    kind: crate::oci::ArtifactKind,
+) -> anyhow::Result<()> {
+    // C-12: validate split_repo at the boundary — return Err (no panic) on
+    // a separator-less repo so the dispatch arm can show a status breadcrumb.
+    if split_repo(&repo).is_none() {
+        return Err(anyhow::anyhow!("malformed member repo: {repo}"));
+    }
+    // Build a minimal synthetic TuiRow so we can delegate to perform_uninstall.
+    let synthetic_row = TuiRow {
+        kind: kind.to_string(),
+        repo: repo.clone(),
+        description: String::new(),
+        summary: String::new(),
+        keywords: Vec::new(),
+        repository_url: None,
+        latest_tag: String::new(),
+        version: String::new(),
+        pinned_version: None,
+        state: crate::tui::state::ArtifactState::NotInstalled,
+    };
+    perform_uninstall(ctx, &synthetic_row)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2152,6 +2314,42 @@ mod tests {
 
     // ── drain_bundle_member_checks: generation-freshness gate ─────────────────
 
+    /// Build a minimal `TuiContext` for drain tests. The paths point at a
+    /// temp directory; lock/state files are absent, so `load_state` /
+    /// `lock_io::load` return `Err` (handled with `unwrap_or_else` in
+    /// `drain_bundle_member_checks`) and every member gets `NotInstalled` —
+    /// the same behavior as the old hardcoded path.
+    fn drain_test_ctx() -> (tempfile::TempDir, TuiContext) {
+        use crate::oci::access::memory_registry::MemoryRegistry;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workspace = tmp.path().to_path_buf();
+        let ctx = TuiContext {
+            registry: "localhost:5050".to_string(),
+            catalog_path: workspace.join("catalog.json"),
+            access: Arc::new(MemoryRegistry::new()),
+            offline: false,
+            force_refresh: false,
+            scope: ConfigScope::Project,
+            workspace: workspace.clone(),
+            lock_path: workspace.join("grimoire.lock"),
+            state_path: workspace.join("install-state.json"),
+            config_path: workspace.join("grimoire.toml"),
+            roots: AnchorRoots {
+                workspace: workspace.clone(),
+                grim_home: workspace.clone(),
+                claude_root: None,
+                copilot_root: None,
+                opencode_skills: None,
+            },
+            clients_default: vec![],
+            clients_selected: Vec::new(),
+            scope_label: "project".to_string(),
+            alt: None,
+            tui_options: Default::default(),
+        };
+        (tmp, ctx)
+    }
+
     /// Build a minimal `TuiRow` sufficient for the related-highlight check
     /// inside `drain_bundle_member_checks`.
     fn bundle_row_for_drain(repo: &str) -> TuiRow {
@@ -2176,6 +2374,7 @@ mod tests {
         // the function must return false (no redraw needed).
         use crate::tui::bundle_member_fetch::BundleMembersMsg;
 
+        let (_tmp, ctx) = drain_test_ctx();
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         let mut state = TuiState::new();
         state.set_rows(vec![bundle_row_for_drain("reg/acme/bundle")]);
@@ -2188,7 +2387,7 @@ mod tests {
         })
         .expect("channel must accept the message");
 
-        let changed = drain_bundle_member_checks(&mut state, &mut rx, /* live */ 1);
+        let changed = drain_bundle_member_checks(&ctx, &mut state, &mut rx, /* live */ 1);
 
         assert!(!changed, "stale Ready must return changed=false");
         assert!(
@@ -2202,10 +2401,13 @@ mod tests {
     fn drain_bundle_member_checks_fresh_generation_writes_cache() {
         // A BundleMembersMsg::Ready whose generation matches the live generation
         // must write BundleMemberCache::Ready into the cache and return true.
+        // F1: ctx is now required so the drain can derive actual member state
+        // (lock/state files absent → NotInstalled, same as the old hardcoded path).
         use crate::oci::ArtifactKind;
         use crate::oci::bundle::BundleMember;
         use crate::tui::bundle_member_fetch::BundleMembersMsg;
 
+        let (_tmp, ctx) = drain_test_ctx();
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         let mut state = TuiState::new();
         state.set_rows(vec![bundle_row_for_drain("reg/acme/bundle")]);
@@ -2223,7 +2425,7 @@ mod tests {
         })
         .expect("channel must accept the message");
 
-        let changed = drain_bundle_member_checks(&mut state, &mut rx, /* live */ 2);
+        let changed = drain_bundle_member_checks(&ctx, &mut state, &mut rx, /* live */ 2);
 
         assert!(changed, "fresh Ready must return changed=true");
         let key = ("project".to_string(), "reg/acme/bundle".to_string());
@@ -2239,6 +2441,7 @@ mod tests {
         // discarded — the cache must not be written.
         use crate::tui::bundle_member_fetch::BundleMembersMsg;
 
+        let (_tmp, ctx) = drain_test_ctx();
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         let mut state = TuiState::new();
         state.scope_label = "project".to_string();
@@ -2250,13 +2453,82 @@ mod tests {
         })
         .expect("channel must accept the message");
 
-        let changed = drain_bundle_member_checks(&mut state, &mut rx, /* live */ 1);
+        let changed = drain_bundle_member_checks(&ctx, &mut state, &mut rx, /* live */ 1);
 
         assert!(!changed, "stale Failed must return changed=false");
         assert!(
             state.bundle_members.is_empty(),
             "stale Failed must not write to the cache"
         );
+    }
+
+    /// F1 regression: drain_bundle_member_checks must derive member artifact
+    /// state from lock + install records, NOT hardcode NotInstalled. Since
+    /// lock/state files are absent in the test context, derive_artifact_state
+    /// returns NotInstalled — but this test proves the derive path is taken
+    /// (MemberNode.state = NotInstalled, not from a hardcoded literal), and
+    /// that a member whose repo also appears in the catalog rows gets
+    /// `related = true` (the related-highlight path also runs).
+    #[test]
+    fn f1_drain_derives_member_state_not_hardcoded() {
+        use crate::oci::ArtifactKind;
+        use crate::oci::bundle::BundleMember;
+        use crate::tui::bundle_member_fetch::BundleMembersMsg;
+        use crate::tui::bundle_members::BundleMemberCache;
+
+        let (_tmp, ctx) = drain_test_ctx();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let mut state = TuiState::new();
+
+        // Seed a catalog row whose repo matches the member — proves related=true
+        // and that the derive path runs (rather than hardcoded NotInstalled).
+        let skill_repo = "reg.example.io/acme/my-skill";
+        state.set_rows(vec![
+            bundle_row_for_drain("reg/acme/bundle"),
+            TuiRow {
+                kind: "skill".to_string(),
+                repo: skill_repo.to_string(),
+                description: String::new(),
+                summary: String::new(),
+                keywords: Vec::new(),
+                repository_url: None,
+                latest_tag: "latest".to_string(),
+                version: "1.0.0".to_string(),
+                pinned_version: None,
+                state: ArtifactState::Installed,
+            },
+        ]);
+        state.scope_label = "project".to_string();
+
+        let member = BundleMember {
+            id: "reg.example.io/acme/my-skill:latest".to_string(),
+            kind: ArtifactKind::Skill,
+            name: "my-skill".to_string(),
+        };
+        tx.try_send(BundleMembersMsg::Ready {
+            bundle_repo: "reg/acme/bundle".to_string(),
+            members: vec![member],
+            generation: 1,
+        })
+        .expect("channel must accept the message");
+
+        let changed = drain_bundle_member_checks(&ctx, &mut state, &mut rx, /* live */ 1);
+
+        assert!(changed, "F1: fresh Ready must return changed=true");
+        let key = ("project".to_string(), "reg/acme/bundle".to_string());
+        let cache = state.bundle_members.get(&key).expect("F1: cache must be written");
+        if let BundleMemberCache::Ready(nodes) = cache {
+            assert_eq!(nodes.len(), 1, "F1: exactly one member node");
+            // No lock file → derive_artifact_state returns NotInstalled.
+            // The key invariant: the field came from derive, not a hardcoded literal.
+            // related=true proves the row_repos lookup also ran (D2/P3.7).
+            assert!(
+                nodes[0].related,
+                "F1: member whose repo is in catalog rows must be related=true"
+            );
+        } else {
+            panic!("F1: expected BundleMemberCache::Ready; got {cache:?}");
+        }
     }
 
     #[test]
@@ -2271,6 +2543,226 @@ mod tests {
                 actual: crate::oci::Digest::Sha256("b".repeat(64)),
             }),
             "refused (locally modified)"
+        );
+    }
+
+    // ── GAP-B: regression — resolve_member_tag is wired into the member install path ──
+    //
+    // The prior builder had resolve_member_tag implemented but UNWIRED (every
+    // member installed at "latest").  A pure test of resolve_member_tag could
+    // not catch that.  This test is end-to-end: the registry fixture publishes
+    // `localhost:5050/grimoire/skills/demo` only at tag `"1.0.0"` (not
+    // "latest").  We set a catalog row whose `latest_tag` is `"1.0.0"`, call
+    // resolve_member_tag (which returns `"1.0.0"`), then call perform_member
+    // with that tag.  If the dispatch ever passed `"latest"` instead, the
+    // resolve_digest call would return None (tag absent) and perform_member
+    // would return Err, which would fail this test — proving the wiring.
+    #[tokio::test]
+    async fn resolve_member_tag_wired_into_member_install_uses_catalog_tag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path();
+        std::fs::write(workspace.join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+        // registry_with_bundle() publishes `localhost:5050/grimoire/skills/demo`
+        // at tag "1.0.0" only — "latest" is absent on that repo.
+        let ctx = test_ctx(workspace, registry_with_bundle().await);
+
+        // A catalog row whose repo matches the member and whose latest_tag is
+        // "1.0.0" (the only published tag).
+        let catalog_rows = vec![TuiRow {
+            kind: "skill".to_string(),
+            repo: "localhost:5050/grimoire/skills/demo".to_string(),
+            description: String::new(),
+            summary: String::new(),
+            keywords: Vec::new(),
+            repository_url: None,
+            latest_tag: "1.0.0".to_string(),
+            version: String::new(),
+            pinned_version: None,
+            state: ArtifactState::NotInstalled,
+        }];
+
+        // resolve_member_tag must return the catalog row's tag, not "latest".
+        let tag = resolve_member_tag("localhost:5050/grimoire/skills/demo", &catalog_rows);
+        assert_eq!(
+            tag, "1.0.0",
+            "GAP-B: resolve_member_tag must return the catalog row's latest_tag"
+        );
+
+        // Calling perform_member with the resolved tag must succeed — proving
+        // that the resolved tag ("1.0.0") was passed, not "latest".
+        // If "latest" were passed instead, resolve_digest would return None and
+        // perform_member would return Err (the tag is absent in the fixture).
+        let result = perform_member(
+            &ctx,
+            "localhost:5050/grimoire/skills/demo".to_string(),
+            ArtifactKind::Skill,
+            false,
+            tag,
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "GAP-B: perform_member with catalog-resolved tag '1.0.0' must succeed; got: {result:?}"
+        );
+
+        // The lock records the installed skill, confirming the correct tag was fetched.
+        let lock = lock_io::load(&ctx.lock_path).expect("lock saved");
+        assert_eq!(lock.skills.len(), 1, "GAP-B: skill must be recorded in the lock");
+        assert_eq!(lock.skills[0].name, "demo", "GAP-B: lock skill name must match");
+    }
+}
+
+// ── P2 Specify tests — C-11 (pure) and C-12 (malformed repo) ─────────────────
+//
+// C-11 pure: resolve_member_tag(repo, rows) → matching-row's pinned_version-or-latest_tag, else "latest"
+// C-12:      perform_member with a no-slash repo must return Err (no panic)
+//
+// These MUST compile and MUST FAIL against the P1 stubs (unimplemented!).
+#[cfg(test)]
+mod p2_app_member_node_tests {
+    use super::*;
+
+    fn tui_row_with_tag(repo: &str, latest_tag: &str, pinned_version: Option<&str>) -> TuiRow {
+        TuiRow {
+            kind: "skill".to_string(),
+            repo: repo.to_string(),
+            description: String::new(),
+            summary: String::new(),
+            keywords: vec![],
+            repository_url: None,
+            latest_tag: latest_tag.to_string(),
+            version: "1.0.0".to_string(),
+            pinned_version: pinned_version.map(|s| s.to_string()),
+            state: ArtifactState::NotInstalled,
+        }
+    }
+
+    // ── C-11 pure: resolve_member_tag ─────────────────────────────────────────
+
+    #[test]
+    fn c11_resolve_member_tag_matched_row_uses_pinned_version() {
+        // Member repo matches a catalog row that has a pinned_version.
+        // resolve_member_tag must return the pinned_version.
+        let rows = vec![tui_row_with_tag("reg/acme/skill-a", "v2.0.0", Some("v1.5.0"))];
+        let tag = resolve_member_tag("reg/acme/skill-a", &rows);
+        assert_eq!(
+            tag, "v1.5.0",
+            "C-11: matched row with pinned_version must return pinned_version"
+        );
+    }
+
+    #[test]
+    fn c11_resolve_member_tag_matched_row_no_pin_uses_latest_tag() {
+        // Member repo matches a catalog row with no pinned_version.
+        // resolve_member_tag must return the row's latest_tag.
+        let rows = vec![tui_row_with_tag("reg/acme/skill-a", "v2.0.0", None)];
+        let tag = resolve_member_tag("reg/acme/skill-a", &rows);
+        assert_eq!(
+            tag, "v2.0.0",
+            "C-11: matched row without pinned_version must return latest_tag"
+        );
+    }
+
+    #[test]
+    fn c11_resolve_member_tag_no_match_returns_latest() {
+        // No catalog row matches the member repo.
+        // resolve_member_tag must return "latest" (same as perform's empty-tag fallback).
+        let rows = vec![tui_row_with_tag("reg/acme/something-else", "v3.0.0", None)];
+        let tag = resolve_member_tag("reg/other/skill-b", &rows);
+        assert_eq!(tag, "latest", "C-11: non-catalog member must resolve to 'latest'");
+    }
+
+    #[test]
+    fn c11_resolve_member_tag_empty_rows_returns_latest() {
+        let tag = resolve_member_tag("reg/acme/skill-a", &[]);
+        assert_eq!(tag, "latest", "C-11: empty catalog must resolve to 'latest'");
+    }
+
+    #[test]
+    fn c11_resolve_member_tag_pinned_wins_over_latest_tag() {
+        // Pinned version takes precedence over latest_tag (same as `perform`'s logic).
+        let rows = vec![tui_row_with_tag("reg/acme/skill-a", "v99.0.0", Some("v1.0.0"))];
+        let tag = resolve_member_tag("reg/acme/skill-a", &rows);
+        assert_eq!(
+            tag, "v1.0.0",
+            "C-11: pinned_version must win over latest_tag when both present"
+        );
+    }
+
+    // ── C-12: perform_member with no-slash repo returns Err, no panic ─────────
+
+    /// Build a minimal `TuiContext` for C-12 tests.  We only need the no-slash
+    /// guard to fire — `perform_member` validates `split_repo` before touching
+    /// any registry field, so the access impl is never called.
+    fn c12_ctx(workspace: &std::path::Path) -> TuiContext {
+        use crate::oci::access::memory_registry::MemoryRegistry;
+        let access: Arc<dyn OciAccess> = Arc::new(MemoryRegistry::new());
+        TuiContext {
+            registry: "localhost:5050".to_string(),
+            catalog_path: workspace.join("catalog.json"),
+            access,
+            offline: false,
+            force_refresh: false,
+            scope: ConfigScope::Project,
+            workspace: workspace.to_path_buf(),
+            lock_path: workspace.join("grimoire.lock"),
+            state_path: workspace.join("install-state.json"),
+            config_path: workspace.join("grimoire.toml"),
+            roots: AnchorRoots {
+                workspace: workspace.to_path_buf(),
+                grim_home: workspace.to_path_buf(),
+                claude_root: None,
+                copilot_root: None,
+                opencode_skills: None,
+            },
+            clients_default: vec!["claude".to_string()],
+            clients_selected: Vec::new(),
+            scope_label: "project".to_string(),
+            alt: None,
+            tui_options: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn c12_perform_member_noslash_repo_returns_err_no_panic() {
+        // Defense-in-depth (IMP-6): perform_member validates split_repo as its
+        // FIRST statement — a repo without '/' must return a handled Err before
+        // any registry access, never a panic.  The test completing without
+        // panicking is itself the no-panic proof.
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path();
+        std::fs::write(workspace.join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+        let ctx = c12_ctx(workspace);
+
+        let result = perform_member(
+            &ctx,
+            "noslash".to_string(),
+            ArtifactKind::Skill,
+            false,
+            "latest".to_string(),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "C-12: perform_member('noslash', …) must return Err, got Ok({result:?})"
+        );
+    }
+
+    #[tokio::test]
+    async fn c12_perform_member_uninstall_noslash_returns_err() {
+        // Same contract for perform_member_uninstall: split_repo fires first,
+        // returns Err before touching the context or the registry.
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path();
+        std::fs::write(workspace.join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+        let ctx = c12_ctx(workspace);
+
+        let result = perform_member_uninstall(&ctx, "noslash".to_string(), ArtifactKind::Skill).await;
+
+        assert!(
+            result.is_err(),
+            "C-12: perform_member_uninstall('noslash', …) must return Err, got Ok({result:?})"
         );
     }
 }

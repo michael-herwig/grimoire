@@ -162,7 +162,9 @@ pub fn detail_lines_for_member(node: &MemberNode, parent_bundle_repo: &str) -> V
         },
         DetailLine::MetaEntry {
             label: "Via bundle:",
-            value: parent_bundle_repo.to_string(),
+            // F9: sanitize at display boundary — parent_bundle_repo is
+            // registry-controlled and must not reach the terminal raw.
+            value: super::render::sanitize_member_label(parent_bundle_repo),
         },
     ]
 }

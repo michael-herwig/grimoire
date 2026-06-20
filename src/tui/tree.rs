@@ -174,6 +174,19 @@ pub enum DisplayRow {
         row: usize,
         /// The row's install state.
         state: ArtifactState,
+        /// The full path key for this leaf (mirrors [`LeafNode::key`]).
+        /// Used by the collapse/expand machinery and render to identify bundle
+        /// leaves without a secondary `rows` lookup.
+        key: String,
+        /// Whether this leaf's catalog row has `kind == "bundle"`.
+        /// Set in `walk` from `rows[l.row].kind`.
+        is_bundle: bool,
+        /// Whether this bundle leaf is currently in its collapsed state.
+        ///
+        /// Computed as `is_bundle && !expanded_bundles.contains(&key)`:
+        /// bundle leaves default-collapsed (absent from `expanded_bundles` = collapsed).
+        /// Always `false` for non-bundle leaves.
+        collapsed: bool,
     },
     /// A virtual bundle-member child row — NOT backed by any `rows` index.
     ///
@@ -201,6 +214,13 @@ pub enum DisplayRow {
         /// `registry/repository` reference of the parent bundle; used for
         /// the selection anchor and the detail pane.
         parent_bundle_repo: String,
+        /// The `registry/repository` reference of **this member** (from
+        /// [`MemberNode::member_repo`]). `None` for placeholder rows
+        /// (Loading / Failed / Offline).
+        ///
+        /// Populated in Phase 1 (P1.2); consumed by the member action layer
+        /// in Phase 4 (P4.1) to synthesize `TuiAction::MemberAction`.
+        member_repo: Option<String>,
     },
 }
 
@@ -455,9 +475,22 @@ pub fn build(rows: &[TuiRow], filtered: &[usize], opts: &TreeBuildOptions) -> Tr
 
 /// Flatten the tree to the visible lines: a preorder walk where a
 /// collapsed group emits its header but not its descendants.
-pub fn flatten(tree: &Tree, collapsed: &BTreeSet<String>) -> Vec<DisplayRow> {
+///
+/// `rows` is the full catalog row slice, threaded into [`walk`] so bundle
+/// leaves can populate their new `is_bundle` / `key` / `collapsed` fields.
+///
+/// `expanded_bundles` carries the bundle-leaf expand state (separate from the
+/// group `collapsed` set — see plan D3a / GAP-1). For bundle leaf visibility
+/// in the output this parameter is informational only in P1 (the member-splice
+/// gate in [`flatten_with_members`] is where it is enforced in P3).
+pub fn flatten(
+    tree: &Tree,
+    collapsed: &BTreeSet<String>,
+    expanded_bundles: &BTreeSet<String>,
+    rows: &[TuiRow],
+) -> Vec<DisplayRow> {
     let mut out = Vec::new();
-    walk(&tree.roots, collapsed, &mut out);
+    walk(&tree.roots, collapsed, expanded_bundles, rows, &mut out);
     out
 }
 
@@ -480,9 +513,29 @@ pub fn flatten(tree: &Tree, collapsed: &BTreeSet<String>) -> Vec<DisplayRow> {
 ///
 /// `scope` is the active scope label (`TuiState::scope_label`) used as
 /// the first component of the `BundleMemberKey`.
+/// Flatten the tree and splice virtual `DisplayRow::Member` rows
+/// immediately after each `DisplayRow::Leaf` whose bundle member cache is
+/// `Ready` (and the bundle leaf is visible — not inside a collapsed group).
+///
+/// The `expanded_bundles` set gates member splicing: a bundle leaf's members
+/// are only spliced when its key is present in `expanded_bundles`. This is
+/// ORTHOGONAL to `collapsed`, which gates group descendants (GAP-1 / D4):
+///
+/// - `collapsed` is consumed by the inner [`flatten`] call to hide group
+///   descendants. It is **never** replaced by `expanded_bundles`.
+/// - `expanded_bundles` is the NEW additional parameter that gates whether
+///   a bundle leaf's members appear. Bundle leaves default-collapsed (absent
+///   from `expanded_bundles` = no member rows). Empty `expanded_bundles`
+///   (P1 default) means no members are spliced — identical to Phase 2 behavior
+///   when this function is called with the real gate in P3.1.
+///
+/// Note (P1 / GAP-1): during the stub phase the splice still fires on cache
+/// presence (existing behavior is preserved) so existing tests continue to
+/// pass. P3.1 adds the `expanded_bundles.contains(&leaf_key)` gate.
 pub fn flatten_with_members(
     tree: &Tree,
     collapsed: &BTreeSet<String>,
+    expanded_bundles: &BTreeSet<String>,
     bundle_members: &std::collections::HashMap<
         super::bundle_members::BundleMemberKey,
         super::bundle_members::BundleMemberCache,
@@ -493,7 +546,9 @@ pub fn flatten_with_members(
     use super::bundle_members::BundleMemberCache;
 
     // Start with the plain flattened tree (collapsed groups already handled).
-    let flat = flatten(tree, collapsed);
+    // Pass BOTH collapsed AND expanded_bundles so walk can populate the new
+    // Leaf fields; expanded_bundles does NOT replace collapsed here (GAP-1).
+    let flat = flatten(tree, collapsed, expanded_bundles, rows);
 
     // Post-pass: splice Member rows after each bundle leaf that has a cache
     // entry. Non-bundle leaves and leaves with no cache entry are passed through
@@ -502,11 +557,19 @@ pub fn flatten_with_members(
 
     for display_row in flat {
         match &display_row {
-            DisplayRow::Leaf { row, depth, .. } => {
+            DisplayRow::Leaf {
+                row,
+                depth,
+                key: leaf_key,
+                ..
+            } => {
                 let row_idx = *row;
                 let leaf_depth = *depth;
+                // F3: leaf_key is no longer needed for the splice gate (now uses
+                // tui_row.repo); only row_idx and leaf_depth are forwarded.
+                let _ = leaf_key;
 
-                // Clone the leaf into out first (bundle or not, it is always visible).
+                // Push the leaf first (bundle or not, it is always visible).
                 out.push(display_row);
 
                 // Check if this leaf's row is a bundle kind.
@@ -514,6 +577,17 @@ pub fn flatten_with_members(
                     continue;
                 };
                 if tui_row.kind != "bundle" {
+                    continue;
+                }
+
+                // P3.1: Gate member splice on expanded_bundles membership.
+                // A bundle leaf absent from expanded_bundles is collapsed —
+                // produce zero member rows regardless of cache state.
+                // F3: key is the FULL bundle repo (rows[row].repo), not the
+                // display-path leaf key, so the gate is stable even when the
+                // default-registry changes or two bundles share a final path
+                // component.
+                if !expanded_bundles.contains(tui_row.repo.as_str()) {
                     continue;
                 }
 
@@ -537,6 +611,9 @@ pub fn flatten_with_members(
                                 state: m.state,
                                 related: m.related,
                                 parent_bundle_repo: parent_bundle_repo.clone(),
+                                // P1.2: propagate the member's own repo so the
+                                // action layer can synthesize TuiAction::MemberAction.
+                                member_repo: m.member_repo.clone(),
                             });
                         }
                     }
@@ -551,6 +628,8 @@ pub fn flatten_with_members(
                             state: ArtifactState::NotInstalled,
                             related: false,
                             parent_bundle_repo,
+                            // Placeholders carry no actionable repo.
+                            member_repo: None,
                         });
                     }
                     BundleMemberCache::Failed(reason) => {
@@ -564,6 +643,7 @@ pub fn flatten_with_members(
                             state: ArtifactState::NotInstalled,
                             related: false,
                             parent_bundle_repo,
+                            member_repo: None,
                         });
                     }
                     BundleMemberCache::Offline => {
@@ -575,6 +655,7 @@ pub fn flatten_with_members(
                             state: ArtifactState::NotInstalled,
                             related: false,
                             parent_bundle_repo,
+                            member_repo: None,
                         });
                     }
                 }
@@ -590,7 +671,13 @@ pub fn flatten_with_members(
     out
 }
 
-fn walk(nodes: &[Node], collapsed: &BTreeSet<String>, out: &mut Vec<DisplayRow>) {
+fn walk(
+    nodes: &[Node],
+    collapsed: &BTreeSet<String>,
+    expanded_bundles: &BTreeSet<String>,
+    rows: &[TuiRow],
+    out: &mut Vec<DisplayRow>,
+) {
     for node in nodes {
         match node {
             Node::Group(g) => {
@@ -604,15 +691,33 @@ fn walk(nodes: &[Node], collapsed: &BTreeSet<String>, out: &mut Vec<DisplayRow>)
                     rows: g.rows.clone(),
                 });
                 if !is_collapsed {
-                    walk(&g.children, collapsed, out);
+                    walk(&g.children, collapsed, expanded_bundles, rows, out);
                 }
             }
-            Node::Leaf(l) => out.push(DisplayRow::Leaf {
-                label: l.label.clone(),
-                depth: l.depth,
-                row: l.row,
-                state: l.state,
-            }),
+            Node::Leaf(l) => {
+                // P1.1: populate the three new Leaf fields from the rows slice
+                // and the expanded_bundles set.
+                let is_bundle = rows.get(l.row).map(|r| r.kind == "bundle").unwrap_or(false);
+                // F3: expanded_bundles is keyed by the FULL bundle repo (rows[l.row].repo),
+                // NOT by the display-path leaf key (l.key). The `collapsed` field
+                // must use the same key — a bundle is expanded iff its full repo is
+                // in the set. Non-bundle leaves always report false.
+                let leaf_collapsed = if is_bundle {
+                    let full_repo = rows.get(l.row).map(|r| r.repo.as_str()).unwrap_or("");
+                    !expanded_bundles.contains(full_repo)
+                } else {
+                    false
+                };
+                out.push(DisplayRow::Leaf {
+                    label: l.label.clone(),
+                    depth: l.depth,
+                    row: l.row,
+                    state: l.state,
+                    key: l.key.clone(),
+                    is_bundle,
+                    collapsed: leaf_collapsed,
+                });
+            }
         }
     }
 }
@@ -654,7 +759,9 @@ mod tests {
     /// Flatten the tree with no collapsed groups and collect
     /// `(label, depth, is_group)` tuples for easy assertions.
     fn shape(tree: &Tree) -> Vec<(String, usize, bool)> {
-        flatten(tree, &BTreeSet::new())
+        // Use empty expanded_bundles and a dummy empty rows slice — shape()
+        // only checks group/leaf topology, not bundle-kind fields.
+        flatten(tree, &BTreeSet::new(), &BTreeSet::new(), &[])
             .into_iter()
             .map(|d| match d {
                 DisplayRow::Group { label, depth, .. } => (label, depth, true),
@@ -1049,7 +1156,7 @@ mod tests {
         let mut collapsed = BTreeSet::new();
         // Collapse the "acme" group
         collapsed.insert("acme".to_string());
-        let flat = flatten(&t, &collapsed);
+        let flat = flatten(&t, &collapsed, &BTreeSet::new(), &rows);
         assert_eq!(flat.len(), 1, "collapsed group hides its descendants");
         match &flat[0] {
             DisplayRow::Group {
@@ -1197,8 +1304,9 @@ mod tests {
         let collapsed = BTreeSet::new();
         let cache = empty_cache();
 
-        let with_members = flatten_with_members(&t, &collapsed, &cache, "project", &rows);
-        let without_members = flatten(&t, &collapsed);
+        let expanded_bundles = BTreeSet::new();
+        let with_members = flatten_with_members(&t, &collapsed, &expanded_bundles, &cache, "project", &rows);
+        let without_members = flatten(&t, &collapsed, &expanded_bundles, &rows);
 
         assert_eq!(
             with_members, without_members,
@@ -1222,7 +1330,10 @@ mod tests {
             ]),
         );
 
-        let flat = flatten_with_members(&t, &collapsed, &cache, "project", &rows);
+        // P3.1: key must be in expanded_bundles for members to appear.
+        let mut expanded_bundles = BTreeSet::new();
+        expanded_bundles.insert("reg/acme/bundle-x".to_string()); // F3: full repo key
+        let flat = flatten_with_members(&t, &collapsed, &expanded_bundles, &cache, "project", &rows);
 
         // Expected: group(acme) + Leaf(bundle-x) + Member(skill-a) + Member(skill-b)
         assert_eq!(flat.len(), 4, "C-4: group + leaf + 2 members; got {flat:?}");
@@ -1265,7 +1376,10 @@ mod tests {
             BundleMemberCache::Loading,
         );
 
-        let flat = flatten_with_members(&t, &collapsed, &cache, "project", &rows);
+        // P3.1: key must be in expanded_bundles for members to appear.
+        let mut expanded_bundles = BTreeSet::new();
+        expanded_bundles.insert("reg/acme/bundle-x".to_string()); // F3: full repo key
+        let flat = flatten_with_members(&t, &collapsed, &expanded_bundles, &cache, "project", &rows);
 
         // group + leaf + 1 placeholder = 3
         assert_eq!(flat.len(), 3, "C-4: Loading → exactly one placeholder; got {flat:?}");
@@ -1287,7 +1401,10 @@ mod tests {
             BundleMemberCache::Failed("503 error".to_string()),
         );
 
-        let flat = flatten_with_members(&t, &collapsed, &cache, "project", &rows);
+        // P3.1: key must be in expanded_bundles for members to appear.
+        let mut expanded_bundles = BTreeSet::new();
+        expanded_bundles.insert("reg/acme/bundle-x".to_string()); // F3: full repo key
+        let flat = flatten_with_members(&t, &collapsed, &expanded_bundles, &cache, "project", &rows);
 
         assert_eq!(flat.len(), 3, "C-4: Failed → exactly one placeholder; got {flat:?}");
         assert!(
@@ -1308,7 +1425,10 @@ mod tests {
             BundleMemberCache::Offline,
         );
 
-        let flat = flatten_with_members(&t, &collapsed, &cache, "project", &rows);
+        // P3.1: key must be in expanded_bundles for members to appear.
+        let mut expanded_bundles = BTreeSet::new();
+        expanded_bundles.insert("reg/acme/bundle-x".to_string()); // F3: full repo key
+        let flat = flatten_with_members(&t, &collapsed, &expanded_bundles, &cache, "project", &rows);
 
         assert_eq!(flat.len(), 3, "C-4: Offline → exactly one placeholder; got {flat:?}");
         assert!(
@@ -1331,8 +1451,12 @@ mod tests {
             BundleMemberCache::Ready(vec![make_member("skill-x", ArtifactKind::Skill, false)]),
         );
 
-        // When called with "scope_b", no members should be injected.
-        let flat_b = flatten_with_members(&t, &collapsed, &cache, "scope_b", &rows);
+        // P3.1: key must be in expanded_bundles for members to appear.
+        let mut expanded_bundles = BTreeSet::new();
+        expanded_bundles.insert("reg/acme/bundle-x".to_string()); // F3: full repo key
+
+        // When called with "scope_b", no members should be injected (wrong scope key).
+        let flat_b = flatten_with_members(&t, &collapsed, &expanded_bundles, &cache, "scope_b", &rows);
         // Expected: group + leaf only (2 rows)
         assert_eq!(
             flat_b.len(),
@@ -1341,7 +1465,7 @@ mod tests {
         );
 
         // When called with "scope_a", members are injected.
-        let flat_a = flatten_with_members(&t, &collapsed, &cache, "scope_a", &rows);
+        let flat_a = flatten_with_members(&t, &collapsed, &expanded_bundles, &cache, "scope_a", &rows);
         assert_eq!(
             flat_a.len(),
             3, // group + leaf + 1 member
@@ -1361,6 +1485,7 @@ mod tests {
             state: ArtifactState::NotInstalled,
             related: false,
             parent_bundle_repo: "reg/acme/bundle".to_string(),
+            member_repo: None,
         };
         // The variant compiles without a `row` field — this is the structural proof.
         assert!(matches!(m, DisplayRow::Member { .. }), "C-4: Member variant must exist");
@@ -1381,8 +1506,8 @@ mod tests {
             ]),
         );
 
-        let out1 = flatten_with_members(&t, &collapsed, &cache, "project", &rows);
-        let out2 = flatten_with_members(&t, &collapsed, &cache, "project", &rows);
+        let out1 = flatten_with_members(&t, &collapsed, &BTreeSet::new(), &cache, "project", &rows);
+        let out2 = flatten_with_members(&t, &collapsed, &BTreeSet::new(), &cache, "project", &rows);
         assert_eq!(out1, out2, "C-4: flatten_with_members must be deterministic");
     }
 
@@ -1401,7 +1526,7 @@ mod tests {
             BundleMemberCache::Ready(vec![make_member("skill-a", ArtifactKind::Skill, false)]),
         );
 
-        let flat = flatten_with_members(&t, &collapsed, &cache, "project", &rows);
+        let flat = flatten_with_members(&t, &collapsed, &BTreeSet::new(), &cache, "project", &rows);
         // Only the collapsed group header is visible; no leaf or member rows.
         assert_eq!(flat.len(), 1, "C-4: collapsed group must hide leaf and members");
         assert!(
@@ -1418,7 +1543,7 @@ mod tests {
             skill_row("reg/acme/beta", ArtifactState::NotInstalled),
         ];
         let t = build(&rows, &[0, 1], &opts_default(Some("reg")));
-        let flat = flatten(&t, &BTreeSet::new());
+        let flat = flatten(&t, &BTreeSet::new(), &BTreeSet::new(), &rows);
         // Header + two leaves = 3 rows
         assert_eq!(flat.len(), 3, "expanded group shows header + 2 leaves");
         assert!(
@@ -1427,5 +1552,456 @@ mod tests {
         );
         assert!(matches!(&flat[1], DisplayRow::Leaf { .. }), "second row is a leaf");
         assert!(matches!(&flat[2], DisplayRow::Leaf { .. }), "third row is a leaf");
+    }
+}
+
+// ── P2 Specify tests — phase 2 contracts ─────────────────────────────────────
+//
+// These tests encode the contracts C-1 through C-12 from plan_tui_member_nodes.
+// They MUST compile and MUST FAIL against the P1 stubs/unimplemented logic.
+// Do NOT implement production logic here — tests only.
+#[cfg(test)]
+mod p2_member_node_tests {
+    use std::collections::{BTreeSet, HashMap};
+
+    use crate::oci::ArtifactKind;
+    use crate::tui::bundle_members::{BundleMemberCache, BundleMemberKey, MemberNode};
+    use crate::tui::state::{ArtifactState, TuiRow};
+    use crate::tui::tree::{DisplayRow, TreeBuildOptions, build, flatten, flatten_with_members};
+
+    fn tui_row(repo: &str, kind: &str, state: ArtifactState) -> TuiRow {
+        TuiRow {
+            kind: kind.to_string(),
+            repo: repo.to_string(),
+            description: String::new(),
+            summary: String::new(),
+            keywords: vec![],
+            repository_url: None,
+            latest_tag: "latest".to_string(),
+            version: "1.0.0".to_string(),
+            pinned_version: None,
+            state,
+        }
+    }
+
+    fn bundle_row(repo: &str) -> TuiRow {
+        tui_row(repo, "bundle", ArtifactState::NotInstalled)
+    }
+
+    fn skill_row(repo: &str) -> TuiRow {
+        tui_row(repo, "skill", ArtifactState::Installed)
+    }
+
+    fn opts(default_registry: &str) -> TreeBuildOptions {
+        TreeBuildOptions {
+            default_registry: Some(default_registry.to_string()),
+            group_by_type: false,
+            separators: vec!["/".to_string()],
+        }
+    }
+
+    fn make_member(label: &str, repo: &str) -> MemberNode {
+        MemberNode {
+            kind: ArtifactKind::Skill,
+            label: label.to_string(),
+            member_repo: Some(repo.to_string()),
+            state: ArtifactState::NotInstalled,
+            related: false,
+        }
+    }
+
+    fn ready_cache(
+        scope: &str,
+        bundle_repo: &str,
+        members: Vec<MemberNode>,
+    ) -> HashMap<BundleMemberKey, BundleMemberCache> {
+        let mut m = HashMap::new();
+        m.insert(
+            (scope.to_string(), bundle_repo.to_string()),
+            BundleMemberCache::Ready(members),
+        );
+        m
+    }
+
+    // ── C-2: default-collapsed ────────────────────────────────────────────────
+    //
+    // A bundle leaf with a Ready cache entry and an empty `expanded_bundles`
+    // must produce ZERO member rows (bundle leaves default-collapsed).
+
+    #[test]
+    fn c2_default_collapsed_ready_cache_empty_expanded_bundles_yields_no_members() {
+        let rows = vec![bundle_row("reg/acme/bundle-x")];
+        let t = build(&rows, &[0], &opts("reg"));
+        let cache = ready_cache(
+            "project",
+            "reg/acme/bundle-x",
+            vec![make_member("skill-a", "reg/acme/skill-a")],
+        );
+        let expanded_bundles = BTreeSet::new(); // no bundle expanded
+
+        let flat = flatten_with_members(&t, &BTreeSet::new(), &expanded_bundles, &cache, "project", &rows);
+
+        let member_count = flat.iter().filter(|r| matches!(r, DisplayRow::Member { .. })).count();
+        assert_eq!(
+            member_count, 0,
+            "C-2: Ready cache + empty expanded_bundles must produce ZERO member rows; flat={flat:?}"
+        );
+    }
+
+    // ── C-2: walk populates DisplayRow::Leaf.collapsed ────────────────────────
+    //
+    // A bundle leaf absent from `expanded_bundles` must have `collapsed = true`.
+    // A non-bundle leaf must have `collapsed = false`.
+
+    #[test]
+    fn c4_walk_bundle_leaf_collapsed_true_when_not_in_expanded_bundles() {
+        let rows = vec![bundle_row("reg/acme/bundle-x")];
+        let t = build(&rows, &[0], &opts("reg"));
+        let expanded_bundles = BTreeSet::new();
+
+        let flat = flatten(&t, &BTreeSet::new(), &expanded_bundles, &rows);
+
+        let bundle_leaf = flat
+            .iter()
+            .find(|r| matches!(r, DisplayRow::Leaf { is_bundle: true, .. }));
+        assert!(bundle_leaf.is_some(), "C-4: must have a bundle leaf");
+        if let Some(DisplayRow::Leaf {
+            collapsed, is_bundle, ..
+        }) = bundle_leaf
+        {
+            assert!(*is_bundle, "C-4: is_bundle must be true for bundle kind row");
+            assert!(
+                *collapsed,
+                "C-4: bundle leaf absent from expanded_bundles must be collapsed"
+            );
+        }
+    }
+
+    #[test]
+    fn c4_walk_non_bundle_leaf_collapsed_always_false() {
+        let rows = vec![skill_row("reg/acme/my-skill")];
+        let t = build(&rows, &[0], &opts("reg"));
+        let expanded_bundles = BTreeSet::new();
+
+        let flat = flatten(&t, &BTreeSet::new(), &expanded_bundles, &rows);
+
+        let non_bundle_leaf = flat
+            .iter()
+            .find(|r| matches!(r, DisplayRow::Leaf { is_bundle: false, .. }));
+        assert!(non_bundle_leaf.is_some(), "C-4: must have a non-bundle leaf");
+        if let Some(DisplayRow::Leaf {
+            collapsed, is_bundle, ..
+        }) = non_bundle_leaf
+        {
+            assert!(!*is_bundle, "C-4: is_bundle must be false for skill kind row");
+            assert!(!*collapsed, "C-4: non-bundle leaf must always have collapsed = false");
+        }
+    }
+
+    #[test]
+    fn c4_walk_bundle_leaf_key_populated() {
+        let rows = vec![bundle_row("reg/acme/bundle-x")];
+        let t = build(&rows, &[0], &opts("reg"));
+        let expanded_bundles = BTreeSet::new();
+
+        let flat = flatten(&t, &BTreeSet::new(), &expanded_bundles, &rows);
+
+        let bundle_leaf = flat
+            .iter()
+            .find(|r| matches!(r, DisplayRow::Leaf { is_bundle: true, .. }));
+        if let Some(DisplayRow::Leaf { key, .. }) = bundle_leaf {
+            assert!(!key.is_empty(), "C-4: bundle leaf key must be populated");
+            // Per plan D1/D2: key = full path after registry elision.
+            // "reg/acme/bundle-x" with default_registry="reg" → key="acme/bundle-x".
+            assert_eq!(
+                key, "acme/bundle-x",
+                "C-4: key must be the full path (not just the leaf label)"
+            );
+        } else {
+            panic!("C-4: expected a bundle leaf in the flat output");
+        }
+    }
+
+    // ── C-3: splice iff key ∈ expanded_bundles ────────────────────────────────
+
+    #[test]
+    fn c3_members_spliced_when_key_in_expanded_bundles() {
+        let rows = vec![bundle_row("reg/acme/bundle-x")];
+        let t = build(&rows, &[0], &opts("reg"));
+        let cache = ready_cache(
+            "project",
+            "reg/acme/bundle-x",
+            vec![
+                make_member("skill-a", "reg/acme/skill-a"),
+                make_member("skill-b", "reg/acme/skill-b"),
+            ],
+        );
+        let mut expanded_bundles = BTreeSet::new();
+        expanded_bundles.insert("reg/acme/bundle-x".to_string()); // F3: full repo key // key ∈ expanded_bundles
+
+        let flat = flatten_with_members(&t, &BTreeSet::new(), &expanded_bundles, &cache, "project", &rows);
+
+        let member_count = flat.iter().filter(|r| matches!(r, DisplayRow::Member { .. })).count();
+        assert_eq!(
+            member_count, 2,
+            "C-3: key ∈ expanded_bundles must splice 2 member rows; flat={flat:?}"
+        );
+    }
+
+    #[test]
+    fn c3_members_not_spliced_when_key_absent_from_expanded_bundles() {
+        let rows = vec![bundle_row("reg/acme/bundle-x")];
+        let t = build(&rows, &[0], &opts("reg"));
+        let cache = ready_cache(
+            "project",
+            "reg/acme/bundle-x",
+            vec![make_member("skill-a", "reg/acme/skill-a")],
+        );
+        let expanded_bundles = BTreeSet::new(); // key absent
+
+        let flat = flatten_with_members(&t, &BTreeSet::new(), &expanded_bundles, &cache, "project", &rows);
+
+        let member_count = flat.iter().filter(|r| matches!(r, DisplayRow::Member { .. })).count();
+        assert_eq!(
+            member_count, 0,
+            "C-3: key absent from expanded_bundles must produce 0 member rows; flat={flat:?}"
+        );
+    }
+
+    #[test]
+    fn c3_member_depth_is_parent_leaf_depth_plus_one() {
+        // Bundle leaf is inside a group → leaf depth = 1. Member depth must be 2.
+        let rows = vec![bundle_row("reg/acme/bundle-x")];
+        let t = build(&rows, &[0], &opts("reg"));
+        let cache = ready_cache(
+            "project",
+            "reg/acme/bundle-x",
+            vec![make_member("skill-a", "reg/acme/skill-a")],
+        );
+        let mut expanded_bundles = BTreeSet::new();
+        expanded_bundles.insert("reg/acme/bundle-x".to_string()); // F3: full repo key
+
+        let flat = flatten_with_members(&t, &BTreeSet::new(), &expanded_bundles, &cache, "project", &rows);
+
+        // Find the leaf depth
+        let leaf_depth = flat
+            .iter()
+            .find_map(|r| {
+                if let DisplayRow::Leaf { depth, .. } = r {
+                    Some(*depth)
+                } else {
+                    None
+                }
+            })
+            .expect("C-3: must have a leaf");
+
+        let member_depth = flat
+            .iter()
+            .find_map(|r| {
+                if let DisplayRow::Member { depth, .. } = r {
+                    Some(*depth)
+                } else {
+                    None
+                }
+            })
+            .expect("C-3: must have a member after expanding");
+
+        assert_eq!(
+            member_depth,
+            leaf_depth + 1,
+            "C-3: member depth must be parent leaf depth + 1"
+        );
+    }
+
+    #[test]
+    fn c3_members_appear_immediately_after_bundle_leaf() {
+        let rows = vec![bundle_row("reg/acme/bundle-x")];
+        let t = build(&rows, &[0], &opts("reg"));
+        let cache = ready_cache(
+            "project",
+            "reg/acme/bundle-x",
+            vec![make_member("skill-a", "reg/acme/skill-a")],
+        );
+        let mut expanded_bundles = BTreeSet::new();
+        expanded_bundles.insert("reg/acme/bundle-x".to_string()); // F3: full repo key
+
+        let flat = flatten_with_members(&t, &BTreeSet::new(), &expanded_bundles, &cache, "project", &rows);
+
+        // Find the leaf position, then check the immediately-following row is a Member.
+        let leaf_pos = flat
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Leaf { .. }))
+            .expect("C-3: must have a leaf");
+        assert!(
+            matches!(flat.get(leaf_pos + 1), Some(DisplayRow::Member { .. })),
+            "C-3: member must appear immediately after the bundle leaf; flat={flat:?}"
+        );
+    }
+
+    // ── C-2b: collapsed / expanded_bundles orthogonality ─────────────────────
+
+    #[test]
+    fn c2b_collapsed_group_hides_bundle_leaf_regardless_of_expanded_bundles() {
+        // Group `acme` collapsed AND bundle-x in expanded_bundles:
+        // group collapse wins — neither the leaf nor members appear.
+        let rows = vec![bundle_row("reg/acme/bundle-x")];
+        let t = build(&rows, &[0], &opts("reg"));
+        let cache = ready_cache(
+            "project",
+            "reg/acme/bundle-x",
+            vec![make_member("skill-a", "reg/acme/skill-a")],
+        );
+        let mut collapsed = BTreeSet::new();
+        collapsed.insert("acme".to_string()); // group collapsed
+        let mut expanded_bundles = BTreeSet::new();
+        expanded_bundles.insert("reg/acme/bundle-x".to_string()); // F3: full repo key // bundle would be expanded
+
+        let flat = flatten_with_members(&t, &collapsed, &expanded_bundles, &cache, "project", &rows);
+
+        // Only the group header is visible (1 row).
+        assert_eq!(flat.len(), 1, "C-2b: collapsed group hides leaf+members; flat={flat:?}");
+        assert!(
+            matches!(flat[0], DisplayRow::Group { .. }),
+            "C-2b: only the group header should be visible"
+        );
+    }
+
+    #[test]
+    fn c2b_expanded_group_with_expanded_bundle_shows_group_leaf_and_members() {
+        // Group `acme` expanded AND bundle-x in expanded_bundles → group header + leaf + members.
+        let rows = vec![bundle_row("reg/acme/bundle-x")];
+        let t = build(&rows, &[0], &opts("reg"));
+        let cache = ready_cache(
+            "project",
+            "reg/acme/bundle-x",
+            vec![make_member("skill-a", "reg/acme/skill-a")],
+        );
+        let collapsed = BTreeSet::new(); // group expanded
+        let mut expanded_bundles = BTreeSet::new();
+        expanded_bundles.insert("reg/acme/bundle-x".to_string()); // F3: full repo key
+
+        let flat = flatten_with_members(&t, &collapsed, &expanded_bundles, &cache, "project", &rows);
+
+        let groups = flat.iter().filter(|r| matches!(r, DisplayRow::Group { .. })).count();
+        let leaves = flat.iter().filter(|r| matches!(r, DisplayRow::Leaf { .. })).count();
+        let members = flat.iter().filter(|r| matches!(r, DisplayRow::Member { .. })).count();
+
+        assert_eq!(groups, 1, "C-2b: must have 1 group header");
+        assert_eq!(leaves, 1, "C-2b: must have 1 bundle leaf");
+        assert_eq!(members, 1, "C-2b: must have 1 member");
+    }
+
+    #[test]
+    fn c2b_expanded_group_with_collapsed_bundle_shows_group_and_leaf_only() {
+        // Group `acme` expanded AND bundle-x NOT in expanded_bundles → group header + leaf only.
+        let rows = vec![bundle_row("reg/acme/bundle-x")];
+        let t = build(&rows, &[0], &opts("reg"));
+        let cache = ready_cache(
+            "project",
+            "reg/acme/bundle-x",
+            vec![make_member("skill-a", "reg/acme/skill-a")],
+        );
+        let collapsed = BTreeSet::new(); // group expanded
+        let expanded_bundles = BTreeSet::new(); // bundle collapsed (absent)
+
+        let flat = flatten_with_members(&t, &collapsed, &expanded_bundles, &cache, "project", &rows);
+
+        let members = flat.iter().filter(|r| matches!(r, DisplayRow::Member { .. })).count();
+        assert_eq!(
+            members, 0,
+            "C-2b: collapsed bundle (absent from expanded_bundles) must show 0 members"
+        );
+        assert_eq!(
+            flat.len(),
+            2,
+            "C-2b: group header + leaf only (no members); flat={flat:?}"
+        );
+    }
+
+    // ── C-10: member_repo population ──────────────────────────────────────────
+
+    #[test]
+    fn c10_ready_member_carries_member_repo() {
+        let rows = vec![bundle_row("reg/acme/bundle-x")];
+        let t = build(&rows, &[0], &opts("reg"));
+        let cache = ready_cache(
+            "project",
+            "reg/acme/bundle-x",
+            vec![make_member("skill-a", "reg/acme/skill-a")],
+        );
+        let mut expanded_bundles = BTreeSet::new();
+        expanded_bundles.insert("reg/acme/bundle-x".to_string()); // F3: full repo key
+
+        let flat = flatten_with_members(&t, &BTreeSet::new(), &expanded_bundles, &cache, "project", &rows);
+
+        let member = flat.iter().find_map(|r| {
+            if let DisplayRow::Member { member_repo, .. } = r {
+                Some(member_repo)
+            } else {
+                None
+            }
+        });
+        assert!(member.is_some(), "C-10: must have a member row");
+        assert_eq!(
+            member.unwrap().as_deref(),
+            Some("reg/acme/skill-a"),
+            "C-10: Ready member must carry its member_repo"
+        );
+    }
+
+    #[test]
+    fn c10_loading_placeholder_has_none_member_repo() {
+        let rows = vec![bundle_row("reg/acme/bundle-x")];
+        let t = build(&rows, &[0], &opts("reg"));
+        let mut cache: HashMap<BundleMemberKey, BundleMemberCache> = HashMap::new();
+        cache.insert(
+            ("project".to_string(), "reg/acme/bundle-x".to_string()),
+            BundleMemberCache::Loading,
+        );
+        let mut expanded_bundles = BTreeSet::new();
+        expanded_bundles.insert("reg/acme/bundle-x".to_string()); // F3: full repo key
+
+        let flat = flatten_with_members(&t, &BTreeSet::new(), &expanded_bundles, &cache, "project", &rows);
+
+        let member = flat.iter().find_map(|r| {
+            if let DisplayRow::Member { member_repo, .. } = r {
+                Some(member_repo)
+            } else {
+                None
+            }
+        });
+        assert!(member.is_some(), "C-10: Loading must produce a placeholder member");
+        assert!(
+            member.unwrap().is_none(),
+            "C-10: Loading placeholder must have member_repo = None"
+        );
+    }
+
+    #[test]
+    fn c10_failed_placeholder_has_none_member_repo() {
+        let rows = vec![bundle_row("reg/acme/bundle-x")];
+        let t = build(&rows, &[0], &opts("reg"));
+        let mut cache: HashMap<BundleMemberKey, BundleMemberCache> = HashMap::new();
+        cache.insert(
+            ("project".to_string(), "reg/acme/bundle-x".to_string()),
+            BundleMemberCache::Failed("network error".to_string()),
+        );
+        let mut expanded_bundles = BTreeSet::new();
+        expanded_bundles.insert("reg/acme/bundle-x".to_string()); // F3: full repo key
+
+        let flat = flatten_with_members(&t, &BTreeSet::new(), &expanded_bundles, &cache, "project", &rows);
+
+        let member = flat.iter().find_map(|r| {
+            if let DisplayRow::Member { member_repo, .. } = r {
+                Some(member_repo)
+            } else {
+                None
+            }
+        });
+        assert!(member.is_some(), "C-10: Failed must produce a placeholder member");
+        assert!(
+            member.unwrap().is_none(),
+            "C-10: Failed placeholder must have member_repo = None"
+        );
     }
 }

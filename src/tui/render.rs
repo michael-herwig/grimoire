@@ -393,7 +393,9 @@ fn tree_render_rows(state: &TuiState) -> Vec<RenderRow> {
                 // Single status_view call — used for both the color tag and col 3.
                 let (worst_glyph, worst_label, color) = status_view(rollup.worst());
                 let mark = group_mark_state(descendant_rows, &state.marked);
-                let rollup_label = format!("{}/{} installed", rollup.installed, rollup.total);
+                // F6: shorten rollup badge from "x/n installed" to "x/n" — less
+                // visual clutter; meaning is clear from position (Tag/col 2).
+                let rollup_label = format!("{}/{}", rollup.installed, rollup.total);
                 // Arrow: ▾ expanded, ▸ collapsed.
                 let arrow = if *collapsed { "▸" } else { "▾" };
                 let indent = "  ".repeat(*depth);
@@ -424,10 +426,21 @@ fn tree_render_rows(state: &TuiState) -> Vec<RenderRow> {
                 depth,
                 row,
                 state: leaf_state,
+                is_bundle,
+                collapsed,
+                ..
             } => {
                 let (glyph, status_label, color) = status_view(*leaf_state);
                 let indent = "  ".repeat(*depth);
-                let repo_text = format!("{indent}{label}");
+                // P3.2: bundle leaves carry an expand/collapse arrow glyph.
+                // F4: use UTF-8 ▸/▾ (same glyphs as group rows) — no ASCII fallback.
+                // Non-bundle leaves are rendered without prefix (unchanged).
+                let repo_text = if *is_bundle {
+                    let arrow = if *collapsed { "▸" } else { "▾" };
+                    format!("{indent}{arrow} {label}")
+                } else {
+                    format!("{indent}{label}")
+                };
                 let r = state.rows.get(*row);
                 let tag_cell = r
                     .map(|row| match &row.pinned_version {
@@ -460,9 +473,10 @@ fn tree_render_rows(state: &TuiState) -> Vec<RenderRow> {
                 let (glyph, status_label, color) = status_view(*member_state);
                 let indent = "  ".repeat(*depth);
                 // Sanitize at the display boundary — cache holds raw label.
+                // F5: removed "(via bundle)" suffix — visual noise; member rows
+                // are structurally distinct (indented child of bundle leaf).
                 let sanitized = sanitize_member_label(label);
-                // "(via bundle)" badge to distinguish virtual member rows.
-                let repo_text = format!("{indent}  {sanitized} (via bundle)");
+                let repo_text = format!("{indent}  {sanitized}");
                 // Related members are highlighted — the `related` flag drives
                 // any future related-highlight styling at the draw layer.
                 // For now we expose it through `marked: false`; the draw layer
@@ -2054,6 +2068,171 @@ mod tests {
             tiers_with_tree >= 2,
             "tree: at least two hint tiers must contain 't tree'; tiers: {:?}",
             m_tree.hint_tiers
+        );
+    }
+}
+
+// ── P2 Specify tests — C-1 bundle-leaf arrow glyph ───────────────────────────
+//
+// These tests encode contract C-1 from plan_tui_member_nodes.
+// They MUST compile. They will pass only after P3 implements the bundle-leaf
+// glyph branch in `tree_render_rows`.
+#[cfg(test)]
+mod p2_render_member_node_tests {
+    use super::*;
+    use crate::tui::state::{ArtifactState, TuiRow, TuiState, ViewMode};
+
+    fn bundle_tui_row(repo: &str) -> TuiRow {
+        TuiRow {
+            kind: "bundle".to_string(),
+            repo: repo.to_string(),
+            description: String::new(),
+            summary: String::new(),
+            keywords: vec![],
+            repository_url: None,
+            latest_tag: "latest".to_string(),
+            version: "1.0.0".to_string(),
+            pinned_version: None,
+            state: ArtifactState::NotInstalled,
+        }
+    }
+
+    fn skill_tui_row(repo: &str) -> TuiRow {
+        TuiRow {
+            kind: "skill".to_string(),
+            repo: repo.to_string(),
+            description: String::new(),
+            summary: String::new(),
+            keywords: vec![],
+            repository_url: None,
+            latest_tag: "latest".to_string(),
+            version: "1.0.0".to_string(),
+            pinned_version: None,
+            state: ArtifactState::Installed,
+        }
+    }
+
+    // C-1: bundle leaf collapsed=true renders `▸ ` prefix in the repo column
+    // (after stripping leading indent spaces). F4: UTF-8 only, no ASCII fallback.
+
+    #[test]
+    fn c1_bundle_leaf_arrow_glyph_collapsed_shows_right_arrow() {
+        // Directly call tree_render_rows on a synthetic state containing a
+        // collapsed bundle leaf at depth 0 (no group above it).
+        let mut s = TuiState::new();
+        // Use a no-default-registry setup so the bundle leaf is at depth 0.
+        s.set_rows(vec![bundle_tui_row("acme/bundle-x")]);
+        s.toggle_view_mode();
+        assert_eq!(s.view_mode, ViewMode::Tree);
+
+        let render_rows = tree_render_rows(&s);
+
+        // Find the leaf row (non-group).
+        let leaf_row = render_rows.iter().find(|r| r.group.is_none());
+        assert!(leaf_row.is_some(), "C-1: must have at least one leaf render row");
+        let repo_col = &leaf_row.unwrap().columns[0];
+        // F4: collapsed bundle leaf must render the UTF-8 ▸ glyph (same as groups).
+        let trimmed = repo_col.trim_start();
+        assert!(
+            trimmed.starts_with('▸'),
+            "C-1: collapsed bundle leaf must render ▸ arrow prefix; got: {repo_col:?}"
+        );
+    }
+
+    #[test]
+    fn c1_bundle_leaf_arrow_glyph_expanded_shows_down_arrow() {
+        // A bundle leaf that IS in expanded_bundles must show ▾.
+        let mut s = TuiState::new();
+        s.set_rows(vec![bundle_tui_row("acme/bundle-x")]);
+        s.toggle_view_mode();
+        assert_eq!(s.view_mode, ViewMode::Tree);
+
+        // Seed expanded_bundles so the leaf is "expanded" (collapsed = false).
+        // F3: key = full bundle repo. "acme/bundle-x" has no default_registry,
+        // so the full repo IS "acme/bundle-x".
+        s.expanded_bundles.insert("acme/bundle-x".to_string());
+
+        let render_rows = tree_render_rows(&s);
+
+        let leaf_row = render_rows.iter().find(|r| r.group.is_none());
+        assert!(leaf_row.is_some(), "C-1: must have at least one leaf render row");
+        let repo_col = &leaf_row.unwrap().columns[0];
+        let trimmed = repo_col.trim_start();
+        // F4: expanded bundle leaf must render the UTF-8 ▾ glyph.
+        assert!(
+            trimmed.starts_with('▾'),
+            "C-1: expanded bundle leaf must render ▾ arrow prefix; got: {repo_col:?}"
+        );
+    }
+
+    #[test]
+    fn c1_non_bundle_leaf_has_no_arrow_prefix() {
+        // A non-bundle leaf must NOT have a leading arrow. The prefix must be
+        // byte-identical to indent + label (no ▸/▾/>/v insertion).
+        let mut s = TuiState::new();
+        s.set_rows(vec![skill_tui_row("acme/my-skill")]);
+        s.toggle_view_mode();
+        assert_eq!(s.view_mode, ViewMode::Tree);
+
+        let render_rows = tree_render_rows(&s);
+
+        let leaf_row = render_rows.iter().find(|r| r.group.is_none());
+        assert!(leaf_row.is_some(), "C-1: must have at least one leaf render row");
+        let repo_col = &leaf_row.unwrap().columns[0];
+        let trimmed = repo_col.trim_start();
+        // F4: Must NOT start with the UTF-8 arrow glyphs used by bundle leaves.
+        assert!(
+            !trimmed.starts_with('▸') && !trimmed.starts_with('▾'),
+            "C-1: non-bundle leaf must NOT have an arrow prefix; got: {repo_col:?}"
+        );
+    }
+
+    // C-1: Directly test the DisplayRow → RenderRow mapping for a synthetic
+    // collapsed bundle Leaf, bypassing state.flattened().
+    // This test exercises the render arm directly via tree_render_rows on a state
+    // we craft to contain a bundle leaf in its flattened output.
+
+    #[test]
+    fn c1_bundle_leaf_and_non_bundle_leaf_prefix_differ() {
+        // Bundle + non-bundle side-by-side in the same tree.
+        // After P3: the bundle leaf gets an arrow, the non-bundle leaf does not.
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            bundle_tui_row("reg/acme/bundle-x"),
+            skill_tui_row("reg/acme/my-skill"),
+        ]);
+        s.set_default_registry(Some("reg".to_string()));
+        s.toggle_view_mode();
+        assert_eq!(s.view_mode, ViewMode::Tree);
+
+        let render_rows = tree_render_rows(&s);
+
+        // Gather leaf rows (non-group).
+        let leaf_rows: Vec<&RenderRow> = render_rows.iter().filter(|r| r.group.is_none()).collect();
+        assert!(
+            leaf_rows.len() >= 2,
+            "C-1: must have at least 2 leaf render rows; rows={leaf_rows:?}"
+        );
+
+        // F4: At least one leaf must have the UTF-8 arrow prefix (the bundle leaf).
+        let any_has_arrow = leaf_rows.iter().any(|r| {
+            let t = r.columns[0].trim_start();
+            t.starts_with('▸') || t.starts_with('▾')
+        });
+        // At least one leaf must NOT have an arrow prefix (the skill leaf).
+        let any_no_arrow = leaf_rows.iter().any(|r| {
+            let t = r.columns[0].trim_start();
+            !t.starts_with('▸') && !t.starts_with('▾')
+        });
+
+        assert!(
+            any_has_arrow,
+            "C-1/F4: at least one leaf must have a UTF-8 ▸/▾ arrow prefix (the bundle leaf); rows={:?}",
+            leaf_rows.iter().map(|r| r.columns[0].as_str()).collect::<Vec<_>>()
+        );
+        assert!(
+            any_no_arrow,
+            "C-1: at least one leaf must have NO arrow prefix (the skill leaf)"
         );
     }
 }

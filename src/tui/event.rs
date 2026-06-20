@@ -90,6 +90,24 @@ pub enum TuiAction {
     /// Run `op` over the given `rows` indices (the marked set, else the
     /// single selection).
     Batch { op: BatchOp, rows: Vec<usize> },
+    /// Install, update, or uninstall a single bundle member that has no
+    /// `rows` index (virtual projection-only row). Carries its own
+    /// `repo` and `kind` so the app handler never needs a `rows` index.
+    ///
+    /// Emitted in Phase 4 (P4.1) when the cursor is on a
+    /// `DisplayRow::Member` with `member_repo = Some(repo)` AND `marked`
+    /// is empty. Falls through to `Batch` otherwise (marks-win, D7/C-8).
+    ///
+    /// The app dispatch arm is stubbed with `unimplemented!()` in P1 (P1.4).
+    MemberAction {
+        /// Which batch-style op to run (install / update / uninstall).
+        op: BatchOp,
+        /// The validated `registry/repository` reference for this member.
+        repo: String,
+        /// Artifact kind (never `Bundle` — per-member bundle-nesting rejected
+        /// at `bundle_members.rs:72-74`).
+        kind: crate::oci::ArtifactKind,
+    },
     /// Rebuild the catalog from the registry.
     Refresh,
     /// Toggle the active scope (Global ⇄ Project) and recompute states.
@@ -293,13 +311,21 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
             TuiAction::None
         }
         TuiInput::Enter => {
-            // On a tree group, Enter folds/unfolds it; on a leaf (or in
-            // flat view) it opens the detail pane as before.
-            // Guard: only call selected_is_group() in Tree mode — the stub
-            // is unimplemented and must not fire in Flat mode (existing
-            // tests run in Flat mode).
-            if state.view_mode == ViewMode::Tree && state.selected_is_group() {
-                state.toggle_collapse_selected();
+            // On a tree group, Enter folds/unfolds it; on a member row it
+            // opens the detail pane via the member-aware helper; on a leaf
+            // (or in flat view) it opens the detail pane as before.
+            // F12: compute flat once for the whole Enter handler to avoid
+            // calling flattened() in selected_is_group() AND again below.
+            if state.view_mode == ViewMode::Tree {
+                let flat = state.flattened();
+                if matches!(flat.get(state.selected), Some(super::tree::DisplayRow::Group { .. })) {
+                    state.toggle_collapse_selected();
+                } else if matches!(flat.get(state.selected), Some(super::tree::DisplayRow::Member { .. })) {
+                    // P3.4 / D5b: Enter on a member row opens the detail pane.
+                    state.enter_member_detail();
+                } else {
+                    state.enter_detail();
+                }
             } else {
                 state.enter_detail();
             }
@@ -318,9 +344,112 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
             TuiAction::None
         }
         TuiInput::Char('q') | TuiInput::Quit => TuiAction::Quit,
-        TuiInput::Char('i') | TuiInput::Install => batch(state, BatchOp::Install),
-        TuiInput::Char('u') | TuiInput::Update => batch(state, BatchOp::Update),
-        TuiInput::Char('d') | TuiInput::Delete => batch(state, BatchOp::Uninstall),
+        TuiInput::Char('i') | TuiInput::Install => {
+            // P4.1: when marks are empty and the cursor is on a Member with a
+            // known repo, route to MemberAction (D9 gate: install requires
+            // NotInstalled or IntegrityMissing). State-gated-out → status breadcrumb.
+            // F12: compute flat once; reuse for the early-return check and as
+            // the action_targets source (batch() will recompute, but this path
+            // early-returns before batch(), so only one flattened() per code path).
+            if state.marked.is_empty() && state.view_mode == ViewMode::Tree {
+                let flat = state.flattened();
+                if let Some(super::tree::DisplayRow::Member {
+                    member_repo: Some(repo),
+                    kind,
+                    state: member_state,
+                    ..
+                }) = flat.get(state.selected)
+                {
+                    use crate::tui::state::ArtifactState;
+                    // F13: explicit arms — no `_ =>` wildcard over closed enum.
+                    match member_state {
+                        ArtifactState::NotInstalled | ArtifactState::IntegrityMissing => {
+                            return TuiAction::MemberAction {
+                                op: BatchOp::Install,
+                                repo: repo.clone(),
+                                kind: *kind,
+                            };
+                        }
+                        ArtifactState::Installed | ArtifactState::Outdated | ArtifactState::Modified => {
+                            state.set_status("already installed");
+                            return TuiAction::None;
+                        }
+                    }
+                }
+            }
+            batch(state, BatchOp::Install)
+        }
+        TuiInput::Char('u') | TuiInput::Update => {
+            // P4.1 + F10: update requires Installed, Outdated, Modified, or
+            // IntegrityMissing (integrity-missing = declared but corrupt →
+            // reinstall via Update is the correct recovery, matching leaf semantics).
+            // F12: single flattened() call per code path (early-return before batch()).
+            if state.marked.is_empty() && state.view_mode == ViewMode::Tree {
+                let flat = state.flattened();
+                if let Some(super::tree::DisplayRow::Member {
+                    member_repo: Some(repo),
+                    kind,
+                    state: member_state,
+                    ..
+                }) = flat.get(state.selected)
+                {
+                    use crate::tui::state::ArtifactState;
+                    // F13: explicit arms — no `_ =>` wildcard over closed enum.
+                    // F10: IntegrityMissing now allowed for Update (reinstall).
+                    match member_state {
+                        ArtifactState::Installed
+                        | ArtifactState::Outdated
+                        | ArtifactState::Modified
+                        | ArtifactState::IntegrityMissing => {
+                            return TuiAction::MemberAction {
+                                op: BatchOp::Update,
+                                repo: repo.clone(),
+                                kind: *kind,
+                            };
+                        }
+                        ArtifactState::NotInstalled => {
+                            state.set_status("not installed");
+                            return TuiAction::None;
+                        }
+                    }
+                }
+            }
+            batch(state, BatchOp::Update)
+        }
+        TuiInput::Char('d') | TuiInput::Delete => {
+            // P4.1: delete requires Installed, Outdated, Modified, or IntegrityMissing.
+            // F12: single flattened() call per code path (early-return before batch()).
+            if state.marked.is_empty() && state.view_mode == ViewMode::Tree {
+                let flat = state.flattened();
+                if let Some(super::tree::DisplayRow::Member {
+                    member_repo: Some(repo),
+                    kind,
+                    state: member_state,
+                    ..
+                }) = flat.get(state.selected)
+                {
+                    use crate::tui::state::ArtifactState;
+                    // F13: explicit arms — no `_ =>` wildcard over closed enum.
+                    match member_state {
+                        ArtifactState::Installed
+                        | ArtifactState::Outdated
+                        | ArtifactState::Modified
+                        | ArtifactState::IntegrityMissing => {
+                            return TuiAction::MemberAction {
+                                op: BatchOp::Uninstall,
+                                repo: repo.clone(),
+                                kind: *kind,
+                            };
+                        }
+                        ArtifactState::NotInstalled => {
+                            state.set_status("not installed");
+                            return TuiAction::None;
+                        }
+                    }
+                }
+            }
+            batch(state, BatchOp::Uninstall)
+        }
         TuiInput::Char(' ') | TuiInput::Mark => {
             state.toggle_mark_selected();
             TuiAction::None
@@ -340,8 +469,9 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
             TuiAction::None
         }
         TuiInput::Expand => {
-            // Expand a group if selected; for bundle leaves, trigger a lazy
-            // member-list fetch if no cache entry exists yet.
+            // Expand a group if selected; for bundle leaves, insert the leaf
+            // key into expanded_bundles and trigger a lazy member-list fetch
+            // if no cache entry exists yet.
             let selected_before = state.selected;
             state.expand_selected();
 
@@ -350,18 +480,26 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
             // (no-retry: Loading/Failed/Offline entries are kept as-is).
             if state.view_mode == crate::tui::state::ViewMode::Tree {
                 let flat = state.flattened();
-                if let Some(crate::tui::tree::DisplayRow::Leaf { row, .. }) = flat.get(selected_before)
+                if let Some(crate::tui::tree::DisplayRow::Leaf { row, key: leaf_key, .. }) = flat.get(selected_before)
                     && let Some(tui_row) = state.rows.get(*row)
                     && tui_row.kind == "bundle"
                 {
                     let row_idx = *row;
                     let bundle_repo = tui_row.repo.clone();
-                    let key = (state.scope_label.clone(), bundle_repo.clone());
+                    let _ = leaf_key; // unused after F3 re-keying
+                    let cache_key = (state.scope_label.clone(), bundle_repo.clone());
+
+                    // F3/P3.4: Insert the FULL bundle repo into expanded_bundles
+                    // so the member splice gate in flatten_with_members passes.
+                    // Key is now registry/repository (not the display leaf key).
+                    // Idempotent — re-pressing → when already Ready is fine.
+                    state.expanded_bundles.insert(bundle_repo.clone());
+
                     // Only spawn a fetch when no entry exists yet OR when the
                     // entry is Loading but no task is in flight (the channel was
                     // full and the result was dropped — recovery path per W3).
                     // Failed/Ready/Offline entries are kept as-is (no retry storm).
-                    let should_fetch = match state.bundle_members.get(&key) {
+                    let should_fetch = match state.bundle_members.get(&cache_key) {
                         None => true,
                         Some(crate::tui::bundle_members::BundleMemberCache::Loading) => {
                             // Allow re-fetch: a previous try_send may have dropped
@@ -376,7 +514,7 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
                         // immediately while the fetch is in flight.
                         state
                             .bundle_members
-                            .insert(key, crate::tui::bundle_members::BundleMemberCache::Loading);
+                            .insert(cache_key, crate::tui::bundle_members::BundleMemberCache::Loading);
                         return TuiAction::LoadBundleMembers {
                             row: row_idx,
                             bundle_repo,
@@ -388,6 +526,32 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
             TuiAction::None
         }
         TuiInput::Collapse => {
+            // F3/P3.4: `←` on an expanded bundle leaf collapses it (removes
+            // the FULL bundle repo from expanded_bundles, keeps cache).
+            // F8: delegates to collapse_bundle_leaf to also re-clamp selection.
+            // On any other selection fall through to standard collapse-or-jump-to-parent.
+            if state.view_mode == crate::tui::state::ViewMode::Tree {
+                let flat = state.flattened();
+                if let Some(crate::tui::tree::DisplayRow::Leaf {
+                    row,
+                    is_bundle,
+                    collapsed,
+                    ..
+                }) = flat.get(state.selected)
+                    && *is_bundle
+                    && !collapsed
+                {
+                    // Expanded bundle leaf: collapse it.
+                    // Resolve full repo from rows to avoid depending on the
+                    // display-path key (which is elided when default_registry matches).
+                    let row_idx = *row;
+                    let bundle_repo = state.rows.get(row_idx).map(|r| r.repo.clone());
+                    if let Some(repo) = bundle_repo {
+                        state.collapse_bundle_leaf(&repo);
+                    }
+                    return TuiAction::None;
+                }
+            }
             // ARIA/nvim-tree/lazygit standard: `←` on an expanded group
             // collapses it; `←` on a collapsed group or a leaf jumps to
             // the nearest ancestor group (see `collapse_or_jump_to_parent`).
@@ -869,6 +1033,608 @@ mod tests {
 // NOTE: Step 3.3 additional tests are appended below the closing brace
 // of the existing `mod tests` block. They are in a separate mod to avoid
 // merge conflicts with the block above.
+
+// ── P2 Specify tests — C-5, C-5b, C-6, C-7, C-8, C-12 ──────────────────────
+//
+// These tests encode contracts from plan_tui_member_nodes.
+// They MUST compile and MUST FAIL against P1/P3 stubs (unimplemented!).
+// Do NOT implement production logic here — tests only.
+#[cfg(test)]
+mod p2_event_member_node_tests {
+    use super::*;
+    use crate::tui::bundle_members::{BundleMemberCache, MemberNode};
+    use crate::tui::state::{ArtifactState, TuiRow, TuiState};
+    use crate::tui::tree::DisplayRow;
+
+    fn bundle_row(repo: &str) -> TuiRow {
+        TuiRow {
+            kind: "bundle".to_string(),
+            repo: repo.to_string(),
+            description: String::new(),
+            summary: String::new(),
+            keywords: vec![],
+            repository_url: None,
+            latest_tag: "latest".to_string(),
+            version: "1.0.0".to_string(),
+            pinned_version: None,
+            state: ArtifactState::NotInstalled,
+        }
+    }
+
+    fn skill_row(repo: &str) -> TuiRow {
+        TuiRow {
+            kind: "skill".to_string(),
+            repo: repo.to_string(),
+            description: String::new(),
+            summary: String::new(),
+            keywords: vec![],
+            repository_url: None,
+            latest_tag: "latest".to_string(),
+            version: "1.0.0".to_string(),
+            pinned_version: None,
+            state: ArtifactState::NotInstalled,
+        }
+    }
+
+    fn make_member_node(repo: Option<&str>, state: ArtifactState) -> MemberNode {
+        MemberNode {
+            kind: crate::oci::ArtifactKind::Skill,
+            label: "my-skill".to_string(),
+            member_repo: repo.map(|r| r.to_string()),
+            state,
+            related: false,
+        }
+    }
+
+    /// Build a tree-mode TuiState with one bundle and one expanded member.
+    fn bundle_state_with_expanded_member(member_state: ArtifactState, member_repo: Option<&str>) -> TuiState {
+        let mut s = TuiState::new();
+        s.set_rows(vec![bundle_row("reg/acme/bundle-x")]);
+        s.set_default_registry(Some("reg".to_string()));
+        s.toggle_view_mode(); // Tree mode
+
+        let scope = s.scope_label.clone();
+        s.bundle_members.insert(
+            (scope, "reg/acme/bundle-x".to_string()),
+            BundleMemberCache::Ready(vec![make_member_node(member_repo, member_state)]),
+        );
+        // F3: expanded_bundles is now keyed by the FULL bundle repo string.
+        s.expanded_bundles.insert("reg/acme/bundle-x".to_string());
+        s
+    }
+
+    /// Navigate to the first Member in the flattened tree.
+    fn select_member(s: &mut TuiState) -> bool {
+        let flat = s.flattened();
+        if let Some(pos) = flat.iter().position(|r| matches!(r, DisplayRow::Member { .. })) {
+            s.selected = pos;
+            true
+        } else {
+            false
+        }
+    }
+
+    // ── C-5: → on a bundle leaf inserts key into expanded_bundles and emits LoadBundleMembers
+    // when no cache entry exists yet.
+
+    #[test]
+    fn c5_expand_on_bundle_leaf_no_cache_emits_load_bundle_members() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![bundle_row("reg/acme/bundle-x")]);
+        s.set_default_registry(Some("reg".to_string()));
+        s.toggle_view_mode();
+        // No cache entry → should emit LoadBundleMembers.
+        // Navigate to the bundle leaf (should be at the leaf position after the group).
+        let flat = s.flattened();
+        let leaf_pos = flat
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Leaf { is_bundle: true, .. }))
+            .unwrap_or(1); // group is pos 0, leaf is pos 1
+        s.selected = leaf_pos;
+
+        let action = handle(&mut s, TuiInput::Expand);
+
+        // After expand: bundle-x must be in expanded_bundles (keyed by FULL repo after F3).
+        assert!(
+            s.expanded_bundles.contains("reg/acme/bundle-x"),
+            "C-5: → on bundle leaf must insert full repo key into expanded_bundles"
+        );
+        // Action must be LoadBundleMembers (no cache entry exists).
+        assert!(
+            matches!(action, TuiAction::LoadBundleMembers { ref bundle_repo, .. } if bundle_repo == "reg/acme/bundle-x"),
+            "C-5: → on bundle leaf with no cache must emit LoadBundleMembers; got: {action:?}"
+        );
+    }
+
+    #[test]
+    fn c5_expand_on_bundle_leaf_with_ready_cache_emits_none() {
+        // → on an already-expanded bundle leaf with a Ready cache: no re-fetch.
+        let mut s = bundle_state_with_expanded_member(ArtifactState::NotInstalled, Some("reg/acme/skill-a"));
+        // Navigate to the bundle leaf.
+        let flat = s.flattened();
+        let leaf_pos = flat
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Leaf { is_bundle: true, .. }))
+            .unwrap_or(1);
+        s.selected = leaf_pos;
+
+        // Press → twice: first press may change state, second must be idempotent.
+        let _first = handle(&mut s, TuiInput::Expand);
+        let second = handle(&mut s, TuiInput::Expand);
+
+        assert_eq!(
+            second,
+            TuiAction::None,
+            "C-5: idempotent double-→ on Ready bundle leaf must return TuiAction::None"
+        );
+        // expanded_bundles must still contain the full repo key (F3: full repo, not leaf path).
+        assert!(
+            s.expanded_bundles.contains("reg/acme/bundle-x"),
+            "C-5: bundle-x must remain in expanded_bundles after double-→ (full repo key)"
+        );
+    }
+
+    #[test]
+    fn c5_collapse_on_expanded_bundle_leaf_removes_key_and_keeps_cache() {
+        // ← on an expanded bundle leaf removes the key from expanded_bundles;
+        // cache entry is retained.
+        let mut s = bundle_state_with_expanded_member(ArtifactState::NotInstalled, Some("reg/acme/skill-a"));
+
+        // Navigate to the bundle leaf.
+        let flat = s.flattened();
+        let leaf_pos = flat
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Leaf { is_bundle: true, .. }))
+            .unwrap_or(1);
+        s.selected = leaf_pos;
+
+        let action = handle(&mut s, TuiInput::Collapse);
+
+        assert_eq!(
+            action,
+            TuiAction::None,
+            "C-5: ← on expanded bundle leaf must return TuiAction::None"
+        );
+        assert!(
+            !s.expanded_bundles.contains("reg/acme/bundle-x"),
+            "C-5: ← must remove bundle-x (full repo key) from expanded_bundles"
+        );
+        // Cache must still be present (not cleared).
+        let key = (s.scope_label.clone(), "reg/acme/bundle-x".to_string());
+        assert!(
+            s.bundle_members.contains_key(&key),
+            "C-5: cache must be retained after ← (collapse without cache clear)"
+        );
+    }
+
+    #[test]
+    fn c5_enter_on_bundle_leaf_opens_detail_not_toggle() {
+        // Enter on a bundle leaf must enter Mode::Detail (not toggle collapse).
+        let mut s = bundle_state_with_expanded_member(ArtifactState::NotInstalled, Some("reg/acme/skill-a"));
+
+        // Navigate to the bundle leaf.
+        let flat = s.flattened();
+        let leaf_pos = flat
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Leaf { is_bundle: true, .. }))
+            .unwrap_or(1);
+        s.selected = leaf_pos;
+
+        let action = handle(&mut s, TuiInput::Enter);
+
+        assert_eq!(
+            s.mode,
+            Mode::Detail,
+            "C-5: Enter on bundle leaf must enter Mode::Detail"
+        );
+        assert_eq!(
+            action,
+            TuiAction::None,
+            "C-5: Enter on bundle leaf returns TuiAction::None"
+        );
+        // expanded_bundles must be unchanged by Enter (F3: check full repo key).
+        assert!(
+            s.expanded_bundles.contains("reg/acme/bundle-x"),
+            "C-5: Enter must NOT modify expanded_bundles"
+        );
+    }
+
+    // ── C-5b: Enter on a member enters Mode::Detail ───────────────────────────
+
+    #[test]
+    fn c5b_enter_on_member_enters_detail_mode() {
+        let mut s = bundle_state_with_expanded_member(ArtifactState::NotInstalled, Some("reg/acme/skill-a"));
+
+        let found = select_member(&mut s);
+        assert!(found, "C-5b: must have a Member row to test Enter-on-member");
+
+        let action = handle(&mut s, TuiInput::Enter);
+
+        assert_eq!(
+            s.mode,
+            Mode::Detail,
+            "C-5b: Enter on a member must transition to Mode::Detail (not a no-op)"
+        );
+        assert_eq!(
+            action,
+            TuiAction::None,
+            "C-5b: Enter on a member returns TuiAction::None"
+        );
+    }
+
+    #[test]
+    fn c5b_enter_on_member_does_not_mutate_expanded_bundles() {
+        let mut s = bundle_state_with_expanded_member(ArtifactState::NotInstalled, Some("reg/acme/skill-a"));
+        let bundles_before = s.expanded_bundles.clone();
+
+        let found = select_member(&mut s);
+        if found {
+            handle(&mut s, TuiInput::Enter);
+            assert_eq!(
+                s.expanded_bundles, bundles_before,
+                "C-5b: Enter on a member must not change expanded_bundles"
+            );
+        }
+    }
+
+    #[test]
+    fn c5b_enter_on_member_resets_detail_scroll_to_zero() {
+        let mut s = bundle_state_with_expanded_member(ArtifactState::NotInstalled, Some("reg/acme/skill-a"));
+        s.detail_scroll = 5; // pre-set scroll
+
+        let found = select_member(&mut s);
+        if found {
+            handle(&mut s, TuiInput::Enter);
+            assert_eq!(
+                s.detail_scroll, 0,
+                "C-5b: Enter on a member must reset detail_scroll to 0"
+            );
+        }
+    }
+
+    // ── C-6: member i/u/d single-target dispatch ──────────────────────────────
+
+    #[test]
+    fn c6_install_on_member_with_some_repo_emits_member_action() {
+        let mut s = bundle_state_with_expanded_member(ArtifactState::NotInstalled, Some("reg/acme/skill-a"));
+        let found = select_member(&mut s);
+        assert!(found, "C-6: must have a Member row");
+
+        let action = handle(&mut s, TuiInput::Install);
+
+        assert!(
+            matches!(
+                action,
+                TuiAction::MemberAction { op: BatchOp::Install, ref repo, .. }
+                if repo == "reg/acme/skill-a"
+            ),
+            "C-6: Install on member with Some(repo) must emit MemberAction; got: {action:?}"
+        );
+    }
+
+    #[test]
+    fn c6_update_on_member_emits_member_action() {
+        let mut s = bundle_state_with_expanded_member(ArtifactState::Installed, Some("reg/acme/skill-a"));
+        let found = select_member(&mut s);
+        assert!(found, "C-6: must have a Member row");
+
+        let action = handle(&mut s, TuiInput::Update);
+
+        assert!(
+            matches!(
+                action,
+                TuiAction::MemberAction { op: BatchOp::Update, ref repo, .. }
+                if repo == "reg/acme/skill-a"
+            ),
+            "C-6: Update on member must emit MemberAction; got: {action:?}"
+        );
+    }
+
+    #[test]
+    fn c6_delete_on_member_emits_member_action() {
+        let mut s = bundle_state_with_expanded_member(ArtifactState::Installed, Some("reg/acme/skill-a"));
+        let found = select_member(&mut s);
+        assert!(found, "C-6: must have a Member row");
+
+        let action = handle(&mut s, TuiInput::Delete);
+
+        assert!(
+            matches!(
+                action,
+                TuiAction::MemberAction { op: BatchOp::Uninstall, ref repo, .. }
+                if repo == "reg/acme/skill-a"
+            ),
+            "C-6: Delete on member must emit MemberAction; got: {action:?}"
+        );
+    }
+
+    #[test]
+    fn c6_none_repo_yields_none_action() {
+        // A member with member_repo = None (placeholder) must emit TuiAction::None.
+        let mut s = bundle_state_with_expanded_member(ArtifactState::NotInstalled, None);
+        let found = select_member(&mut s);
+        assert!(found, "C-6: must have a Member row (placeholder)");
+
+        let action = handle(&mut s, TuiInput::Install);
+
+        assert_eq!(
+            action,
+            TuiAction::None,
+            "C-6: member with None repo must return TuiAction::None"
+        );
+    }
+
+    // ── C-7: state-gating per member.state ────────────────────────────────────
+    //
+    // i: NotInstalled, IntegrityMissing → MemberAction(Install)
+    // u: Installed, Outdated, Modified → MemberAction(Update)
+    // d: Installed, Outdated, Modified, IntegrityMissing → MemberAction(Uninstall)
+    // Everything else → TuiAction::None
+
+    #[test]
+    fn c7_install_gate_not_installed_emits_member_action() {
+        let mut s = bundle_state_with_expanded_member(ArtifactState::NotInstalled, Some("reg/acme/skill-a"));
+        select_member(&mut s);
+        let action = handle(&mut s, TuiInput::Install);
+        assert!(
+            matches!(
+                action,
+                TuiAction::MemberAction {
+                    op: BatchOp::Install,
+                    ..
+                }
+            ),
+            "C-7: i on NotInstalled member must emit MemberAction(Install); got: {action:?}"
+        );
+    }
+
+    #[test]
+    fn c7_install_gate_integrity_missing_emits_member_action() {
+        let mut s = bundle_state_with_expanded_member(ArtifactState::IntegrityMissing, Some("reg/acme/skill-a"));
+        select_member(&mut s);
+        let action = handle(&mut s, TuiInput::Install);
+        assert!(
+            matches!(
+                action,
+                TuiAction::MemberAction {
+                    op: BatchOp::Install,
+                    ..
+                }
+            ),
+            "C-7: i on IntegrityMissing member must emit MemberAction(Install); got: {action:?}"
+        );
+    }
+
+    #[test]
+    fn c7_install_gate_installed_yields_none() {
+        // Install on Installed → gated out → TuiAction::None
+        let mut s = bundle_state_with_expanded_member(ArtifactState::Installed, Some("reg/acme/skill-a"));
+        select_member(&mut s);
+        let action = handle(&mut s, TuiInput::Install);
+        assert_eq!(
+            action,
+            TuiAction::None,
+            "C-7: i on Installed member must be gated out (TuiAction::None); got: {action:?}"
+        );
+    }
+
+    #[test]
+    fn c7_install_gate_outdated_yields_none() {
+        let mut s = bundle_state_with_expanded_member(ArtifactState::Outdated, Some("reg/acme/skill-a"));
+        select_member(&mut s);
+        let action = handle(&mut s, TuiInput::Install);
+        assert_eq!(
+            action,
+            TuiAction::None,
+            "C-7: i on Outdated member must be gated out; got: {action:?}"
+        );
+    }
+
+    #[test]
+    fn c7_install_gate_modified_yields_none() {
+        let mut s = bundle_state_with_expanded_member(ArtifactState::Modified, Some("reg/acme/skill-a"));
+        select_member(&mut s);
+        let action = handle(&mut s, TuiInput::Install);
+        assert_eq!(
+            action,
+            TuiAction::None,
+            "C-7: i on Modified member must be gated out; got: {action:?}"
+        );
+    }
+
+    #[test]
+    fn c7_update_gate_installed_emits_member_action() {
+        let mut s = bundle_state_with_expanded_member(ArtifactState::Installed, Some("reg/acme/skill-a"));
+        select_member(&mut s);
+        let action = handle(&mut s, TuiInput::Update);
+        assert!(
+            matches!(
+                action,
+                TuiAction::MemberAction {
+                    op: BatchOp::Update,
+                    ..
+                }
+            ),
+            "C-7: u on Installed member must emit MemberAction(Update); got: {action:?}"
+        );
+    }
+
+    #[test]
+    fn c7_update_gate_outdated_emits_member_action() {
+        let mut s = bundle_state_with_expanded_member(ArtifactState::Outdated, Some("reg/acme/skill-a"));
+        select_member(&mut s);
+        let action = handle(&mut s, TuiInput::Update);
+        assert!(
+            matches!(
+                action,
+                TuiAction::MemberAction {
+                    op: BatchOp::Update,
+                    ..
+                }
+            ),
+            "C-7: u on Outdated member must emit MemberAction(Update); got: {action:?}"
+        );
+    }
+
+    #[test]
+    fn c7_update_gate_modified_emits_member_action() {
+        let mut s = bundle_state_with_expanded_member(ArtifactState::Modified, Some("reg/acme/skill-a"));
+        select_member(&mut s);
+        let action = handle(&mut s, TuiInput::Update);
+        assert!(
+            matches!(
+                action,
+                TuiAction::MemberAction {
+                    op: BatchOp::Update,
+                    ..
+                }
+            ),
+            "C-7: u on Modified member must emit MemberAction(Update); got: {action:?}"
+        );
+    }
+
+    #[test]
+    fn c7_update_gate_not_installed_yields_none() {
+        let mut s = bundle_state_with_expanded_member(ArtifactState::NotInstalled, Some("reg/acme/skill-a"));
+        select_member(&mut s);
+        let action = handle(&mut s, TuiInput::Update);
+        assert_eq!(
+            action,
+            TuiAction::None,
+            "C-7: u on NotInstalled member must be gated out; got: {action:?}"
+        );
+    }
+
+    #[test]
+    fn c7_update_gate_integrity_missing_emits_member_action() {
+        // F10: IntegrityMissing is now allowed for Update (reinstall semantics —
+        // the artifact is declared but corrupt; 'u' triggers reinstall, matching
+        // leaf-level behavior where Update is the correct recovery).
+        let mut s = bundle_state_with_expanded_member(ArtifactState::IntegrityMissing, Some("reg/acme/skill-a"));
+        select_member(&mut s);
+        let action = handle(&mut s, TuiInput::Update);
+        assert!(
+            matches!(
+                action,
+                TuiAction::MemberAction {
+                    op: BatchOp::Update,
+                    ..
+                }
+            ),
+            "C-7/F10: u on IntegrityMissing member must emit MemberAction(Update) (reinstall); got: {action:?}"
+        );
+    }
+
+    #[test]
+    fn c7_delete_gate_installed_emits_member_action() {
+        let mut s = bundle_state_with_expanded_member(ArtifactState::Installed, Some("reg/acme/skill-a"));
+        select_member(&mut s);
+        let action = handle(&mut s, TuiInput::Delete);
+        assert!(
+            matches!(
+                action,
+                TuiAction::MemberAction {
+                    op: BatchOp::Uninstall,
+                    ..
+                }
+            ),
+            "C-7: d on Installed member must emit MemberAction(Uninstall); got: {action:?}"
+        );
+    }
+
+    #[test]
+    fn c7_delete_gate_integrity_missing_emits_member_action() {
+        let mut s = bundle_state_with_expanded_member(ArtifactState::IntegrityMissing, Some("reg/acme/skill-a"));
+        select_member(&mut s);
+        let action = handle(&mut s, TuiInput::Delete);
+        assert!(
+            matches!(
+                action,
+                TuiAction::MemberAction {
+                    op: BatchOp::Uninstall,
+                    ..
+                }
+            ),
+            "C-7: d on IntegrityMissing member must emit MemberAction(Uninstall); got: {action:?}"
+        );
+    }
+
+    #[test]
+    fn c7_delete_gate_not_installed_yields_none() {
+        let mut s = bundle_state_with_expanded_member(ArtifactState::NotInstalled, Some("reg/acme/skill-a"));
+        select_member(&mut s);
+        let action = handle(&mut s, TuiInput::Delete);
+        assert_eq!(
+            action,
+            TuiAction::None,
+            "C-7: d on NotInstalled member must be gated out; got: {action:?}"
+        );
+    }
+
+    // ── C-8: marks-win — marks non-empty + member cursor → Batch, not MemberAction
+
+    #[test]
+    fn c8_marks_win_over_member_cursor() {
+        // Set up a state with a bundle member AND a catalog row marked.
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            skill_row("reg/acme/skill-z"), // catalog row, will be marked
+            bundle_row("reg/acme/bundle-x"),
+        ]);
+        s.set_default_registry(Some("reg".to_string()));
+        s.toggle_view_mode();
+
+        let scope = s.scope_label.clone();
+        s.bundle_members.insert(
+            (scope, "reg/acme/bundle-x".to_string()),
+            BundleMemberCache::Ready(vec![make_member_node(
+                Some("reg/acme/skill-a"),
+                ArtifactState::NotInstalled,
+            )]),
+        );
+        // F3: expanded_bundles keyed by FULL bundle repo string.
+        s.expanded_bundles.insert("reg/acme/bundle-x".to_string());
+
+        // Mark catalog row 0 (skill-z).
+        s.marked.insert(0);
+
+        // Navigate to the member.
+        let found = select_member(&mut s);
+        assert!(found, "C-8: must have a Member row");
+
+        let action = handle(&mut s, TuiInput::Install);
+
+        // marks non-empty → Batch over the marks, NOT MemberAction.
+        assert!(
+            matches!(action, TuiAction::Batch { op: BatchOp::Install, ref rows } if rows.contains(&0)),
+            "C-8: marks non-empty + member cursor must emit Batch over marks; got: {action:?}"
+        );
+        assert!(
+            !matches!(action, TuiAction::MemberAction { .. }),
+            "C-8: must NOT emit MemberAction when marks are non-empty"
+        );
+    }
+
+    // ── C-12: security — None repo → no action; malformed repo → handled error
+
+    #[test]
+    fn c12_none_repo_yields_none_action() {
+        // Placeholder member (member_repo = None) must never emit MemberAction.
+        let mut s = bundle_state_with_expanded_member(ArtifactState::NotInstalled, None);
+        let found = select_member(&mut s);
+        assert!(found, "C-12: must have a placeholder Member row");
+
+        for input in [TuiInput::Install, TuiInput::Update, TuiInput::Delete] {
+            let action = handle(&mut s, input);
+            assert_eq!(
+                action,
+                TuiAction::None,
+                "C-12: placeholder member (None repo) must yield TuiAction::None for {input:?}"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tree_event_tests {
     use super::*;

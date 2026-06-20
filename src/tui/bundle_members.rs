@@ -111,6 +111,15 @@ pub struct MemberNode {
 /// invariant: sanitize at display time only (`sanitize_member_label`), never
 /// here. This keeps the cache faithful to the registry/lock source.
 pub fn member_node_from(member: &BundleMember, row_repos: &HashSet<&str>, state: ArtifactState) -> Option<MemberNode> {
+    // F2: reject nested-bundle members — nested bundles are disallowed by resolver.rs
+    // and must never produce virtual member rows in the TUI.
+    if member.kind == ArtifactKind::Bundle {
+        tracing::warn!(
+            id = %member.id,
+            "dropping bundle member with kind=Bundle (nested bundles not supported)"
+        );
+        return None;
+    }
     let member_repo = match crate::oci::Identifier::parse(&member.id) {
         Ok(id) => Some(format!("{}/{}", id.registry(), id.repository())),
         Err(e) => {
@@ -136,4 +145,46 @@ pub fn member_node_from(member: &BundleMember, row_repos: &HashSet<&str>, state:
         state,
         related,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn make_member(id: &str, kind: ArtifactKind, name: &str) -> BundleMember {
+        BundleMember {
+            id: id.to_string(),
+            kind,
+            name: name.to_string(),
+        }
+    }
+
+    /// F2 regression: a BundleMember with kind=Bundle must be rejected by
+    /// member_node_from (return None). This blocks nested-bundle members from
+    /// ever producing virtual MemberNode rows or MemberAction events in the TUI.
+    #[test]
+    fn f2_bundle_kind_member_is_rejected() {
+        let row_repos: HashSet<&str> = HashSet::new();
+        let bundle_member = make_member(
+            "reg.example.io/acme/inner-bundle:latest",
+            ArtifactKind::Bundle,
+            "inner-bundle",
+        );
+        let result = member_node_from(&bundle_member, &row_repos, ArtifactState::NotInstalled);
+        assert!(
+            result.is_none(),
+            "F2: member_node_from must return None for kind=Bundle; got Some({result:?})"
+        );
+    }
+
+    /// Skill members are accepted (sanity check that the F2 guard doesn't
+    /// over-reject).
+    #[test]
+    fn f2_skill_kind_member_is_accepted() {
+        let row_repos: HashSet<&str> = HashSet::new();
+        let skill_member = make_member("reg.example.io/acme/my-skill:latest", ArtifactKind::Skill, "my-skill");
+        let result = member_node_from(&skill_member, &row_repos, ArtifactState::NotInstalled);
+        assert!(result.is_some(), "F2: member_node_from must accept kind=Skill members");
+    }
 }

@@ -206,6 +206,20 @@ pub struct TuiState {
     ///   longer appears in the fresh rows are dropped; survivors retained).
     /// - A `Failed` entry is never re-fetched on Expand (no retry storm).
     pub bundle_members: HashMap<BundleMemberKey, BundleMemberCache>,
+    /// Explicit bundle-leaf expand state. A bundle leaf whose key is present
+    /// here has been explicitly expanded (member rows are spliced in by
+    /// `flatten_with_members`). Absent = collapsed (default state).
+    ///
+    /// This is ORTHOGONAL to `collapsed` (which gates GROUP descendants with
+    /// the opposite default polarity — absent from `collapsed` = expanded).
+    /// Two sets are needed because bundle leaves default-collapsed while groups
+    /// default-expanded (D3a / GAP-1). Keys are `LeafNode.key` strings.
+    ///
+    /// Lifecycle mirrors `bundle_members` exactly (D3b):
+    /// - Cleared wholesale on `set_rows`.
+    /// - Pruned on `merge_catalog_rows` (same bundle-rows-only prune).
+    /// - Cleared on scope toggle in `app.rs`.
+    pub expanded_bundles: BTreeSet<String>,
 }
 
 impl Default for TuiState {
@@ -235,6 +249,7 @@ impl Default for TuiState {
             group_by_type: false,
             tree_separators: vec!["/".into()],
             bundle_members: HashMap::new(),
+            expanded_bundles: BTreeSet::new(),
         }
     }
 }
@@ -298,6 +313,9 @@ impl TuiState {
         // Full reload invalidates all bundle-member cache entries: the set of
         // bundles, their repos, and their members may all have changed.
         self.bundle_members.clear();
+        // Lifecycle (D3b): expanded_bundles mirrors bundle_members — clear
+        // together so no stale expand state remains after a catalog reload.
+        self.expanded_bundles.clear();
     }
 
     /// Reconcile a freshly-refreshed catalog row set into the current screen
@@ -358,11 +376,12 @@ impl TuiState {
             }
         }
 
-        // Snapshot the bundle-member cache before the set_rows call erases it,
-        // so we can restore entries that survive the merge (repos still present
-        // in the fresh catalog keep their cached member list; repos that vanished
-        // are pruned).
+        // Snapshot the bundle-member cache AND expanded_bundles before the
+        // set_rows call erases them, so we can restore entries that survive the
+        // merge (repos still present in the fresh catalog keep their cached
+        // member list + expand state; repos that vanished are pruned).
         let saved_bundle_members = std::mem::take(&mut self.bundle_members);
+        let saved_expanded_bundles = std::mem::take(&mut self.expanded_bundles);
 
         // The single kind-sort + filter choke point; clears marks and resets
         // selection, both of which we restore by repo key below.
@@ -373,7 +392,10 @@ impl TuiState {
         // must not accidentally keep a stale bundle cache entry (W7: scope the
         // prune to bundle rows only so a skill/rule with the same repo name does
         // not prevent eviction of the bundle cache entry when the bundle vanishes).
-        if !saved_bundle_members.is_empty() {
+        //
+        // Lifecycle (D3b): expanded_bundles is pruned the same bundle-rows-only
+        // way, using the same live_repos set so both are pruned in lockstep.
+        if !saved_bundle_members.is_empty() || !saved_expanded_bundles.is_empty() {
             let live_repos: std::collections::HashSet<&str> = self
                 .rows
                 .iter()
@@ -383,6 +405,17 @@ impl TuiState {
             for (key, cache) in saved_bundle_members {
                 if live_repos.contains(key.1.as_str()) {
                     self.bundle_members.insert(key, cache);
+                }
+            }
+            // F3: expanded_bundles keys are now FULL bundle repo strings
+            // (registry/repository), the same identity used by bundle_members.
+            // The prune is a direct membership test: retain a key iff the full
+            // repo is still present in the fresh live bundle-repo set.
+            // This eliminates the brittle rsplit('/') leaf-name heuristic and
+            // the P3 TODO comment.
+            for key in saved_expanded_bundles {
+                if live_repos.contains(key.as_str()) {
+                    self.expanded_bundles.insert(key);
                 }
             }
         }
@@ -874,6 +907,7 @@ impl TuiState {
         super::tree::flatten_with_members(
             &tree,
             effective_collapsed,
+            &self.expanded_bundles,
             &self.bundle_members,
             &self.scope_label,
             &self.rows,
@@ -909,6 +943,22 @@ impl TuiState {
             let new_len = self.flattened().len();
             self.clamp_tree_selection_to(new_len);
         }
+    }
+
+    /// Insert `bundle_repo` into `expanded_bundles` (mark this bundle leaf as
+    /// expanded). No-op if already present. Does NOT affect `bundle_members`
+    /// cache or emit actions — callers handle those.
+    pub fn expand_bundle_leaf(&mut self, bundle_repo: String) {
+        self.expanded_bundles.insert(bundle_repo);
+    }
+
+    /// Remove `bundle_repo` from `expanded_bundles` (collapse this bundle
+    /// leaf) and re-clamp the selection so it cannot point past the
+    /// newly-shortened flat list.
+    pub fn collapse_bundle_leaf(&mut self, bundle_repo: &str) {
+        self.expanded_bundles.remove(bundle_repo);
+        let new_len = self.flattened().len();
+        self.clamp_tree_selection_to(new_len);
     }
 
     /// Handle the `←` (Collapse) key with ARIA/tree-widget standard behavior:
@@ -992,6 +1042,25 @@ impl TuiState {
     /// top. A no-op when there is no selectable row.
     pub fn enter_detail(&mut self) {
         if self.selected_row().is_some() {
+            self.detail_scroll = 0;
+            self.mode = Mode::Detail;
+        }
+    }
+
+    /// Enter the detail pane when the cursor is on a `DisplayRow::Member`.
+    ///
+    /// `enter_detail` cannot be reused here because `selected_row()` returns
+    /// `None` for member rows (members are virtual — they have no backing
+    /// `TuiRow` index). This helper checks the flattened tree directly.
+    pub fn enter_member_detail(&mut self) {
+        if self.view_mode != crate::tui::state::ViewMode::Tree {
+            return;
+        }
+        let flat = self.flattened();
+        if matches!(
+            flat.get(self.selected),
+            Some(crate::tui::tree::DisplayRow::Member { .. })
+        ) {
             self.detail_scroll = 0;
             self.mode = Mode::Detail;
         }
@@ -2585,6 +2654,8 @@ mod tests {
                 related: false,
             }]),
         );
+        // F3: expanded_bundles keyed by full bundle repo (not display leaf path).
+        s.expanded_bundles.insert("reg/acme/bundle-x".to_string());
         s.toggle_view_mode(); // → Tree
         s
     }
@@ -2673,10 +2744,287 @@ mod tests {
         };
         let tree = build(&[], &[], &opts);
         let collapsed: BTreeSet<String> = BTreeSet::new();
-        let flat = flatten(&tree, &collapsed);
+        let flat = flatten(&tree, &collapsed, &BTreeSet::new(), &[]);
         assert!(
             flat.is_empty(),
             "flatten of an empty build must return an empty vec; got: {flat:?}"
+        );
+    }
+}
+
+// ── P2 Specify tests — C-2c / C-9 contracts ──────────────────────────────────
+//
+// These tests encode contracts from plan_tui_member_nodes:
+//   C-2c: expanded_bundles lifecycle mirrors bundle_members
+//   C-9:  index model is untouched after a member dispatch
+//
+// They MUST compile. C-2c lifecycle tests MAY already pass (lifecycle plumbing
+// landed in P1). C-9 tests pin the isolation invariants.
+#[cfg(test)]
+mod p2_state_member_node_tests {
+    use super::*;
+    use crate::tui::bundle_members::{BundleMemberCache, MemberNode};
+
+    fn bundle_tui_row(repo: &str) -> TuiRow {
+        TuiRow {
+            kind: "bundle".to_string(),
+            repo: repo.to_string(),
+            description: String::new(),
+            summary: String::new(),
+            keywords: vec![],
+            repository_url: None,
+            latest_tag: "latest".to_string(),
+            version: "1.0.0".to_string(),
+            pinned_version: None,
+            state: ArtifactState::NotInstalled,
+        }
+    }
+
+    fn make_ready_member() -> MemberNode {
+        MemberNode {
+            kind: crate::oci::ArtifactKind::Skill,
+            label: "skill-a".to_string(),
+            member_repo: Some("reg/acme/skill-a".to_string()),
+            state: ArtifactState::NotInstalled,
+            related: false,
+        }
+    }
+
+    // ── C-2c lifecycle: set_rows clears expanded_bundles ──────────────────────
+
+    #[test]
+    fn c2c_expanded_bundles_cleared_on_set_rows() {
+        let mut s = TuiState::new();
+        // Seed expanded_bundles with a bundle key.
+        s.expanded_bundles.insert("reg/acme/bundle-x".to_string()); // F3: full repo key
+        assert!(
+            !s.expanded_bundles.is_empty(),
+            "precondition: expanded_bundles non-empty"
+        );
+
+        // Also seed a Ready cache entry.
+        s.bundle_members.insert(
+            ("project".to_string(), "reg/acme/bundle-x".to_string()),
+            BundleMemberCache::Ready(vec![make_ready_member()]),
+        );
+
+        // set_rows must clear both.
+        s.set_rows(vec![bundle_tui_row("reg/acme/bundle-x")]);
+
+        assert!(
+            s.expanded_bundles.is_empty(),
+            "C-2c: set_rows must clear expanded_bundles; got {:?}",
+            s.expanded_bundles
+        );
+        assert!(
+            s.bundle_members.is_empty(),
+            "C-2c: set_rows must clear bundle_members; got {} entries",
+            s.bundle_members.len()
+        );
+    }
+
+    // ── C-2c lifecycle: merge_catalog_rows prunes expanded_bundles ────────────
+    //
+    // Mirror the bundle_members prune test: a key whose bundle_repo survives the
+    // merge is retained; a key whose repo vanishes is pruned.
+
+    #[test]
+    fn c2c_expanded_bundles_prune_on_merge_drops_vanished_repo() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            bundle_tui_row("reg/acme/bundle-a"),
+            bundle_tui_row("reg/acme/bundle-b"),
+        ]);
+        // F3: expanded_bundles keyed by FULL bundle repo string.
+        s.expanded_bundles.insert("reg/acme/bundle-a".to_string());
+        s.expanded_bundles.insert("reg/acme/bundle-b".to_string());
+        // Also seed bundle_members so the prune path runs.
+        s.bundle_members.insert(
+            ("project".to_string(), "reg/acme/bundle-a".to_string()),
+            BundleMemberCache::Ready(vec![make_ready_member()]),
+        );
+        s.bundle_members.insert(
+            ("project".to_string(), "reg/acme/bundle-b".to_string()),
+            BundleMemberCache::Ready(vec![make_ready_member()]),
+        );
+
+        // Fresh catalog: bundle-b vanishes.
+        s.merge_catalog_rows(vec![bundle_tui_row("reg/acme/bundle-a")]);
+
+        assert!(
+            s.expanded_bundles.contains("reg/acme/bundle-a"),
+            "C-2c: bundle-a key must survive merge when its repo is still live"
+        );
+        assert!(
+            !s.expanded_bundles.contains("reg/acme/bundle-b"),
+            "C-2c: bundle-b key must be pruned when its repo vanishes from fresh rows"
+        );
+    }
+
+    // ── C-9: index model untouched for a member selection ─────────────────────
+    //
+    // selected_row_index() == None when cursor is on a Member.
+    // action_targets() == [] when on a Member with no marks.
+    // toggle_mark_selected() is a no-op on a Member.
+    // rows/filtered/marked are unchanged.
+    //
+    // To get a Member into the flattened tree we need a Ready bundle-members
+    // cache AND the bundle key in expanded_bundles. The flattened() call
+    // depends on tree mode, so we set up a tree-mode state with a bundle row
+    // and a Ready cache entry, then navigate to the member position.
+
+    #[test]
+    fn c9_selected_row_index_none_for_member() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![bundle_tui_row("reg/acme/bundle-x")]);
+        s.set_default_registry(Some("reg".to_string()));
+        s.toggle_view_mode(); // Tree mode
+
+        // Seed the cache and expand state so a Member row appears.
+        s.bundle_members.insert(
+            (s.scope_label.clone(), "reg/acme/bundle-x".to_string()),
+            BundleMemberCache::Ready(vec![make_ready_member()]),
+        );
+        s.expanded_bundles.insert("reg/acme/bundle-x".to_string()); // F3: full repo key
+
+        // Find the member position in the flattened output.
+        let flat = s.flattened();
+        let member_pos = flat
+            .iter()
+            .position(|r| matches!(r, crate::tui::tree::DisplayRow::Member { .. }));
+
+        assert!(
+            member_pos.is_some(),
+            "C-9: must have a Member in the flat output for this test"
+        );
+        s.selected = member_pos.unwrap();
+
+        assert_eq!(
+            s.selected_row_index(),
+            None,
+            "C-9: selected_row_index() must be None when cursor is on a Member"
+        );
+    }
+
+    #[test]
+    fn c9_action_targets_empty_for_member_with_no_marks() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![bundle_tui_row("reg/acme/bundle-x")]);
+        s.set_default_registry(Some("reg".to_string()));
+        s.toggle_view_mode();
+
+        s.bundle_members.insert(
+            (s.scope_label.clone(), "reg/acme/bundle-x".to_string()),
+            BundleMemberCache::Ready(vec![make_ready_member()]),
+        );
+        s.expanded_bundles.insert("reg/acme/bundle-x".to_string()); // F3: full repo key
+
+        let flat = s.flattened();
+        let member_pos = flat
+            .iter()
+            .position(|r| matches!(r, crate::tui::tree::DisplayRow::Member { .. }));
+
+        if let Some(pos) = member_pos {
+            s.selected = pos;
+            assert_eq!(
+                s.action_targets(),
+                Vec::<usize>::new(),
+                "C-9: action_targets() must be empty for a Member with no marks"
+            );
+        }
+    }
+
+    #[test]
+    fn c9_toggle_mark_selected_noop_on_member() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![bundle_tui_row("reg/acme/bundle-x")]);
+        s.set_default_registry(Some("reg".to_string()));
+        s.toggle_view_mode();
+
+        s.bundle_members.insert(
+            (s.scope_label.clone(), "reg/acme/bundle-x".to_string()),
+            BundleMemberCache::Ready(vec![make_ready_member()]),
+        );
+        s.expanded_bundles.insert("reg/acme/bundle-x".to_string()); // F3: full repo key
+
+        let flat = s.flattened();
+        let member_pos = flat
+            .iter()
+            .position(|r| matches!(r, crate::tui::tree::DisplayRow::Member { .. }));
+
+        if let Some(pos) = member_pos {
+            s.selected = pos;
+            let marks_before = s.marked.clone();
+            s.toggle_mark_selected();
+            assert_eq!(
+                s.marked, marks_before,
+                "C-9: toggle_mark_selected on a Member must be a no-op; marks unchanged"
+            );
+        }
+    }
+
+    // ── F3 regression: two bundles sharing the same final path component ───────
+
+    /// F3 regression: two bundles whose repos share the same final path
+    /// component (e.g., "reg-a/acme/bundle" and "reg-b/acme/bundle") must
+    /// have independent expanded_bundles entries. Removing one from
+    /// expanded_bundles must not affect the other.
+    ///
+    /// This proves the old `rsplit('/')` heuristic (which compared only the
+    /// leaf component) is gone — the new full-repo key is unambiguous.
+    #[test]
+    fn f3_two_bundles_same_leaf_name_independent_state() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            bundle_tui_row("reg-a/acme/bundle"),
+            bundle_tui_row("reg-b/acme/bundle"),
+        ]);
+        s.set_default_registry(None);
+
+        // Expand both bundles (using full repo keys per F3).
+        s.expanded_bundles.insert("reg-a/acme/bundle".to_string());
+        s.expanded_bundles.insert("reg-b/acme/bundle".to_string());
+
+        // Collapse only the first one via collapse_bundle_leaf.
+        s.collapse_bundle_leaf("reg-a/acme/bundle");
+
+        // The second bundle must still be in expanded_bundles.
+        assert!(
+            !s.expanded_bundles.contains("reg-a/acme/bundle"),
+            "F3: reg-a/acme/bundle must be collapsed (removed from expanded_bundles)"
+        );
+        assert!(
+            s.expanded_bundles.contains("reg-b/acme/bundle"),
+            "F3: reg-b/acme/bundle must remain expanded (independent key)"
+        );
+    }
+
+    /// F3 regression: merge_catalog_rows prune retains the exact bundle that
+    /// survived and drops the one that disappeared. With the old rsplit('/')
+    /// heuristic, two bundles with the same final component could keep each
+    /// other alive after one was removed.
+    #[test]
+    fn f3_merge_catalog_rows_prunes_removed_bundle_only() {
+        let mut s = TuiState::new();
+        // Start with both bundles and their expanded state.
+        s.set_rows(vec![
+            bundle_tui_row("reg-a/acme/bundle"),
+            bundle_tui_row("reg-b/acme/bundle"),
+        ]);
+        s.expanded_bundles.insert("reg-a/acme/bundle".to_string());
+        s.expanded_bundles.insert("reg-b/acme/bundle".to_string());
+
+        // Simulate a catalog refresh that drops reg-b/acme/bundle.
+        let fresh = vec![bundle_tui_row("reg-a/acme/bundle")];
+        s.merge_catalog_rows(fresh);
+
+        assert!(
+            s.expanded_bundles.contains("reg-a/acme/bundle"),
+            "F3: reg-a/acme/bundle must survive the prune"
+        );
+        assert!(
+            !s.expanded_bundles.contains("reg-b/acme/bundle"),
+            "F3: reg-b/acme/bundle must be pruned (not in fresh rows)"
         );
     }
 }
