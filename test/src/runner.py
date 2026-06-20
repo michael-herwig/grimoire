@@ -65,6 +65,14 @@ class GrimRunner:
         for key in ("SYSTEMROOT", "TEMP", "TMP", "PATHEXT"):
             if key in os.environ:
                 self.env[key] = os.environ[key]
+        # Propagate the test registry host as an insecure-registry exception when
+        # it differs from the built-in defaults (grim only allows plain HTTP on
+        # localhost and localhost:5000 by default; any other port needs an explicit
+        # GRIM_INSECURE_REGISTRIES entry so grim does not attempt HTTPS).
+        _test_host = os.environ.get("GRIM_TEST_REGISTRY_HOST", "")
+        _builtin_http = {"localhost", "localhost:5000", "127.0.0.1", "127.0.0.1:5000"}
+        if _test_host and _test_host not in _builtin_http:
+            self.env["GRIM_INSECURE_REGISTRIES"] = _test_host
 
     @property
     def home(self) -> Path:

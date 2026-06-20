@@ -23,12 +23,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
-REGISTRY_HOST = "localhost:5000"
-REGISTRY_BASE = f"http://{REGISTRY_HOST}"
+# Allow the conftest to redirect the acceptance suite to a session-private,
+# fresh registry (important when the default localhost:5000 has accumulated
+# tens of thousands of repos from prior runs, which pushes newly-pushed test
+# repos beyond grim's bounded catalog walk and makes search tests flaky).
+# The conftest sets GRIM_TEST_REGISTRY_HOST before any test-module import
+# reads this constant, so this environment variable is the single control
+# point for the registry host across the entire suite.
+REGISTRY_HOST: str = os.environ.get("GRIM_TEST_REGISTRY_HOST", "localhost:5000")
+REGISTRY_BASE: str = f"http://{REGISTRY_HOST}"
 
 _MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
 _LAYER_MEDIA_TYPE = "application/vnd.grimoire.artifact.layer.v1.tar"

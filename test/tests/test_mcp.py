@@ -306,7 +306,13 @@ def _two_registry_config(project_dir: Path, ns1: str, ns2: str) -> None:
 def _call_search(
     runner: GrimRunner, project_dir: Path, arguments: dict
 ) -> dict:
-    """Drive a live (non-offline) ``grim_search`` tool call, return its result."""
+    """Drive a live (non-offline) ``grim_search`` tool call, return its result.
+
+    Asserts that the MCP server emitted a response for the ``tools/call``
+    request (id=2) and that the response carries a ``"result"`` field (not an
+    error object).  Both assertions produce a descriptive failure message so
+    that test failures are diagnosable without diving into raw protocol bytes.
+    """
     responses = _drive(
         runner,
         project_dir,
@@ -322,7 +328,17 @@ def _call_search(
         ],
         offline=False,
     )
-    return responses[2]["result"]
+    assert 2 in responses, (
+        f"grim mcp did not emit a response for the tools/call request (id=2); "
+        f"received response ids: {sorted(responses)}. "
+        f"This can indicate a subprocess timeout or an unhandled server crash."
+    )
+    msg = responses[2]
+    assert "result" in msg, (
+        f"grim mcp returned a JSON-RPC error for the tools/call request (id=2) "
+        f"instead of a result: {msg.get('error', msg)!r}"
+    )
+    return msg["result"]
 
 
 def test_mcp_search_browses_all_declared_registries(
