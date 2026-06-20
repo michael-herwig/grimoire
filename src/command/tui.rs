@@ -235,9 +235,12 @@ fn resolve_registry(ctx: &Context, args: &TuiArgs) -> String {
     match scope_resolution::resolve(ctx, args.global, args.config.as_deref()) {
         Ok(scope) => crate::command::primary_registry_for_scope(ctx, &scope),
         Err(_) => {
-            // Scope resolution failed (e.g. no config yet); fall back through
-            // the global-[[registries]]-aware helper so a [[registries]]-only
-            // global config is still honored.
+            // Defensive branch: `run()` independently re-resolves scope and
+            // exits first if that fails, so this branch is effectively
+            // unreachable through `run()`. It is kept for the function
+            // contract, unit tests, and future direct callers. Fall back
+            // through the global-[[registries]]-aware helper so a
+            // [[registries]]-only global config is still honored.
             crate::command::primary_registry_global_fallback(ctx)
         }
     }

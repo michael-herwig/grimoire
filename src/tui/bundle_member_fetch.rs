@@ -18,8 +18,9 @@
 //!   registry; the TUI app translates them into `Vec<MemberNode>` (fail-
 //!   soft, dropping unparseable members with a log).
 //!
-//! Stub bodies are `unimplemented!()` — P2 tests compile against these
-//! signatures; P3 fills the bodies.
+//! Each task acquires a semaphore permit, calls `fetch_bundle_members`,
+//! and sends a [`BundleMembersMsg`] back through the bounded channel for the
+//! event loop to drain each tick via `app::drain_bundle_member_checks`.
 
 use std::sync::{Arc, Mutex};
 

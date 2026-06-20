@@ -140,7 +140,11 @@ pub fn detail_lines_for_member(node: &MemberNode, parent_bundle_repo: &str) -> V
     // The identifier shown is the sanitized label. When a resolved `member_repo`
     // is available, prefer that for the canonical reference; fall back to the
     // sanitized label so the pane never shows an empty identifier.
-    let identifier = node.member_repo.as_deref().unwrap_or(&sanitized_label).to_string();
+    // Defense-in-depth: sanitize member_repo at the display boundary too —
+    // even though it comes from Identifier::parse (charset-constrained), every
+    // registry-derived string shown in the terminal passes through the sanitizer.
+    let raw_identifier = node.member_repo.as_deref().unwrap_or(&sanitized_label);
+    let identifier = super::render::sanitize_member_label(raw_identifier);
 
     vec![
         DetailLine::Blank,

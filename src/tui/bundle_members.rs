@@ -75,9 +75,13 @@ pub struct MemberNode {
     pub kind: ArtifactKind,
     /// Raw member name — **untrusted**; sanitize before terminal output.
     pub label: String,
-    /// `registry/repository` reference derived from `Identifier::parse(id)`;
-    /// `None` when the id fails to parse (fail-soft: node still renders
-    /// without a deep-link target).
+    /// `registry/repository` reference derived from `Identifier::parse(id)`.
+    ///
+    /// Always `Some` on a live `MemberNode` — `member_node_from` returns
+    /// `Option::None` (discards the node entirely) when the id fails to parse,
+    /// so a node that reaches the cache always carries a resolved repo string.
+    /// The field type is `Option<String>` to allow construction in tests
+    /// and to keep the render path defensive at the display boundary.
     pub member_repo: Option<String>,
     /// Install state, derived via `derive_artifact_state` against the
     /// active scope's lock + install state. `NotInstalled` when no lock
@@ -91,10 +95,9 @@ pub struct MemberNode {
 
 /// Translate one raw [`BundleMember`] into a [`MemberNode`], fail-soft.
 ///
-/// Returns `None` (with a `tracing::warn!`) when the member's `id` cannot
-/// be parsed to extract a `registry/repository` string. In all other cases
-/// a `MemberNode` is returned — the `member_repo` field is `None` when the
-/// id is unparseable, but the node still renders without a deep-link target.
+/// Returns `None` (drops the member, with a `tracing::warn!`) when the
+/// member's `id` cannot be parsed. In all other cases a `MemberNode` is
+/// returned with `member_repo` always `Some` (the parse succeeded).
 ///
 /// The `row_repos` set is the O(n) pre-built set of catalog leaf repos used
 /// for the related-highlight signal (D2/P3.7). The `state` parameter is the
@@ -122,7 +125,10 @@ pub fn member_node_from(member: &BundleMember, row_repos: &HashSet<&str>, state:
     };
     // related = true when the member's repo also appears as a real catalog
     // leaf (static related-highlight, D2/P3.7).
-    let related = member_repo.as_deref().is_some_and(|repo| row_repos.contains(repo));
+    // member_repo is always Some at this point (the Err branch returned early above).
+    let related = member_repo
+        .as_ref()
+        .is_some_and(|repo| row_repos.contains(repo.as_str()));
     Some(MemberNode {
         kind: member.kind,
         label: member.name.clone(),

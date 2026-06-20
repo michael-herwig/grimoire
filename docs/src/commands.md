@@ -207,6 +207,13 @@ its descendants — `↑` when any descendant is outdated, `✱` when any is
 locally modified, and so on — so a collapsed tree still surfaces what needs
 attention.
 
+**Bundle member expansion** — when the selected row is a bundle leaf, pressing
+`→` (or `Enter`) reveals its members as indented child rows badged
+`(via bundle)`. Member rows are read-only: they reflect what a bundle
+declares, derived from the registry (or the lock snapshot when offline).
+Bundle members cannot be individually marked, installed, or uninstalled from
+the tree — use the parent bundle row for batch operations.
+
 An active search (started with `/`) reveals matching entries even when their
 parent group is collapsed — the tree stays navigable in search mode and does
 not force a switch to flat view.

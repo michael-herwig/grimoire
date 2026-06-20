@@ -261,9 +261,12 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                 // Invalidate any in-flight or cached bundle-member results
                 // spawned under the previous catalog version: the refresh may
                 // have changed which bundles exist or their member lists.
-                // Must mirror the UpdateChecker::bump_generation() pattern below.
+                // The generation bump is the correctness-critical mechanism —
+                // it causes the drain loop to discard any in-flight stale
+                // results whose generation no longer matches. The cache itself
+                // was already cleared by reload_into → set_rows above, so no
+                // redundant clear is needed here.
                 bundle_checker.bump_generation();
-                state.bundle_members.clear();
                 // Re-arm the background checks against the freshly-loaded
                 // rows (the `r` key is an explicit "check again" too).
                 arm_background_checks(&ctx, &state, &mut checker);
@@ -631,7 +634,13 @@ fn drain_bundle_member_checks(
                 }
                 // Translate raw BundleMember list into MemberNode list via the
                 // shared helper (DRY: same path as the lock-first path above).
-                // The async-drain path has no lock context, so state is NotInstalled.
+                // ArtifactState::NotInstalled is correct-by-construction here:
+                // the async-fetch path is only reached when NO LockedBundle
+                // snapshot exists for this bundle_repo — if a lock snapshot
+                // existed the lock-first path in event.rs would have already
+                // populated the cache from it, skipping the async fetch
+                // entirely. Therefore the bundle is not installed in this scope
+                // and its members cannot be installed under it either.
                 // Build a O(n) set of row repos for the related-highlight check (D2/P3.7).
                 let row_repos: std::collections::HashSet<&str> = state.rows.iter().map(|r| r.repo.as_str()).collect();
                 let nodes: Vec<super::bundle_members::MemberNode> = members
@@ -2139,6 +2148,115 @@ mod tests {
             assert_eq!(programs, vec!["xdg-open", "gio", "wslview"]);
             assert_eq!(candidates[0].1, vec![url.to_string()]);
         }
+    }
+
+    // ── drain_bundle_member_checks: generation-freshness gate ─────────────────
+
+    /// Build a minimal `TuiRow` sufficient for the related-highlight check
+    /// inside `drain_bundle_member_checks`.
+    fn bundle_row_for_drain(repo: &str) -> TuiRow {
+        TuiRow {
+            kind: "bundle".to_string(),
+            repo: repo.to_string(),
+            description: String::new(),
+            summary: String::new(),
+            keywords: Vec::new(),
+            repository_url: None,
+            latest_tag: "latest".to_string(),
+            version: "1.0.0".to_string(),
+            pinned_version: None,
+            state: ArtifactState::Installed,
+        }
+    }
+
+    #[test]
+    fn drain_bundle_member_checks_stale_generation_is_discarded() {
+        // A BundleMembersMsg::Ready whose generation stamp does NOT match the
+        // live generation must be discarded — the cache must not be written and
+        // the function must return false (no redraw needed).
+        use crate::tui::bundle_member_fetch::BundleMembersMsg;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let mut state = TuiState::new();
+        state.set_rows(vec![bundle_row_for_drain("reg/acme/bundle")]);
+
+        // Send a Ready message stamped with generation 0 but live is 1 (stale).
+        tx.try_send(BundleMembersMsg::Ready {
+            bundle_repo: "reg/acme/bundle".to_string(),
+            members: vec![],
+            generation: 0,
+        })
+        .expect("channel must accept the message");
+
+        let changed = drain_bundle_member_checks(&mut state, &mut rx, /* live */ 1);
+
+        assert!(!changed, "stale Ready must return changed=false");
+        assert!(
+            state.bundle_members.is_empty(),
+            "stale Ready must not write to the cache; got {:?} entries",
+            state.bundle_members.len()
+        );
+    }
+
+    #[test]
+    fn drain_bundle_member_checks_fresh_generation_writes_cache() {
+        // A BundleMembersMsg::Ready whose generation matches the live generation
+        // must write BundleMemberCache::Ready into the cache and return true.
+        use crate::oci::ArtifactKind;
+        use crate::oci::bundle::BundleMember;
+        use crate::tui::bundle_member_fetch::BundleMembersMsg;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let mut state = TuiState::new();
+        state.set_rows(vec![bundle_row_for_drain("reg/acme/bundle")]);
+        state.scope_label = "project".to_string();
+
+        let member = BundleMember {
+            id: "reg.example.io/acme/my-skill:latest".to_string(),
+            kind: ArtifactKind::Skill,
+            name: "my-skill".to_string(),
+        };
+        tx.try_send(BundleMembersMsg::Ready {
+            bundle_repo: "reg/acme/bundle".to_string(),
+            members: vec![member],
+            generation: 2,
+        })
+        .expect("channel must accept the message");
+
+        let changed = drain_bundle_member_checks(&mut state, &mut rx, /* live */ 2);
+
+        assert!(changed, "fresh Ready must return changed=true");
+        let key = ("project".to_string(), "reg/acme/bundle".to_string());
+        assert!(
+            state.bundle_members.contains_key(&key),
+            "fresh Ready must write the cache entry"
+        );
+    }
+
+    #[test]
+    fn drain_bundle_member_checks_stale_failed_is_discarded() {
+        // A BundleMembersMsg::Failed with a stale generation must also be
+        // discarded — the cache must not be written.
+        use crate::tui::bundle_member_fetch::BundleMembersMsg;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let mut state = TuiState::new();
+        state.scope_label = "project".to_string();
+
+        tx.try_send(BundleMembersMsg::Failed {
+            bundle_repo: "reg/acme/bundle".to_string(),
+            reason: "timeout".to_string(),
+            generation: 0,
+        })
+        .expect("channel must accept the message");
+
+        let changed = drain_bundle_member_checks(&mut state, &mut rx, /* live */ 1);
+
+        assert!(!changed, "stale Failed must return changed=false");
+        assert!(
+            state.bundle_members.is_empty(),
+            "stale Failed must not write to the cache"
+        );
     }
 
     #[test]

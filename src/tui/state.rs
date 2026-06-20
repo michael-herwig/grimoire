@@ -2306,9 +2306,8 @@ mod tests {
 
     // ── C-3 Cache lifecycle ────────────────────────────────────────────────────
     //
-    // These tests exercise the `bundle_members` cache on `TuiState`.
-    // Some of these may PASS (the clear-on-set_rows behavior is already wired),
-    // others may FAIL until P3 implements prune-on-merge and related behaviors.
+    // These tests exercise the `bundle_members` cache on `TuiState`:
+    // clear-on-set_rows and prune-on-merge_catalog_rows (both implemented).
 
     fn make_ready_cache_entry() -> BundleMemberCache {
         BundleMemberCache::Ready(vec![super::super::bundle_members::MemberNode {
@@ -2353,7 +2352,6 @@ mod tests {
     fn cache_prune_on_merge_drops_vanished_bundle_repo() {
         // C-3: prune-on-merge_catalog_rows — entries whose bundle_repo no longer
         // appears in the fresh rows are dropped; survivors are retained.
-        // NOTE: This test FAILS until P3 implements the prune logic in merge_catalog_rows.
         let mut s = TuiState::new();
         s.set_rows(vec![
             tree_row("reg/acme/bundle-a", "bundle", ArtifactState::Installed),

@@ -243,3 +243,22 @@ visible legend/affordance, no new mechanism.
 | 2026-05-16 | Phase 7 (user feedback): tree view (`t`) — registry/`/`/dotted-leaf grouping, default-registry root elided, collapsible groups (`→/←`, `Enter`), whole-group mark/install/update/delete (`action_targets` resolves a group to its subtree). New pure `src/tui/tree.rs`. `task verify` green, 429 Rust + 66 pytest. |
 | 2026-06-19 | Phase 7 **reverted** in `9538c59` — tree view implementation removed from this branch. Re-implementation tracked in separate plan `.claude/state/plans/plan_tui_tree_view.md`. Three new `[options.tui]` config fields (`default_view`, `group_by_type`, `tree_separators`) are being re-landed as Phase 1 of the new plan. |
 | 2026-05-16 | Phase 6 (user feedback): UX polish + version picker. (a) header underline padded to full Status column; (b) grayed `type / to search` placeholder; (c) scope moved to a colored `PROJECT/GLOBAL MODE` box right of search; (d) persistent key hint right-aligned on legend line so `? help` survives transient status; (e) explicit highest-semver version in Tag column (`pick_highest_version` + `CatalogEntry.version`, serde-default backward-compatible); (f) modal version picker (`v`), lazy `list_tags` on open, pin sets install target. `task rust:verify` green, 412 tests. |
+
+---
+
+## Reconciliation (2026-06-20)
+
+This doc's **Phase 7 ("tree view — impl complete")** was stale. Actual
+history:
+- Tree view first added (`0d4d6b7`), then **reverted** (`9538c59`) for
+  index-stability + CLI-search-parity reasons — so Phase 7 was NOT "done".
+- **Revived as a pure projection** over the flat-list index model:
+  Phase 1 grouped tree view landed `b2d1bbe` (configurable grouping +
+  scrollable help).
+- **Phase 2 (bundle membership)** landed `ad06482` — virtual member rows
+  badged `(via bundle)`, lazy lock-first/background fetch, untrusted-label
+  sanitization. Design recorded in `adr_projection_over_index.md`.
+- **Phase 3 deferred:** per-member install (members are read-only today).
+
+Treat the per-phase status in the body above as superseded by this note
+for the tree-view line item.
