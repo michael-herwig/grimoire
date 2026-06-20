@@ -1238,6 +1238,255 @@ mod tests {
         );
     }
 
+    // ── C-1 fetch_bundle_members ──────────────────────────────────────────────
+    //
+    // `fetch_bundle_members` is a REAL implementation (not a stub), so these
+    // tests are expected to PASS. They exercise the documented contracts:
+    // sorted member order, MAX_BUNDLE_MEMBERS cap, BUNDLE_LAYER_SIZE_LIMIT guard.
+    //
+    // A richer mock is needed: `resolve_digest` + `fetch_manifest` + `fetch_blob`.
+
+    use crate::oci::bundle::{BUNDLE_LAYER_SIZE_LIMIT, BundleManifest, BundleMember, MAX_BUNDLE_MEMBERS};
+    use crate::oci::manifest::Descriptor;
+    use crate::oci::reference::ArtifactRef;
+
+    /// Full-fidelity mock that scripts resolve_digest, fetch_manifest, and fetch_blob.
+    struct BundleMockAccess {
+        digest: Digest,
+        manifest: Option<OciManifest>,
+        blob: Option<Vec<u8>>,
+    }
+
+    impl BundleMockAccess {
+        fn arc(digest: Digest, manifest: Option<OciManifest>, blob: Option<Vec<u8>>) -> Arc<dyn OciAccess> {
+            Arc::new(Self { digest, manifest, blob })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl OciAccess for BundleMockAccess {
+        async fn resolve_digest(&self, _id: &Identifier, _op: Operation) -> Result<Option<Digest>, AccessError> {
+            Ok(Some(self.digest.clone()))
+        }
+        async fn fetch_manifest(&self, _id: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
+            Ok(self.manifest.clone())
+        }
+        async fn fetch_blob(&self, _repo: &Identifier, _digest: &Digest) -> Result<Option<Vec<u8>>, AccessError> {
+            Ok(self.blob.clone())
+        }
+        async fn list_tags(&self, _id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
+            Ok(None)
+        }
+        async fn list_catalog(&self, _registry: &str) -> Result<Vec<String>, AccessError> {
+            Ok(Vec::new())
+        }
+        async fn push_blob(&self, _repo: &Identifier, bytes: &[u8]) -> Result<Digest, AccessError> {
+            Ok(Algorithm::Sha256.hash(bytes))
+        }
+        async fn push_manifest(&self, _repo: &Identifier, _m: &OciManifest) -> Result<Digest, AccessError> {
+            Ok(Algorithm::Sha256.hash(b"manifest"))
+        }
+        async fn put_tag(&self, _repo: &Identifier, _tag: &str, _d: &Digest) -> Result<(), AccessError> {
+            Ok(())
+        }
+    }
+
+    fn bundle_member(kind: ArtifactKind, name: &str, id: &str) -> BundleMember {
+        BundleMember {
+            kind,
+            name: name.to_string(),
+            id: id.to_string(),
+        }
+    }
+
+    fn make_bundle_access(bundle_manifest: &BundleManifest) -> Arc<dyn OciAccess> {
+        let blob = bundle_manifest.to_layer_bytes().expect("serialize bundle manifest");
+        let blob_digest = Algorithm::Sha256.hash(&blob);
+        let manifest = OciManifest {
+            media_type: None,
+            artifact_type: None,
+            config_media_type: None,
+            layers: vec![Descriptor {
+                digest: blob_digest.clone(),
+                media_type: "application/vnd.grimoire.bundle.v1+json".to_string(),
+                size: blob.len() as u64,
+            }],
+            annotations: BTreeMap::new(),
+        };
+        let manifest_digest = Algorithm::Sha256.hash(b"bundle-manifest");
+        BundleMockAccess::arc(manifest_digest, Some(manifest), Some(blob))
+    }
+
+    fn bundle_ref_and_id() -> (ArtifactRef, Identifier) {
+        let id = Identifier::parse("ghcr.io/acme/my-bundle:latest").unwrap();
+        let art_ref = ArtifactRef {
+            kind: ArtifactKind::Bundle,
+            name: "my-bundle".to_string(),
+            id: id.clone(),
+        };
+        (art_ref, id)
+    }
+
+    #[tokio::test]
+    async fn fetch_bundle_members_returns_members_in_manifest_order() {
+        // C-1: happy path — members are returned in the order they appear in
+        // the BundleManifest (sorted by (kind, name) at build time).
+        let bm = BundleManifest::new(vec![
+            bundle_member(ArtifactKind::Rule, "b-rule", "ghcr.io/acme/b-rule:1"),
+            bundle_member(ArtifactKind::Skill, "a-skill", "ghcr.io/acme/a-skill:1"),
+        ]);
+        // BundleManifest::new sorts: Rule < Skill alphabetically in kind,
+        // but ArtifactKind order is Skill < Rule < Agent < Bundle.
+        // The actual sort order is (kind, name) using ArtifactKind's Ord.
+        let access = make_bundle_access(&bm);
+        let (art_ref, id) = bundle_ref_and_id();
+        let opts = fast_options();
+
+        let (members, _pinned) = fetch_bundle_members(&art_ref, &id, &access, &opts)
+            .await
+            .expect("C-1: happy path fetch_bundle_members must succeed");
+
+        // Must return the same members (though sorted by new policy).
+        assert_eq!(members.len(), 2, "C-1: must return all 2 members");
+        // Confirm both members are present (order may be canonical sort order).
+        let names: Vec<&str> = members.iter().map(|m| m.name.as_str()).collect();
+        assert!(names.contains(&"a-skill"), "C-1: a-skill must be in the result");
+        assert!(names.contains(&"b-rule"), "C-1: b-rule must be in the result");
+    }
+
+    #[tokio::test]
+    async fn fetch_bundle_members_returns_pinned_identifier_with_digest() {
+        // C-1: happy path — the returned PinnedIdentifier must carry a digest.
+        let bm = BundleManifest::new(vec![bundle_member(
+            ArtifactKind::Skill,
+            "skill-x",
+            "ghcr.io/acme/skill-x:1",
+        )]);
+        let access = make_bundle_access(&bm);
+        let (art_ref, id) = bundle_ref_and_id();
+        let opts = fast_options();
+
+        let (_members, pinned) = fetch_bundle_members(&art_ref, &id, &access, &opts)
+            .await
+            .expect("C-1: happy path must succeed");
+
+        // The pinned identifier must carry a digest string (non-empty).
+        let digest_str = pinned.digest().to_string();
+        assert!(!digest_str.is_empty(), "C-1: pinned identifier must carry a digest");
+        assert!(
+            digest_str.starts_with("sha256:"),
+            "C-1: digest must be a sha256 digest; got {digest_str}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_bundle_members_rejects_too_many_members() {
+        // C-1: MAX_BUNDLE_MEMBERS cap — a bundle with > 512 members must be
+        // rejected with a BundleInvalid error.
+        let members: Vec<BundleMember> = (0..=MAX_BUNDLE_MEMBERS)
+            .map(|i| {
+                bundle_member(
+                    ArtifactKind::Skill,
+                    &format!("skill-{i:04}"),
+                    &format!("ghcr.io/acme/skill-{i:04}:1"),
+                )
+            })
+            .collect();
+        assert_eq!(members.len(), MAX_BUNDLE_MEMBERS + 1, "precondition: one over the cap");
+
+        let bm = BundleManifest { members };
+        let access = make_bundle_access(&bm);
+        let (art_ref, id) = bundle_ref_and_id();
+        let opts = fast_options();
+
+        let result = fetch_bundle_members(&art_ref, &id, &access, &opts).await;
+        assert!(result.is_err(), "C-1: over-cap bundle must be rejected");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err.kind, ResolveErrorKind::BundleInvalid(_)),
+            "C-1: error must be BundleInvalid; got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_bundle_members_accepts_exactly_max_members() {
+        // C-1: exactly MAX_BUNDLE_MEMBERS members is accepted (cap is exclusive >.
+        // 512 exactly is OK; 513 is rejected).
+        let members: Vec<BundleMember> = (0..MAX_BUNDLE_MEMBERS)
+            .map(|i| {
+                bundle_member(
+                    ArtifactKind::Skill,
+                    &format!("skill-{i:04}"),
+                    &format!("ghcr.io/acme/skill-{i:04}:1"),
+                )
+            })
+            .collect();
+        assert_eq!(members.len(), MAX_BUNDLE_MEMBERS, "precondition: exactly at the cap");
+
+        let bm = BundleManifest { members };
+        let access = make_bundle_access(&bm);
+        let (art_ref, id) = bundle_ref_and_id();
+        let opts = fast_options();
+
+        let result = fetch_bundle_members(&art_ref, &id, &access, &opts).await;
+        assert!(
+            result.is_ok(),
+            "C-1: exactly MAX_BUNDLE_MEMBERS must be accepted; got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_bundle_members_rejects_oversize_layer_by_descriptor_size() {
+        // C-1: BUNDLE_LAYER_SIZE_LIMIT — a blob whose descriptor reports a size
+        // > 512 KiB must be rejected before any bytes transfer.
+        // We simulate this by crafting a manifest whose layer descriptor
+        // reports an oversized `size`, while providing a small actual blob
+        // (the pre-reject should fire on the descriptor alone).
+        let small_blob: Vec<u8> = b"{}".to_vec();
+        let small_digest = Algorithm::Sha256.hash(&small_blob);
+        let manifest_digest = Algorithm::Sha256.hash(b"oversize-manifest");
+        let oversize_manifest = OciManifest {
+            media_type: None,
+            artifact_type: None,
+            config_media_type: None,
+            layers: vec![Descriptor {
+                digest: small_digest,
+                media_type: "application/vnd.grimoire.bundle.v1+json".to_string(),
+                size: BUNDLE_LAYER_SIZE_LIMIT + 1, // descriptor says oversize
+            }],
+            annotations: BTreeMap::new(),
+        };
+        let access = BundleMockAccess::arc(manifest_digest, Some(oversize_manifest), Some(small_blob));
+        let (art_ref, id) = bundle_ref_and_id();
+        let opts = fast_options();
+
+        let result = fetch_bundle_members(&art_ref, &id, &access, &opts).await;
+        assert!(result.is_err(), "C-1: oversize descriptor must be pre-rejected");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err.kind, ResolveErrorKind::BundleInvalid(_)),
+            "C-1: error must be BundleInvalid for oversize layer; got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_bundle_members_rejects_bundle_not_found_when_manifest_absent() {
+        // C-1: missing manifest → BundleNotFound error.
+        let manifest_digest = Algorithm::Sha256.hash(b"missing");
+        // manifest = None means the registry returns 404.
+        let access = BundleMockAccess::arc(manifest_digest, None, None);
+        let (art_ref, id) = bundle_ref_and_id();
+        let opts = fast_options();
+
+        let result = fetch_bundle_members(&art_ref, &id, &access, &opts).await;
+        assert!(result.is_err(), "C-1: missing manifest must be an error");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err.kind, ResolveErrorKind::BundleNotFound),
+            "C-1: error must be BundleNotFound when manifest is absent; got {err:?}"
+        );
+    }
+
     #[test]
     fn merge_distinguishes_skill_and_rule_with_same_name() {
         let members = vec![

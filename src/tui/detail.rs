@@ -14,6 +14,7 @@
 //! whatever is left of the terminal after the catalog takes its fixed
 //! width, so the geometry is one concern.
 
+use super::bundle_members::MemberNode;
 use super::state::TuiRow;
 
 /// Catalog column widths (chars) — the projection pads/truncates to
@@ -116,6 +117,52 @@ pub fn detail_lines(row: Option<&TuiRow>) -> Vec<DetailLine> {
     lines
 }
 
+/// Build the Detail pane's semantic lines for a selected virtual bundle
+/// member row.
+///
+/// # Contract (C-7)
+///
+/// Returns `[Identifier(sanitized label), Blank, SectionLabel("Metadata:"),
+/// Blank, MetaEntry{Kind}, MetaEntry{State}, MetaEntry{"Via bundle:", parent_repo}]`.
+///
+/// Never reads `TuiRow` — `MemberNode` carries all the information needed.
+/// The `label` is sanitized via `render::sanitize_member_label` before being
+/// placed into the `Identifier` line.
+///
+/// `parent_bundle_repo` is the `registry/repository` of the bundle that owns
+/// this member (from `DisplayRow::Member::parent_bundle_repo`); rendered as
+/// the "Via bundle:" metadata line so the user can trace the virtual row back
+/// to its parent.
+pub fn detail_lines_for_member(node: &MemberNode, parent_bundle_repo: &str) -> Vec<DetailLine> {
+    // Sanitize the raw label at the display boundary (never stored sanitized).
+    let sanitized_label = super::render::sanitize_member_label(&node.label);
+
+    // The identifier shown is the sanitized label. When a resolved `member_repo`
+    // is available, prefer that for the canonical reference; fall back to the
+    // sanitized label so the pane never shows an empty identifier.
+    let identifier = node.member_repo.as_deref().unwrap_or(&sanitized_label).to_string();
+
+    vec![
+        DetailLine::Blank,
+        DetailLine::Identifier(identifier),
+        DetailLine::Blank,
+        DetailLine::SectionLabel("Metadata:"),
+        DetailLine::Blank,
+        DetailLine::MetaEntry {
+            label: "Kind:",
+            value: node.kind.to_string(),
+        },
+        DetailLine::MetaEntry {
+            label: "State:",
+            value: node.state.to_string(),
+        },
+        DetailLine::MetaEntry {
+            label: "Via bundle:",
+            value: parent_bundle_repo.to_string(),
+        },
+    ]
+}
+
 /// The visible text of one semantic detail line (the wrap-count input;
 /// tests reuse it to assert content without caring about styling).
 pub fn detail_line_text(line: &DetailLine) -> String {
@@ -189,6 +236,141 @@ pub fn scroll_max(lines: &[DetailLine], viewport: (u16, u16)) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── C-7 detail_lines_for_member ───────────────────────────────────────────
+    //
+    // These tests FAIL until P3 implements `detail_lines_for_member`.
+
+    use crate::oci::ArtifactKind;
+    use crate::tui::bundle_members::MemberNode;
+    use crate::tui::state::ArtifactState;
+
+    fn make_member_node(
+        label: &str,
+        kind: ArtifactKind,
+        member_repo: Option<&str>,
+        state: ArtifactState,
+    ) -> MemberNode {
+        MemberNode {
+            kind,
+            label: label.to_string(),
+            member_repo: member_repo.map(|s| s.to_string()),
+            state,
+            related: false,
+        }
+    }
+
+    #[test]
+    fn detail_lines_for_member_returns_identifier_and_metadata_entries() {
+        // C-7: detail pane for a Member must include Identifier (sanitized label),
+        // and MetaEntry rows for Kind, State, and "Via bundle:" parent repo.
+        // Layout: [Identifier(sanitized), Blank, SectionLabel("Metadata:"), Blank,
+        //          MetaEntry{Kind}, MetaEntry{State}, MetaEntry{"Via bundle:", parent_repo}]
+        let node = MemberNode {
+            kind: ArtifactKind::Skill,
+            label: "my-skill".to_string(),
+            member_repo: Some("reg/acme/my-skill".to_string()),
+            state: ArtifactState::Installed,
+            related: false,
+        };
+        // Per C-7, parent_repo comes from DisplayRow::Member.parent_bundle_repo
+        // and is threaded in by the call site.
+        let parent_repo = "reg.example.io/acme/my-bundle";
+        let lines = detail_lines_for_member(&node, parent_repo);
+        // Must be non-empty.
+        assert!(!lines.is_empty(), "C-7: detail lines for member must be non-empty");
+        // Must have an Identifier line (the sanitized label).
+        let has_identifier = lines.iter().any(|l| matches!(l, DetailLine::Identifier(_)));
+        assert!(
+            has_identifier,
+            "C-7: must include a Identifier line for the member label"
+        );
+        // Must have "Metadata:" section label.
+        let has_metadata = lines.iter().any(|l| matches!(l, DetailLine::SectionLabel("Metadata:")));
+        assert!(has_metadata, "C-7: must include a Metadata: section label");
+        // Must have a MetaEntry for Kind.
+        let has_kind = lines
+            .iter()
+            .any(|l| matches!(l, DetailLine::MetaEntry { label: "Kind:", .. }));
+        assert!(has_kind, "C-7: must include MetaEntry{{Kind:}}");
+        // Must have a MetaEntry for State.
+        let has_state = lines
+            .iter()
+            .any(|l| matches!(l, DetailLine::MetaEntry { label: "State:", .. }));
+        assert!(has_state, "C-7: must include MetaEntry{{State:}}");
+        // Must have a MetaEntry for "Via bundle:" with the parent repo value (B2 assertion).
+        let via_bundle = lines.iter().find_map(|l| match l {
+            DetailLine::MetaEntry {
+                label: "Via bundle:",
+                value,
+            } => Some(value.clone()),
+            _ => None,
+        });
+        assert!(
+            via_bundle.is_some(),
+            "C-7: must include MetaEntry{{\"Via bundle:\", ...}} line"
+        );
+        assert_eq!(
+            via_bundle.as_deref(),
+            Some(parent_repo),
+            "C-7: Via bundle: value must be the parent bundle repo"
+        );
+    }
+
+    #[test]
+    fn detail_lines_for_member_never_reads_tui_row() {
+        // C-7 invariant: the function operates only on MemberNode, never a TuiRow.
+        // This is a structural test — if the function compiled and returns lines
+        // from a MemberNode alone, it proves TuiRow independence. We verify it
+        // produces output for a "minimal" MemberNode (rule kind, no member_repo).
+        let node = make_member_node("some-rule", ArtifactKind::Rule, None, ArtifactState::NotInstalled);
+        let lines = detail_lines_for_member(&node, "reg/acme/test-bundle");
+        assert!(
+            !lines.is_empty(),
+            "C-7: even a rule member with no repo must produce lines"
+        );
+        let has_identifier = lines.iter().any(|l| matches!(l, DetailLine::Identifier(_)));
+        assert!(has_identifier, "C-7: rule member must include an Identifier line");
+    }
+
+    #[test]
+    fn detail_lines_for_member_with_unparseable_id_still_renders() {
+        // C-7 edge case: `member_repo = None` (Identifier::parse failed, fail-soft).
+        // The node must still render — nothing panics, non-empty output.
+        let node = make_member_node(
+            "bad-id:://invalid",
+            ArtifactKind::Skill,
+            None,
+            ArtifactState::NotInstalled,
+        );
+        let lines = detail_lines_for_member(&node, "reg/acme/test-bundle");
+        assert!(
+            !lines.is_empty(),
+            "C-7: unparseable-id member (member_repo=None) must still render, got empty"
+        );
+    }
+
+    #[test]
+    fn detail_lines_for_member_label_appears_in_identifier_line() {
+        // C-7: the Identifier line value must contain the (sanitized) label.
+        let node = make_member_node(
+            "code-review",
+            ArtifactKind::Skill,
+            Some("reg/acme/code-review"),
+            ArtifactState::Installed,
+        );
+        let lines = detail_lines_for_member(&node, "reg/acme/test-bundle");
+        let identifier_value = lines.iter().find_map(|l| match l {
+            DetailLine::Identifier(s) => Some(s.clone()),
+            _ => None,
+        });
+        assert!(identifier_value.is_some(), "C-7: must have an Identifier line");
+        assert!(
+            identifier_value.as_ref().unwrap().contains("code-review"),
+            "C-7: Identifier line must contain the label; got: {:?}",
+            identifier_value
+        );
+    }
 
     #[test]
     fn wrapped_rows_counts_word_wrap() {

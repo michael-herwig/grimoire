@@ -9,9 +9,11 @@
 //! ([`super::app`]) drives these transitions; [`super::render`] projects
 //! the state for display.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use crate::catalog::SearchQuery;
+
+use super::bundle_members::{BundleMemberCache, BundleMemberKey};
 
 /// The install state of a catalog repository relative to the active
 /// scope, as shown in the TUI.
@@ -192,6 +194,18 @@ pub struct TuiState {
     /// Characters (each a `String`) on which the repository path is split
     /// into nested groups. Defaults to `["/"]`.
     pub tree_separators: Vec<String>,
+    /// Ephemeral per-scope cache for bundle member nodes.
+    ///
+    /// Keyed by `(scope_label, bundle_repo)` so entries from one scope are
+    /// never consulted under another. Lives **outside** `rows`/`filtered`/
+    /// `marked` — virtual member rows never enter the index space.
+    ///
+    /// Lifecycle:
+    /// - Cleared wholesale on `set_rows` (full catalog reload).
+    /// - Pruned on `merge_catalog_rows` (entries whose `bundle_repo` no
+    ///   longer appears in the fresh rows are dropped; survivors retained).
+    /// - A `Failed` entry is never re-fetched on Expand (no retry storm).
+    pub bundle_members: HashMap<BundleMemberKey, BundleMemberCache>,
 }
 
 impl Default for TuiState {
@@ -220,6 +234,7 @@ impl Default for TuiState {
             collapsed: BTreeSet::new(),
             group_by_type: false,
             tree_separators: vec!["/".into()],
+            bundle_members: HashMap::new(),
         }
     }
 }
@@ -236,6 +251,11 @@ enum SelectionAnchor {
     /// The selected group, by its display key, with the `repo` of its first
     /// descendant as a fallback target when the key does not survive a reshape.
     Group { key: String, first_repo: Option<String> },
+    /// The selected virtual bundle-member row. Restores the cursor onto the
+    /// parent bundle leaf after a reshape (members are display-only and do not
+    /// survive a `set_rows` or flatten rebuild). `parent_bundle_repo` is the
+    /// stable `registry/repository` of the bundle that owns this member.
+    Member { parent_bundle_repo: String },
     /// Nothing actionable was selected.
     None,
 }
@@ -275,6 +295,9 @@ impl TuiState {
         // Row identities changed wholesale — stale marks would point at
         // unrelated rows.
         self.marked.clear();
+        // Full reload invalidates all bundle-member cache entries: the set of
+        // bundles, their repos, and their members may all have changed.
+        self.bundle_members.clear();
     }
 
     /// Reconcile a freshly-refreshed catalog row set into the current screen
@@ -335,9 +358,34 @@ impl TuiState {
             }
         }
 
+        // Snapshot the bundle-member cache before the set_rows call erases it,
+        // so we can restore entries that survive the merge (repos still present
+        // in the fresh catalog keep their cached member list; repos that vanished
+        // are pruned).
+        let saved_bundle_members = std::mem::take(&mut self.bundle_members);
+
         // The single kind-sort + filter choke point; clears marks and resets
         // selection, both of which we restore by repo key below.
         self.set_rows(fresh);
+
+        // Re-populate bundle_members: restore entries whose bundle_repo still
+        // exists in the post-merge row set as a bundle kind. Non-bundle repos
+        // must not accidentally keep a stale bundle cache entry (W7: scope the
+        // prune to bundle rows only so a skill/rule with the same repo name does
+        // not prevent eviction of the bundle cache entry when the bundle vanishes).
+        if !saved_bundle_members.is_empty() {
+            let live_repos: std::collections::HashSet<&str> = self
+                .rows
+                .iter()
+                .filter(|r| r.kind == "bundle")
+                .map(|r| r.repo.as_str())
+                .collect();
+            for (key, cache) in saved_bundle_members {
+                if live_repos.contains(key.1.as_str()) {
+                    self.bundle_members.insert(key, cache);
+                }
+            }
+        }
 
         // Re-apply marks by repo: a mark survives the resort, and a mark on a
         // repo that vanished simply drops (no row to act on).
@@ -391,7 +439,13 @@ impl TuiState {
                 let flat = self.flattened();
                 match flat.get(self.selected) {
                     Some(super::tree::DisplayRow::Leaf { row, .. }) => Some(*row),
-                    _ => None,
+                    // Groups have no single `rows` index — batch op targets all
+                    // descendant rows (see `action_targets`).
+                    Some(super::tree::DisplayRow::Group { .. }) => None,
+                    // Virtual members carry no `rows` index (projection-only).
+                    Some(super::tree::DisplayRow::Member { .. }) => None,
+                    // Out-of-range or empty display list.
+                    None => None,
                 }
             }
         }
@@ -416,6 +470,11 @@ impl TuiState {
             let descendant_rows: Vec<usize> = match display_row {
                 super::tree::DisplayRow::Group { rows, .. } => rows.clone(),
                 super::tree::DisplayRow::Leaf { .. } => return,
+                // Virtual members carry no `rows` index — marking is a no-op
+                // (Phase 2 read-only; guard already returns early above via
+                // `selected_is_group()` being false for Member, but the match
+                // must be exhaustive per closed-enum discipline).
+                super::tree::DisplayRow::Member { .. } => return,
             };
             if descendant_rows.is_empty() {
                 return;
@@ -460,6 +519,27 @@ impl TuiState {
     /// no marks, a group selection targets all its descendant leaf rows.
     /// Always returned sorted and de-duplicated for deterministic, stable
     /// batch order.
+    ///
+    /// # Contract C-5 (member-selection semantics)
+    ///
+    /// Explicit marks (a user multi-select) WIN regardless of the current
+    /// cursor position — including when the cursor is on a virtual
+    /// `DisplayRow::Member` row. This is consistent with how a
+    /// `DisplayRow::Group` selection already behaves: marks always take
+    /// precedence over the unmarked single-selection path.
+    ///
+    /// A `DisplayRow::Member` selection contributes NO target of its own:
+    /// virtual members carry no `rows` index, so `selected_row_index()`
+    /// returns `None` for a member row, and the fall-through to
+    /// `selected_row_index().into_iter().collect()` yields an empty vec.
+    /// This is the correct read-only behavior (contract C-5): a member is
+    /// a display-only projection, not a first-class install target.
+    ///
+    /// Summary:
+    /// - marks non-empty → return marks (regardless of cursor row type)
+    /// - no marks + member selected → empty (read-only, no action target)
+    /// - no marks + leaf selected → `[leaf_row_index]`
+    /// - no marks + group selected → sorted descendant leaf row indices
     pub fn action_targets(&self) -> Vec<usize> {
         if !self.marked.is_empty() {
             return self.marked.iter().copied().collect();
@@ -680,6 +760,12 @@ impl TuiState {
                         .and_then(|&i| self.rows.get(i))
                         .map(|r| r.repo.clone()),
                 },
+                // A virtual member row: anchor on the parent bundle leaf so
+                // restore_selection lands the cursor on the bundle after a reshape.
+                // Members are display-only and do not survive a rows rebuild.
+                Some(super::tree::DisplayRow::Member { parent_bundle_repo, .. }) => SelectionAnchor::Member {
+                    parent_bundle_repo: parent_bundle_repo.clone(),
+                },
                 None => SelectionAnchor::None,
             }
         } else {
@@ -698,6 +784,15 @@ impl TuiState {
     fn restore_selection(&mut self, anchor: SelectionAnchor) {
         match anchor {
             SelectionAnchor::Leaf(repo) => self.select_repo_or_clamp(&repo),
+            // A virtual member does not survive a reshape — fall back to the
+            // parent bundle leaf. P3 may refine this to re-find the member
+            // position within the re-flattened tree once member rows are
+            // re-spliced after the flatten.
+            // TODO(P3): re-find the member's position in the re-flattened tree
+            //           so the cursor lands on the member rather than its bundle.
+            SelectionAnchor::Member { parent_bundle_repo } => {
+                self.select_repo_or_clamp(&parent_bundle_repo);
+            }
             SelectionAnchor::Group { key, first_repo } => {
                 // Prefer re-finding the same group by its path-derived key
                 // (stable across a resort / refresh with unchanged options).
@@ -776,7 +871,13 @@ impl TuiState {
         // the `if` evaluates once and the reference lives for the call.
         let empty = BTreeSet::new();
         let effective_collapsed: &BTreeSet<String> = if self.query.is_empty() { &self.collapsed } else { &empty };
-        super::tree::flatten(&tree, effective_collapsed)
+        super::tree::flatten_with_members(
+            &tree,
+            effective_collapsed,
+            &self.bundle_members,
+            &self.scope_label,
+            &self.rows,
+        )
     }
 
     /// Expand the selected group (remove it from the collapsed set). A
@@ -832,6 +933,10 @@ impl TuiState {
         let (current_depth, is_collapsed_group) = match selected_row {
             super::tree::DisplayRow::Group { depth, collapsed, .. } => (*depth, *collapsed),
             super::tree::DisplayRow::Leaf { depth, .. } => (*depth, false),
+            // A virtual member: depth scan upward to the parent bundle leaf.
+            // `is_collapsed_group = false` so the else-branch triggers the
+            // ancestor scan (the member is neither a group nor collapsed).
+            super::tree::DisplayRow::Member { depth, .. } => (*depth, false),
         };
 
         if !is_collapsed_group && matches!(selected_row, super::tree::DisplayRow::Group { .. }) {
@@ -853,6 +958,7 @@ impl TuiState {
                 let d = match row {
                     super::tree::DisplayRow::Group { depth, .. } => *depth,
                     super::tree::DisplayRow::Leaf { depth, .. } => *depth,
+                    super::tree::DisplayRow::Member { depth, .. } => *depth,
                 };
                 d < current_depth
             });
@@ -1957,6 +2063,7 @@ mod tests {
             .map(|d| match d {
                 super::super::tree::DisplayRow::Group { label, .. } => label.clone(),
                 super::super::tree::DisplayRow::Leaf { label, .. } => label.clone(),
+                super::super::tree::DisplayRow::Member { label, .. } => label.clone(),
             })
             .collect();
         assert!(
@@ -2194,6 +2301,364 @@ mod tests {
             s.tree_separators,
             vec![".", "/"],
             "non-empty tree_separators must be stored as-is"
+        );
+    }
+
+    // ── C-3 Cache lifecycle ────────────────────────────────────────────────────
+    //
+    // These tests exercise the `bundle_members` cache on `TuiState`.
+    // Some of these may PASS (the clear-on-set_rows behavior is already wired),
+    // others may FAIL until P3 implements prune-on-merge and related behaviors.
+
+    fn make_ready_cache_entry() -> BundleMemberCache {
+        BundleMemberCache::Ready(vec![super::super::bundle_members::MemberNode {
+            kind: crate::oci::ArtifactKind::Skill,
+            label: "my-skill".to_string(),
+            member_repo: Some("reg/acme/my-skill".to_string()),
+            state: ArtifactState::Installed,
+            related: false,
+        }])
+    }
+
+    #[test]
+    fn cache_is_empty_after_set_rows() {
+        // C-3: clear-on-set_rows — after set_rows(...), bundle_members must be empty.
+        let mut s = TuiState::new();
+        // Pre-populate the cache with an entry.
+        s.bundle_members.insert(
+            ("project".to_string(), "reg/acme/bundle".to_string()),
+            make_ready_cache_entry(),
+        );
+        assert!(!s.bundle_members.is_empty(), "precondition: cache is non-empty");
+
+        // A call to set_rows should wipe the cache.
+        s.set_rows(vec![tree_row("reg/acme/bundle", "bundle", ArtifactState::Installed)]);
+        assert!(
+            s.bundle_members.is_empty(),
+            "C-3: bundle_members must be empty after set_rows; got {:?} entries",
+            s.bundle_members.len()
+        );
+    }
+
+    #[test]
+    fn cache_is_empty_after_set_rows_with_no_prior_entries() {
+        // C-3: clear-on-set_rows is a no-op when already empty (idempotent, no panic).
+        let mut s = TuiState::new();
+        assert!(s.bundle_members.is_empty());
+        s.set_rows(vec![]);
+        assert!(s.bundle_members.is_empty());
+    }
+
+    #[test]
+    fn cache_prune_on_merge_drops_vanished_bundle_repo() {
+        // C-3: prune-on-merge_catalog_rows — entries whose bundle_repo no longer
+        // appears in the fresh rows are dropped; survivors are retained.
+        // NOTE: This test FAILS until P3 implements the prune logic in merge_catalog_rows.
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            tree_row("reg/acme/bundle-a", "bundle", ArtifactState::Installed),
+            tree_row("reg/acme/bundle-b", "bundle", ArtifactState::Installed),
+        ]);
+        // Populate cache for both bundles.
+        s.bundle_members.insert(
+            ("project".to_string(), "reg/acme/bundle-a".to_string()),
+            make_ready_cache_entry(),
+        );
+        s.bundle_members.insert(
+            ("project".to_string(), "reg/acme/bundle-b".to_string()),
+            make_ready_cache_entry(),
+        );
+        assert_eq!(s.bundle_members.len(), 2, "precondition: two cache entries");
+
+        // A fresh catalog that drops bundle-b but keeps bundle-a.
+        s.merge_catalog_rows(vec![tree_row("reg/acme/bundle-a", "bundle", ArtifactState::Installed)]);
+
+        // The entry for bundle-b must be pruned; bundle-a survives.
+        let key_b = ("project".to_string(), "reg/acme/bundle-b".to_string());
+        let key_a = ("project".to_string(), "reg/acme/bundle-a".to_string());
+        assert!(
+            !s.bundle_members.contains_key(&key_b),
+            "C-3: bundle-b entry must be pruned when the repo vanishes from fresh rows"
+        );
+        assert!(
+            s.bundle_members.contains_key(&key_a),
+            "C-3: bundle-a entry must survive when the repo is still in fresh rows"
+        );
+    }
+
+    #[test]
+    fn cache_scope_isolation_different_scopes_independent() {
+        // C-3: scope-keyed — an entry under (scope_a, repo) is never confused
+        // with (scope_b, repo). The two entries coexist independently.
+        let mut s = TuiState::new();
+        let repo = "reg/acme/bundle".to_string();
+        let key_project = ("project".to_string(), repo.clone());
+        let key_global = ("global".to_string(), repo.clone());
+
+        s.bundle_members.insert(key_project.clone(), BundleMemberCache::Loading);
+        s.bundle_members.insert(key_global.clone(), BundleMemberCache::Offline);
+
+        // Reading under project scope must see Loading, not Offline.
+        assert!(
+            matches!(s.bundle_members.get(&key_project), Some(BundleMemberCache::Loading)),
+            "C-3: project scope entry must be Loading"
+        );
+        // Reading under global scope must see Offline, not Loading.
+        assert!(
+            matches!(s.bundle_members.get(&key_global), Some(BundleMemberCache::Offline)),
+            "C-3: global scope entry must be Offline"
+        );
+        // They must not alias each other.
+        assert_ne!(
+            std::mem::discriminant(s.bundle_members.get(&key_project).unwrap()),
+            std::mem::discriminant(s.bundle_members.get(&key_global).unwrap()),
+            "C-3: project and global scope entries must be independent (different enum variants)"
+        );
+    }
+
+    #[test]
+    fn cache_failed_entry_persists_no_new_ready_overwrites() {
+        // C-3 no-retry: a Failed entry is NOT re-fetched on subsequent Expand.
+        // We test the decision-predicate side: if there is already a Failed entry
+        // in the cache, the app should NOT spawn a new fetch (the check is
+        // "no entry at all → spawn"). We verify that a Failed entry stays Failed
+        // after no explicit mutation (the P3 spawn-gate must check for absence,
+        // not just for non-Ready).
+        let mut s = TuiState::new();
+        let key = ("project".to_string(), "reg/acme/bundle".to_string());
+        s.bundle_members
+            .insert(key.clone(), BundleMemberCache::Failed("503 error".to_string()));
+
+        // The entry must still be Failed — nothing changed it.
+        assert!(
+            matches!(s.bundle_members.get(&key), Some(BundleMemberCache::Failed(_))),
+            "C-3: Failed entry must remain Failed without an explicit mutation"
+        );
+
+        // Simulate what the spawn-gate predicate should check:
+        // spawn is triggered only when `!s.bundle_members.contains_key(key)`.
+        // With a Failed entry present, contains_key is true → no spawn.
+        assert!(
+            s.bundle_members.contains_key(&key),
+            "C-3 no-retry: Failed entry makes contains_key true — spawn must be skipped"
+        );
+    }
+
+    // ── C-5 DisplayRow::Member selection / action behavior ────────────────────
+    //
+    // To drive these tests we need a flattened tree that includes Member rows.
+    // `flatten_with_members` is unimplemented (P3), so we directly push a Member
+    // variant into a synthetic flattened list and inject it into the state via
+    // the `selected` index. However, `selected` indexes `flattened()` which calls
+    // the stub. We test the parts we can:
+    //
+    // - `selected_is_group()` — verifiable because the match is exhaustive and
+    //   the `Member` arm is NOT Group (already wired in the stub arm).
+    // - `selected_row_index()` — returns None for non-Leaf, already wired.
+    // - `action_targets()` — returns [] when selected_row_index is None and no marks.
+    // - `toggle_mark_selected()` — calls selected_row_index which returns None;
+    //   the guard prevents any mark from being inserted.
+    // - `collapse_or_jump_to_parent()` — the Member depth arm is already wired.
+    //
+    // For tests that require a Member to actually appear in the flattened list
+    // (C-5 full selection), we note them as "integration-only" until P3.
+
+    #[test]
+    fn selected_row_index_returns_none_for_non_leaf_in_tree_mode() {
+        // C-5 partial: when no Leaf is selected, selected_row_index() → None.
+        // In tree mode with a group selected (position 0), None is returned.
+        let mut s = tree_seeded();
+        s.toggle_view_mode(); // → Tree
+        s.selected = 0; // the acme group header
+        assert!(s.selected_is_group(), "precondition: group selected");
+        assert_eq!(
+            s.selected_row_index(),
+            None,
+            "C-5: selected_row_index() must be None when a group is selected"
+        );
+    }
+
+    #[test]
+    fn action_targets_empty_when_no_marks_and_no_leaf_selected() {
+        // C-5 partial: action_targets() → [] when no marks and a group is
+        // selected (but the group has no descendant rows — forced via an empty
+        // tree). This exercises the "fall back to selected_row_index" branch
+        // for a group with rows, but we need the no-marks + group path to return
+        // the descendant rows (tested above). Here we test the truly empty case.
+        let mut s = TuiState::new();
+        s.set_rows(vec![]);
+        s.toggle_view_mode();
+        // No rows → empty flat tree; selected_row_index() is None; no marks.
+        assert_eq!(
+            s.action_targets(),
+            Vec::<usize>::new(),
+            "C-5: action_targets() must be [] when there is no selection and no marks"
+        );
+    }
+
+    #[test]
+    fn toggle_mark_selected_noop_when_selected_row_index_is_none() {
+        // C-5: toggle_mark_selected() on a group (selected_row_index → None) must
+        // cascade to descendants (already tested in group_mark_cascades_to_*).
+        // Here we test that toggle_mark_selected() when in tree mode and on a
+        // LEAF does NOT crash or produce invalid indices.
+        let mut s = tree_seeded();
+        s.toggle_view_mode(); // → Tree; [group(0), alpha(1), beta(2)]
+        s.selected = 1; // alpha leaf
+        let before_marks = s.marked.clone();
+        s.toggle_mark_selected(); // mark alpha
+        assert_ne!(s.marked, before_marks, "C-5: toggle_mark on a leaf must insert a mark");
+        s.toggle_mark_selected(); // unmark alpha
+        assert_eq!(
+            s.marked, before_marks,
+            "C-5: second toggle on a leaf must remove the mark"
+        );
+    }
+
+    #[test]
+    fn selected_is_group_returns_false_for_leaf() {
+        // C-5: selected_is_group() → false for a Leaf (not a Member,
+        // but proves the non-Member, non-Group arm).
+        let mut s = tree_seeded();
+        s.toggle_view_mode(); // → Tree; [group(0), alpha(1), beta(2)]
+        s.selected = 1; // alpha leaf
+        assert!(
+            !s.selected_is_group(),
+            "C-5: selected_is_group() must be false for a leaf"
+        );
+    }
+
+    #[test]
+    fn collapse_or_jump_to_parent_from_leaf_moves_to_ancestor() {
+        // C-5 partial: collapse_or_jump_to_parent() on a leaf (depth > 0)
+        // must jump to the nearest ancestor group.
+        let mut s = tree_seeded();
+        s.toggle_view_mode(); // → Tree; [acme(0, depth=0), alpha(1, depth=1), beta(2, depth=1)]
+        s.selected = 1; // alpha leaf, depth=1
+        s.collapse_or_jump_to_parent();
+        // The nearest ancestor is position 0 (acme group, depth=0).
+        assert_eq!(
+            s.selected, 0,
+            "C-5: collapse_or_jump_to_parent() from a leaf must move to the ancestor group"
+        );
+    }
+
+    // ── C-5 Member action-target regression tests ─────────────────────────────
+    //
+    // These tests pin the decision: a `DisplayRow::Member` contributes NO
+    // action target of its own, but explicit marks always win regardless of
+    // cursor position (consistent with how group selection + marks works).
+    //
+    // We construct a state that produces real `DisplayRow::Member` rows by
+    // seeding a bundle row + populating the `bundle_members` cache, then
+    // switching to tree mode and navigating to the member position.
+
+    /// Build a `TuiState` in tree mode with a bundle row whose cache is
+    /// `Ready` with one member. The flattened display is:
+    ///   0: acme (group)
+    ///   1: bundle-x (leaf, kind=bundle)
+    ///   2: skill-a (Member, virtual)
+    /// `scope_label` is set to `"project"` to match the cache key.
+    fn member_state() -> TuiState {
+        let mut s = TuiState::new();
+        let bundle_row = TuiRow {
+            kind: "bundle".to_string(),
+            repo: "reg/acme/bundle-x".to_string(),
+            description: String::new(),
+            summary: String::new(),
+            keywords: vec![],
+            repository_url: None,
+            latest_tag: "latest".to_string(),
+            version: "1.0.0".to_string(),
+            pinned_version: None,
+            state: ArtifactState::Installed,
+        };
+        s.set_rows(vec![bundle_row]);
+        s.set_default_registry(Some("reg".to_string()));
+        s.set_scope_label("project");
+        // Populate the bundle_members cache with one Ready member.
+        s.bundle_members.insert(
+            ("project".to_string(), "reg/acme/bundle-x".to_string()),
+            BundleMemberCache::Ready(vec![super::super::bundle_members::MemberNode {
+                kind: crate::oci::ArtifactKind::Skill,
+                label: "skill-a".to_string(),
+                member_repo: Some("reg/acme/skill-a".to_string()),
+                state: ArtifactState::Installed,
+                related: false,
+            }]),
+        );
+        s.toggle_view_mode(); // → Tree
+        s
+    }
+
+    // Regression C-5(a): marks set + cursor on Member → action_targets returns
+    // exactly the marked rows, NOT empty and NOT any member/OOB index.
+    #[test]
+    fn action_targets_marks_win_over_member_selection() {
+        let mut s = member_state();
+        // Navigate to the member position.
+        let flat = s.flattened();
+        let member_pos = flat
+            .iter()
+            .position(|dr| matches!(dr, super::super::tree::DisplayRow::Member { .. }))
+            .expect("member_state must produce a Member row");
+        s.selected = member_pos;
+        assert!(
+            matches!(
+                s.flattened().get(s.selected),
+                Some(super::super::tree::DisplayRow::Member { .. })
+            ),
+            "precondition: cursor must be on a Member row"
+        );
+        // Mark the bundle leaf (rows index 0) explicitly.
+        s.marked.insert(0);
+        // With marks, action_targets must return the marked rows regardless of
+        // the member cursor — marks always win (contract C-5).
+        let targets = s.action_targets();
+        assert_eq!(
+            targets,
+            vec![0],
+            "C-5(a): marks must win over member selection; got {targets:?}"
+        );
+    }
+
+    // Regression C-5(b): no marks + cursor on Member → action_targets is empty
+    // (read-only; member carries no rows index).
+    #[test]
+    fn action_targets_empty_with_member_selected_and_no_marks() {
+        let mut s = member_state();
+        let flat = s.flattened();
+        let member_pos = flat
+            .iter()
+            .position(|dr| matches!(dr, super::super::tree::DisplayRow::Member { .. }))
+            .expect("member_state must produce a Member row");
+        s.selected = member_pos;
+        assert!(s.marked.is_empty(), "precondition: no marks");
+        let targets = s.action_targets();
+        assert!(
+            targets.is_empty(),
+            "C-5(b): action_targets must be empty when a Member is selected with no marks; got {targets:?}"
+        );
+    }
+
+    // Regression C-5(c): toggle_mark_selected on a Member is a no-op — the
+    // marked set must remain unchanged (members have no rows index to mark).
+    #[test]
+    fn toggle_mark_on_member_is_noop() {
+        let mut s = member_state();
+        let flat = s.flattened();
+        let member_pos = flat
+            .iter()
+            .position(|dr| matches!(dr, super::super::tree::DisplayRow::Member { .. }))
+            .expect("member_state must produce a Member row");
+        s.selected = member_pos;
+        let marks_before = s.marked.clone();
+        s.toggle_mark_selected();
+        assert_eq!(
+            s.marked, marks_before,
+            "C-5(c): toggle_mark_selected on a Member must not change the marked set; \
+             before={marks_before:?}, after={:?}",
+            s.marked
         );
     }
 

@@ -96,6 +96,16 @@ pub enum TuiAction {
     ToggleScope,
     /// Lazily fetch the tag list for `row` and feed it to the open picker.
     LoadVersions { row: usize },
+    /// Lazily fetch the member list for the bundle leaf at `rows[row]`.
+    ///
+    /// Emitted by `handle_browse` when the Expand gesture lands on a
+    /// `DisplayRow::Leaf` whose `rows[row].kind == "bundle"` and there is
+    /// no existing cache entry for `(scope_label, bundle_repo)`.
+    ///
+    /// `row` is the `rows` index of the bundle leaf.
+    /// `bundle_repo` is the `registry/repository` reference (stable cache
+    /// key).
+    LoadBundleMembers { row: usize, bundle_repo: String },
     /// Open `url` in the system browser (the selected row's repository).
     OpenUrl { url: String },
     /// Exit the TUI cleanly.
@@ -330,7 +340,51 @@ fn handle_browse(state: &mut TuiState, input: TuiInput) -> TuiAction {
             TuiAction::None
         }
         TuiInput::Expand => {
+            // Expand a group if selected; for bundle leaves, trigger a lazy
+            // member-list fetch if no cache entry exists yet.
+            let selected_before = state.selected;
             state.expand_selected();
+
+            // Check whether the selection (before expand) was a bundle leaf.
+            // Only emit LoadBundleMembers when there is no cache entry yet
+            // (no-retry: Loading/Failed/Offline entries are kept as-is).
+            if state.view_mode == crate::tui::state::ViewMode::Tree {
+                let flat = state.flattened();
+                if let Some(crate::tui::tree::DisplayRow::Leaf { row, .. }) = flat.get(selected_before)
+                    && let Some(tui_row) = state.rows.get(*row)
+                    && tui_row.kind == "bundle"
+                {
+                    let row_idx = *row;
+                    let bundle_repo = tui_row.repo.clone();
+                    let key = (state.scope_label.clone(), bundle_repo.clone());
+                    // Only spawn a fetch when no entry exists yet OR when the
+                    // entry is Loading but no task is in flight (the channel was
+                    // full and the result was dropped — recovery path per W3).
+                    // Failed/Ready/Offline entries are kept as-is (no retry storm).
+                    let should_fetch = match state.bundle_members.get(&key) {
+                        None => true,
+                        Some(crate::tui::bundle_members::BundleMemberCache::Loading) => {
+                            // Allow re-fetch: a previous try_send may have dropped
+                            // the result on a full channel, leaving Loading stuck.
+                            // The new fetch will overwrite Loading when it completes.
+                            true
+                        }
+                        Some(_) => false, // Ready / Failed / Offline: no re-fetch
+                    };
+                    if should_fetch {
+                        // Insert Loading placeholder so the UI shows feedback
+                        // immediately while the fetch is in flight.
+                        state
+                            .bundle_members
+                            .insert(key, crate::tui::bundle_members::BundleMemberCache::Loading);
+                        return TuiAction::LoadBundleMembers {
+                            row: row_idx,
+                            bundle_repo,
+                        };
+                    }
+                }
+            }
+
             TuiAction::None
         }
         TuiInput::Collapse => {

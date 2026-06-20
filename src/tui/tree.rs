@@ -175,6 +175,33 @@ pub enum DisplayRow {
         /// The row's install state.
         state: ArtifactState,
     },
+    /// A virtual bundle-member child row — NOT backed by any `rows` index.
+    ///
+    /// Members are display-only (Phase 2 read-only; Phase 3 gains per-member
+    /// install). They never enter `rows` / `filtered` / `marked`. A sentinel
+    /// `row: usize` is deliberately absent — `usize::MAX` would be fragile.
+    ///
+    /// The `label` field holds the **raw** (untrusted) member name; render
+    /// code MUST pass it through `sanitize_member_label` before display.
+    ///
+    /// Depth is always `parent bundle leaf depth + 1`; `collapse_or_jump_to_parent`
+    /// uses this for the upward scan.
+    Member {
+        /// Raw member name — sanitize before terminal output.
+        label: String,
+        /// Indent depth = parent bundle leaf depth + 1.
+        depth: usize,
+        /// Artifact kind of this member.
+        kind: crate::oci::ArtifactKind,
+        /// Install state of this member in the active scope.
+        state: ArtifactState,
+        /// Whether this member's repo also appears as a real catalog leaf
+        /// (the static related-highlight signal).
+        related: bool,
+        /// `registry/repository` reference of the parent bundle; used for
+        /// the selection anchor and the detail pane.
+        parent_bundle_repo: String,
+    },
 }
 
 /// Normalize the separators list: always include `/`, drop empty entries,
@@ -434,6 +461,135 @@ pub fn flatten(tree: &Tree, collapsed: &BTreeSet<String>) -> Vec<DisplayRow> {
     out
 }
 
+/// Flatten the tree and splice virtual `DisplayRow::Member` rows
+/// immediately after each `DisplayRow::Leaf` whose bundle member cache is
+/// `Ready` (and the bundle leaf is visible — not inside a collapsed group).
+///
+/// # Contract (C-4)
+///
+/// - Each `DisplayRow::Member` appears immediately after the `DisplayRow::Leaf`
+///   whose corresponding `rows[row].kind == "bundle"` in `Ready` member order.
+/// - A bundle leaf with no cache entry produces zero member rows (identical
+///   to today's `flatten`).
+/// - `Loading`, `Failed`, `Offline` each produce exactly ONE placeholder
+///   `Member`-shaped row.
+/// - Member rows report depth = parent bundle leaf depth + 1.
+/// - Pure: no I/O; deterministic given inputs (same inputs → same output).
+/// - Index isolation: the produced `Vec<DisplayRow>` introduces no new
+///   `rows`/`filtered`/`marked` indices; `Member` carries no `row: usize`.
+///
+/// `scope` is the active scope label (`TuiState::scope_label`) used as
+/// the first component of the `BundleMemberKey`.
+pub fn flatten_with_members(
+    tree: &Tree,
+    collapsed: &BTreeSet<String>,
+    bundle_members: &std::collections::HashMap<
+        super::bundle_members::BundleMemberKey,
+        super::bundle_members::BundleMemberCache,
+    >,
+    scope: &str,
+    rows: &[TuiRow],
+) -> Vec<DisplayRow> {
+    use super::bundle_members::BundleMemberCache;
+
+    // Start with the plain flattened tree (collapsed groups already handled).
+    let flat = flatten(tree, collapsed);
+
+    // Post-pass: splice Member rows after each bundle leaf that has a cache
+    // entry. Non-bundle leaves and leaves with no cache entry are passed through
+    // unchanged — identical to the plain `flatten` output for those rows.
+    let mut out = Vec::with_capacity(flat.len());
+
+    for display_row in flat {
+        match &display_row {
+            DisplayRow::Leaf { row, depth, .. } => {
+                let row_idx = *row;
+                let leaf_depth = *depth;
+
+                // Clone the leaf into out first (bundle or not, it is always visible).
+                out.push(display_row);
+
+                // Check if this leaf's row is a bundle kind.
+                let Some(tui_row) = rows.get(row_idx) else {
+                    continue;
+                };
+                if tui_row.kind != "bundle" {
+                    continue;
+                }
+
+                // Look up the cache for this (scope, bundle_repo) pair.
+                let key: super::bundle_members::BundleMemberKey = (scope.to_string(), tui_row.repo.clone());
+                let Some(cache_entry) = bundle_members.get(&key) else {
+                    // No cache entry → zero member rows (identical to plain flatten).
+                    continue;
+                };
+
+                let member_depth = leaf_depth + 1;
+                let parent_bundle_repo = tui_row.repo.clone();
+
+                match cache_entry {
+                    BundleMemberCache::Ready(members) => {
+                        for m in members {
+                            out.push(DisplayRow::Member {
+                                label: m.label.clone(),
+                                depth: member_depth,
+                                kind: m.kind,
+                                state: m.state,
+                                related: m.related,
+                                parent_bundle_repo: parent_bundle_repo.clone(),
+                            });
+                        }
+                    }
+                    BundleMemberCache::Loading => {
+                        // ASCII label: no glyph-guard mechanism exists for the
+                        // TUI, so U+2026 (HORIZONTAL ELLIPSIS) is replaced with
+                        // plain ASCII `...` per the plan's ASCII-fallback rule.
+                        out.push(DisplayRow::Member {
+                            label: "loading...".to_string(),
+                            depth: member_depth,
+                            kind: crate::oci::ArtifactKind::Skill,
+                            state: ArtifactState::NotInstalled,
+                            related: false,
+                            parent_bundle_repo,
+                        });
+                    }
+                    BundleMemberCache::Failed(reason) => {
+                        // Sanitize the reason at the display boundary.
+                        // ASCII label: U+2014 (EM DASH) replaced with plain `-`.
+                        let sanitized = super::render::sanitize_member_label(reason);
+                        out.push(DisplayRow::Member {
+                            label: format!("error - {sanitized}"),
+                            depth: member_depth,
+                            kind: crate::oci::ArtifactKind::Skill,
+                            state: ArtifactState::NotInstalled,
+                            related: false,
+                            parent_bundle_repo,
+                        });
+                    }
+                    BundleMemberCache::Offline => {
+                        // ASCII label: U+2014 (EM DASH) replaced with plain `-`.
+                        out.push(DisplayRow::Member {
+                            label: "(offline - members unavailable)".to_string(),
+                            depth: member_depth,
+                            kind: crate::oci::ArtifactKind::Skill,
+                            state: ArtifactState::NotInstalled,
+                            related: false,
+                            parent_bundle_repo,
+                        });
+                    }
+                }
+            }
+            // Groups and Members pass through as-is (Members would only exist
+            // if this function were called recursively, which it is not).
+            DisplayRow::Group { .. } | DisplayRow::Member { .. } => {
+                out.push(display_row);
+            }
+        }
+    }
+
+    out
+}
+
 fn walk(nodes: &[Node], collapsed: &BTreeSet<String>, out: &mut Vec<DisplayRow>) {
     for node in nodes {
         match node {
@@ -503,6 +659,7 @@ mod tests {
             .map(|d| match d {
                 DisplayRow::Group { label, depth, .. } => (label, depth, true),
                 DisplayRow::Leaf { label, depth, .. } => (label, depth, false),
+                DisplayRow::Member { label, depth, .. } => (label, depth, false),
             })
             .collect()
     }
@@ -1001,6 +1158,255 @@ mod tests {
             s[3],
             ("tool".to_string(), 3, false),
             "depth-3 must be the leaf; got: {s:?}"
+        );
+    }
+
+    // ── C-4 flatten_with_members ──────────────────────────────────────────────
+    //
+    // All of these tests FAIL until P3 implements `flatten_with_members`.
+    // They call the stub, which panics with `unimplemented!`.
+
+    use crate::oci::ArtifactKind;
+    use crate::tui::bundle_members::{BundleMemberCache, BundleMemberKey, MemberNode};
+    use std::collections::HashMap;
+
+    fn make_member(label: &str, kind: ArtifactKind, related: bool) -> MemberNode {
+        MemberNode {
+            kind,
+            label: label.to_string(),
+            member_repo: Some(format!("reg/acme/{label}")),
+            state: ArtifactState::NotInstalled,
+            related,
+        }
+    }
+
+    fn empty_cache() -> HashMap<BundleMemberKey, BundleMemberCache> {
+        HashMap::new()
+    }
+
+    #[test]
+    fn flatten_with_members_no_cache_produces_same_output_as_flatten() {
+        // C-4: bundle leaf with no cache entry → zero member rows.
+        // flatten_with_members with an empty cache must produce the same rows
+        // as plain flatten (no member rows injected).
+        let rows = vec![
+            row("reg/acme/bundle-x", "bundle", ArtifactState::Installed),
+            skill_row("reg/acme/alpha", ArtifactState::Installed),
+        ];
+        let t = build(&rows, &[0, 1], &opts_default(Some("reg")));
+        let collapsed = BTreeSet::new();
+        let cache = empty_cache();
+
+        let with_members = flatten_with_members(&t, &collapsed, &cache, "project", &rows);
+        let without_members = flatten(&t, &collapsed);
+
+        assert_eq!(
+            with_members, without_members,
+            "C-4: no-cache must produce identical output to flatten"
+        );
+    }
+
+    #[test]
+    fn flatten_with_members_ready_cache_splices_member_rows_after_bundle_leaf() {
+        // C-4: Ready cache entry → member rows appear immediately after the
+        // bundle leaf, in cache order, depth = bundle_depth + 1.
+        let rows = vec![row("reg/acme/bundle-x", "bundle", ArtifactState::Installed)];
+        let t = build(&rows, &[0], &opts_default(Some("reg")));
+        let collapsed = BTreeSet::new();
+        let mut cache: HashMap<BundleMemberKey, BundleMemberCache> = HashMap::new();
+        cache.insert(
+            ("project".to_string(), "reg/acme/bundle-x".to_string()),
+            BundleMemberCache::Ready(vec![
+                make_member("skill-a", ArtifactKind::Skill, false),
+                make_member("skill-b", ArtifactKind::Skill, true),
+            ]),
+        );
+
+        let flat = flatten_with_members(&t, &collapsed, &cache, "project", &rows);
+
+        // Expected: group(acme) + Leaf(bundle-x) + Member(skill-a) + Member(skill-b)
+        assert_eq!(flat.len(), 4, "C-4: group + leaf + 2 members; got {flat:?}");
+
+        // The bundle leaf is at index 1.
+        let bundle_depth = match &flat[1] {
+            DisplayRow::Leaf { depth, .. } => *depth,
+            other => panic!("expected Leaf at index 1, got {other:?}"),
+        };
+
+        // Members immediately after leaf.
+        match &flat[2] {
+            DisplayRow::Member {
+                label, depth, related, ..
+            } => {
+                assert_eq!(label, "skill-a", "C-4: first member label");
+                assert_eq!(*depth, bundle_depth + 1, "C-4: member depth = leaf_depth + 1");
+                assert!(!related, "C-4: skill-a is not related");
+            }
+            other => panic!("expected Member at index 2, got {other:?}"),
+        }
+        match &flat[3] {
+            DisplayRow::Member { label, related, .. } => {
+                assert_eq!(label, "skill-b", "C-4: second member label");
+                assert!(*related, "C-4: skill-b is related");
+            }
+            other => panic!("expected Member at index 3, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn flatten_with_members_loading_produces_one_placeholder_member() {
+        // C-4: Loading cache entry → exactly ONE placeholder Member row.
+        let rows = vec![row("reg/acme/bundle-x", "bundle", ArtifactState::Installed)];
+        let t = build(&rows, &[0], &opts_default(Some("reg")));
+        let collapsed = BTreeSet::new();
+        let mut cache: HashMap<BundleMemberKey, BundleMemberCache> = HashMap::new();
+        cache.insert(
+            ("project".to_string(), "reg/acme/bundle-x".to_string()),
+            BundleMemberCache::Loading,
+        );
+
+        let flat = flatten_with_members(&t, &collapsed, &cache, "project", &rows);
+
+        // group + leaf + 1 placeholder = 3
+        assert_eq!(flat.len(), 3, "C-4: Loading → exactly one placeholder; got {flat:?}");
+        assert!(
+            matches!(&flat[2], DisplayRow::Member { .. }),
+            "C-4: placeholder must be a Member variant"
+        );
+    }
+
+    #[test]
+    fn flatten_with_members_failed_produces_one_placeholder_member() {
+        // C-4: Failed cache entry → exactly ONE placeholder Member row.
+        let rows = vec![row("reg/acme/bundle-x", "bundle", ArtifactState::Installed)];
+        let t = build(&rows, &[0], &opts_default(Some("reg")));
+        let collapsed = BTreeSet::new();
+        let mut cache: HashMap<BundleMemberKey, BundleMemberCache> = HashMap::new();
+        cache.insert(
+            ("project".to_string(), "reg/acme/bundle-x".to_string()),
+            BundleMemberCache::Failed("503 error".to_string()),
+        );
+
+        let flat = flatten_with_members(&t, &collapsed, &cache, "project", &rows);
+
+        assert_eq!(flat.len(), 3, "C-4: Failed → exactly one placeholder; got {flat:?}");
+        assert!(
+            matches!(&flat[2], DisplayRow::Member { .. }),
+            "C-4: Failed placeholder must be a Member variant"
+        );
+    }
+
+    #[test]
+    fn flatten_with_members_offline_produces_one_placeholder_member() {
+        // C-4: Offline cache entry → exactly ONE placeholder Member row.
+        let rows = vec![row("reg/acme/bundle-x", "bundle", ArtifactState::Installed)];
+        let t = build(&rows, &[0], &opts_default(Some("reg")));
+        let collapsed = BTreeSet::new();
+        let mut cache: HashMap<BundleMemberKey, BundleMemberCache> = HashMap::new();
+        cache.insert(
+            ("project".to_string(), "reg/acme/bundle-x".to_string()),
+            BundleMemberCache::Offline,
+        );
+
+        let flat = flatten_with_members(&t, &collapsed, &cache, "project", &rows);
+
+        assert_eq!(flat.len(), 3, "C-4: Offline → exactly one placeholder; got {flat:?}");
+        assert!(
+            matches!(&flat[2], DisplayRow::Member { .. }),
+            "C-4: Offline placeholder must be a Member variant"
+        );
+    }
+
+    #[test]
+    fn flatten_with_members_scope_keyed_cache_only_matches_correct_scope() {
+        // C-4: scope isolation — cache for scope_a must not produce members
+        // for scope_b.
+        let rows = vec![row("reg/acme/bundle-x", "bundle", ArtifactState::Installed)];
+        let t = build(&rows, &[0], &opts_default(Some("reg")));
+        let collapsed = BTreeSet::new();
+        let mut cache: HashMap<BundleMemberKey, BundleMemberCache> = HashMap::new();
+        // Only "scope_a" has a Ready entry.
+        cache.insert(
+            ("scope_a".to_string(), "reg/acme/bundle-x".to_string()),
+            BundleMemberCache::Ready(vec![make_member("skill-x", ArtifactKind::Skill, false)]),
+        );
+
+        // When called with "scope_b", no members should be injected.
+        let flat_b = flatten_with_members(&t, &collapsed, &cache, "scope_b", &rows);
+        // Expected: group + leaf only (2 rows)
+        assert_eq!(
+            flat_b.len(),
+            2,
+            "C-4: scope_b must not read scope_a's cache; got {flat_b:?}"
+        );
+
+        // When called with "scope_a", members are injected.
+        let flat_a = flatten_with_members(&t, &collapsed, &cache, "scope_a", &rows);
+        assert_eq!(
+            flat_a.len(),
+            3, // group + leaf + 1 member
+            "C-4: scope_a must see its cached member; got {flat_a:?}"
+        );
+    }
+
+    #[test]
+    fn flatten_with_members_member_carries_no_rows_index() {
+        // C-4: Index isolation — Member rows must carry no `row: usize` field.
+        // Verified structurally: DisplayRow::Member exists without a `row` field
+        // (the enum definition itself). We construct one and confirm the variant.
+        let m = DisplayRow::Member {
+            label: "my-skill".to_string(),
+            depth: 2,
+            kind: ArtifactKind::Skill,
+            state: ArtifactState::NotInstalled,
+            related: false,
+            parent_bundle_repo: "reg/acme/bundle".to_string(),
+        };
+        // The variant compiles without a `row` field — this is the structural proof.
+        assert!(matches!(m, DisplayRow::Member { .. }), "C-4: Member variant must exist");
+    }
+
+    #[test]
+    fn flatten_with_members_is_deterministic_same_inputs_same_output() {
+        // C-4: Determinism — same tree + cache → same output every call.
+        let rows = vec![row("reg/acme/bundle-x", "bundle", ArtifactState::Installed)];
+        let t = build(&rows, &[0], &opts_default(Some("reg")));
+        let collapsed = BTreeSet::new();
+        let mut cache: HashMap<BundleMemberKey, BundleMemberCache> = HashMap::new();
+        cache.insert(
+            ("project".to_string(), "reg/acme/bundle-x".to_string()),
+            BundleMemberCache::Ready(vec![
+                make_member("m1", ArtifactKind::Skill, false),
+                make_member("m2", ArtifactKind::Rule, false),
+            ]),
+        );
+
+        let out1 = flatten_with_members(&t, &collapsed, &cache, "project", &rows);
+        let out2 = flatten_with_members(&t, &collapsed, &cache, "project", &rows);
+        assert_eq!(out1, out2, "C-4: flatten_with_members must be deterministic");
+    }
+
+    #[test]
+    fn flatten_with_members_collapsed_bundle_group_hides_all_members() {
+        // C-4: A bundle leaf inside a collapsed group must not produce member rows
+        // (the leaf is hidden along with its members).
+        let rows = vec![row("reg/acme/bundle-x", "bundle", ArtifactState::Installed)];
+        let t = build(&rows, &[0], &opts_default(Some("reg")));
+        // Collapse the "acme" group.
+        let mut collapsed = BTreeSet::new();
+        collapsed.insert("acme".to_string());
+        let mut cache: HashMap<BundleMemberKey, BundleMemberCache> = HashMap::new();
+        cache.insert(
+            ("project".to_string(), "reg/acme/bundle-x".to_string()),
+            BundleMemberCache::Ready(vec![make_member("skill-a", ArtifactKind::Skill, false)]),
+        );
+
+        let flat = flatten_with_members(&t, &collapsed, &cache, "project", &rows);
+        // Only the collapsed group header is visible; no leaf or member rows.
+        assert_eq!(flat.len(), 1, "C-4: collapsed group must hide leaf and members");
+        assert!(
+            matches!(&flat[0], DisplayRow::Group { .. }),
+            "C-4: only the group header should be visible"
         );
     }
 

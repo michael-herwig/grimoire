@@ -65,6 +65,132 @@ fn fit(s: &str, width: usize) -> String {
     }
 }
 
+/// Sanitize a bundle member label before display (the display boundary).
+///
+/// Applied to `MemberNode.label` **before** [`fit`] in `tree_render_rows`
+/// and in `detail_lines_for_member`. The cache holds the raw label; this
+/// function is the load-bearing terminal-injection guard.
+///
+/// # Contract (C-2)
+///
+/// Strips:
+/// - All C0/C1 control characters (`char::is_control()`)
+/// - ANSI/CSI escape sequences (`ESC` + following CSI parameter bytes)
+/// - Bidi override and isolate code points (U+202A–U+202E, U+2066–U+2069)
+/// - Zero-width code points (U+200B ZWSP, U+FEFF BOM, U+200C ZWNJ,
+///   U+200D ZWJ)
+///
+/// Path-traversal-like names (`../`) pass through unchanged at display
+/// (not a display threat; data boundary already rejected them for install
+/// via `SkillName::parse`).
+///
+/// Must not be O(n²) — see contract table in the plan.
+pub fn sanitize_member_label(s: &str) -> String {
+    // Linear time: one-pass character scan, no repeated allocations.
+    //
+    // State machine for ANSI/CSI escape sequences:
+    //   Normal    → ESC char → AfterEsc
+    //   AfterEsc  → '[' → InCsi  | anything else → Normal (drop both)
+    //   InCsi     → CSI parameter (0x30–0x3F), intermediate (0x20–0x2F),
+    //               or final (0x40–0x7E) bytes → stay/exit on final
+    //
+    // Bidi overrides and isolates (U+202A–U+202E, U+2066–U+2069) and
+    // zero-width code points (U+200B, U+200C, U+200D, U+FEFF) are dropped
+    // by the `is_stripped` predicate below. Control chars are stripped by
+    // `char::is_control()`.
+    //
+    // Path-traversal text (`../`) is NOT stripped — not a display threat.
+
+    #[inline]
+    fn is_stripped(c: char) -> bool {
+        // All C0 and C1 controls (char::is_control covers \x00-\x1F and \x7F-\x9F).
+        if c.is_control() {
+            return true;
+        }
+        let cp = c as u32;
+        // Bidi override/embedding code points (U+202A–U+202E).
+        if (0x202A..=0x202E).contains(&cp) {
+            return true;
+        }
+        // Bidi isolate code points (U+2066–U+2069).
+        if (0x2066..=0x2069).contains(&cp) {
+            return true;
+        }
+        // Zero-width space (U+200B), ZWNJ (U+200C), ZWJ (U+200D).
+        if matches!(cp, 0x200B..=0x200D) {
+            return true;
+        }
+        // BOM / zero-width no-break space (U+FEFF).
+        if cp == 0xFEFF {
+            return true;
+        }
+        false
+    }
+
+    enum State {
+        Normal,
+        AfterEsc,
+        InCsi,
+    }
+
+    let mut out = String::with_capacity(s.len());
+    let mut state = State::Normal;
+
+    for c in s.chars() {
+        match state {
+            State::Normal => {
+                if c == '\x1b' {
+                    // ESC: enter the escape-sequence consumer, drop this char.
+                    state = State::AfterEsc;
+                } else if is_stripped(c) {
+                    // Drop control chars, bidi overrides, zero-widths.
+                } else {
+                    out.push(c);
+                }
+            }
+            State::AfterEsc => {
+                if c == '[' {
+                    // ESC + '[' = CSI introducer — enter CSI consumer.
+                    state = State::InCsi;
+                } else {
+                    // ESC + anything else: drop both, resume normal.
+                    // (We already dropped the ESC; drop this char too.)
+                    //
+                    // INTENTIONAL: OSC (ESC ']'), DCS (ESC 'P'), APC (ESC '_'),
+                    // PM (ESC '^'), and SS3 (ESC 'O') body text passes through
+                    // as printable chars after the leading ESC is dropped here.
+                    // This is NOT a terminal injection risk: ratatui renders styled
+                    // text via crossterm using structured APIs, not raw byte
+                    // injection into the terminal stream. CSI (ESC '[') is the
+                    // relevant in-scope injection vector and is consumed by the
+                    // InCsi arm above. Follow-up: optionally consume OSC/DCS until
+                    // ST/BEL for defense-in-depth (low priority, YAGNI).
+                    state = State::Normal;
+                }
+            }
+            State::InCsi => {
+                // CSI parameter bytes: 0x30–0x3F (includes digits, ';', ':').
+                // CSI intermediate bytes: 0x20–0x2F (space through '/').
+                // CSI final byte: 0x40–0x7E → sequence ends.
+                // Anything else (including multi-byte characters): treat as
+                // end of CSI (fail-safe) and resume normal, dropping this char.
+                let byte = c as u32;
+                if (0x20..=0x3F).contains(&byte) {
+                    // Parameter or intermediate — consume, stay in CSI.
+                } else if (0x40..=0x7E).contains(&byte) {
+                    // Final byte — sequence ends; drop this char, go Normal.
+                    state = State::Normal;
+                } else {
+                    // Unexpected — exit CSI, drop this char (fail-safe).
+                    state = State::Normal;
+                }
+            }
+        }
+    }
+
+    out
+}
+
 /// A group row's tri-state mark, rolled up from its descendant leaves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MarkState {
@@ -323,6 +449,38 @@ fn tree_render_rows(state: &TuiState) -> Vec<RenderRow> {
                     group: None,
                 }
             }
+            super::tree::DisplayRow::Member {
+                label,
+                depth,
+                kind,
+                state: member_state,
+                related,
+                ..
+            } => {
+                let (glyph, status_label, color) = status_view(*member_state);
+                let indent = "  ".repeat(*depth);
+                // Sanitize at the display boundary — cache holds raw label.
+                let sanitized = sanitize_member_label(label);
+                // "(via bundle)" badge to distinguish virtual member rows.
+                let repo_text = format!("{indent}  {sanitized} (via bundle)");
+                // Related members are highlighted — the `related` flag drives
+                // any future related-highlight styling at the draw layer.
+                // For now we expose it through `marked: false`; the draw layer
+                // can read `related` from the DisplayRow directly when needed.
+                let _ = related; // consumed by draw layer, not render layer
+                RenderRow {
+                    columns: [
+                        fit(&repo_text, W_REPO),
+                        fit(&kind.to_string(), W_KIND),
+                        fit("", W_TAG),
+                        format!("{glyph} {status_label}"),
+                    ],
+                    selected: pos == state.selected,
+                    marked: false,
+                    status_color: color,
+                    group: None,
+                }
+            }
         })
         .collect()
 }
@@ -388,6 +546,46 @@ fn group_detail_lines(state: &TuiState) -> Vec<DetailLine> {
     lines
 }
 
+/// Build detail lines for a selected virtual [`DisplayRow::Member`] row.
+///
+/// Looks the `MemberNode` up from the bundle-member cache using the row's
+/// `parent_bundle_repo` and the active scope label, then delegates to
+/// [`detail_lines_for_member`]. Falls back to a generic "no selection" text
+/// when the cache entry is absent (race between display and cache eviction).
+fn member_detail_lines_from_state(state: &TuiState, row: Option<&super::tree::DisplayRow>) -> Vec<DetailLine> {
+    use super::bundle_members::BundleMemberCache;
+    use super::tree::DisplayRow;
+    use crate::tui::detail::detail_lines_for_member;
+
+    let Some(DisplayRow::Member {
+        label,
+        kind,
+        parent_bundle_repo,
+        ..
+    }) = row
+    else {
+        return vec![DetailLine::Text("no member selected".to_string())];
+    };
+
+    let key = (state.scope_label.clone(), parent_bundle_repo.clone());
+    if let Some(BundleMemberCache::Ready(members)) = state.bundle_members.get(&key) {
+        // Match by label AND kind to handle duplicate labels across different
+        // artifact kinds (W4: label-only lookup could return the wrong member).
+        if let Some(node) = members.iter().find(|m| &m.label == label && m.kind == *kind) {
+            return detail_lines_for_member(node, parent_bundle_repo);
+        }
+    }
+
+    // Cache miss or loading/failed: show a minimal identifier from the label.
+    let sanitized = sanitize_member_label(label);
+    vec![
+        DetailLine::Blank,
+        DetailLine::Identifier(sanitized),
+        DetailLine::Blank,
+        DetailLine::Text("(member details unavailable)".to_string()),
+    ]
+}
+
 /// Project `state` into a [`RenderModel`]. Pure — no I/O, no ratatui.
 pub fn frame(state: &TuiState) -> RenderModel {
     let title = if state.offline {
@@ -427,8 +625,22 @@ pub fn frame(state: &TuiState) -> RenderModel {
     // The offset is already clamped at mutation time
     // (`TuiState::scroll_detail`); the re-clamp here covers direct field
     // writes (the field is public for tests).
-    let detail = if state.view_mode == crate::tui::state::ViewMode::Tree && state.selected_is_group() {
-        group_detail_lines(state)
+    let detail = if state.view_mode == crate::tui::state::ViewMode::Tree {
+        // In tree mode, selection can be a group, a bundle-member virtual row,
+        // or a regular leaf. Each dispatches to its own detail builder.
+        let flat = state.flattened();
+        match flat.get(state.selected) {
+            Some(super::tree::DisplayRow::Group { .. }) => group_detail_lines(state),
+            Some(super::tree::DisplayRow::Member { .. }) => {
+                // Member rows are virtual; fetch the MemberNode from the cache
+                // and delegate to detail_lines_for_member.
+                member_detail_lines_from_state(state, flat.get(state.selected))
+            }
+            // Leaf: delegate to the standard row detail builder.
+            Some(super::tree::DisplayRow::Leaf { .. }) => detail_lines(state.selected_row()),
+            // No selection (empty or out-of-range display list).
+            None => detail_lines(state.selected_row()),
+        }
     } else {
         detail_lines(state.selected_row())
     };
@@ -1623,6 +1835,173 @@ mod tests {
             group_all.group.as_ref().unwrap().mark,
             "Partial and All groups must differ in mark state (leftmost glyph)"
         );
+    }
+
+    // ── C-2 sanitize_member_label ─────────────────────────────────────────────
+    //
+    // These tests FAIL until P3 implements the function body.
+    // Each test row corresponds to one row in the C-2 contract table.
+
+    /// Helper: assert no control chars, no bidi overrides/isolates, no zero-width
+    /// code points in the sanitized output.
+    fn assert_clean(output: &str, input_desc: &str) {
+        for ch in output.chars() {
+            assert!(
+                !ch.is_control(),
+                "C-2 invariant: sanitized output must not contain control chars; \
+                 input={input_desc:?}, output={output:?}, offending char={ch:?} (U+{:04X})",
+                ch as u32
+            );
+            // Bidi override / isolate block: U+202A–U+202E, U+2066–U+2069
+            let cp = ch as u32;
+            assert!(
+                !(0x202A..=0x202E).contains(&cp) && !(0x2066..=0x2069).contains(&cp),
+                "C-2 invariant: bidi override/isolate stripped; \
+                 input={input_desc:?}, offending char=U+{cp:04X}"
+            );
+            // Zero-width: ZWSP U+200B, BOM U+FEFF, ZWNJ U+200C, ZWJ U+200D
+            assert!(
+                !matches!(cp, 0x200B | 0x200C | 0x200D | 0xFEFF),
+                "C-2 invariant: zero-width code point stripped; \
+                 input={input_desc:?}, offending char=U+{cp:04X}"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_plain_ascii_passes_through() {
+        // C-2 row 1: plain ASCII must survive unchanged.
+        let out = sanitize_member_label("hello");
+        assert_eq!(out, "hello", "plain ASCII must pass through unchanged");
+        assert_clean(&out, "hello");
+    }
+
+    #[test]
+    fn sanitize_strips_c0_control_and_bel() {
+        // C-2 row 2: C0 (U+0000) and BEL (U+0007) stripped → "abc".
+        let out = sanitize_member_label("a\x00b\x07c");
+        assert_eq!(out, "abc", "C0 NUL + BEL must be stripped");
+        assert_clean(&out, "C0+BEL");
+    }
+
+    #[test]
+    fn sanitize_strips_c1_control() {
+        // C-2 row 3: C1 control (U+009F) stripped → "ab".
+        let out = sanitize_member_label("a\u{009F}b");
+        assert_eq!(out, "ab", "C1 control must be stripped");
+        assert_clean(&out, "C1");
+    }
+
+    #[test]
+    fn sanitize_strips_ansi_csi_escape_sequences() {
+        // C-2 row 4: ANSI/CSI → "\x1b[31m" prefix and "\x1b[0m" suffix stripped,
+        // leaving only the visible text "red".
+        let out = sanitize_member_label("\x1b[31mred\x1b[0m");
+        assert_eq!(out, "red", "ANSI/CSI escape sequences must be stripped");
+        assert_clean(&out, "ANSI/CSI");
+    }
+
+    #[test]
+    fn sanitize_strips_rtl_override_bidi() {
+        // C-2 row 5: RTL override U+202E stripped → "ab".
+        let out = sanitize_member_label("a\u{202E}b");
+        assert_eq!(out, "ab", "RTL override U+202E must be stripped");
+        assert_clean(&out, "RTL override U+202E");
+    }
+
+    #[test]
+    fn sanitize_strips_zwsp_and_bom() {
+        // C-2 row 6: ZWSP U+200B and BOM U+FEFF stripped → "abc".
+        let out = sanitize_member_label("a\u{200B}b\u{FEFF}c");
+        assert_eq!(out, "abc", "ZWSP + BOM must be stripped");
+        assert_clean(&out, "ZWSP+BOM");
+    }
+
+    #[test]
+    fn sanitize_strips_bidi_isolates() {
+        // C-2 row 7: LRI U+2066 and PDI U+2069 stripped → "ab".
+        let out = sanitize_member_label("a\u{2066}b\u{2069}");
+        assert_eq!(out, "ab", "bidi isolates U+2066/U+2069 must be stripped");
+        assert_clean(&out, "bidi isolates");
+    }
+
+    // ── T1: individual bidi embedding / isolate coverage ──────────────────────
+    //
+    // C-2 row 5 / row 7 tested a single representative; T1 covers every
+    // code point in the ranges individually so the strip-set is fully validated.
+
+    #[test]
+    fn sanitize_strips_bidi_embedding_u202a() {
+        // U+202A LEFT-TO-RIGHT EMBEDDING
+        let out = sanitize_member_label("a\u{202A}b");
+        assert_eq!(out, "ab", "U+202A LRE must be stripped");
+        assert_clean(&out, "U+202A");
+    }
+
+    #[test]
+    fn sanitize_strips_bidi_embedding_u202b() {
+        // U+202B RIGHT-TO-LEFT EMBEDDING
+        let out = sanitize_member_label("a\u{202B}b");
+        assert_eq!(out, "ab", "U+202B RLE must be stripped");
+        assert_clean(&out, "U+202B");
+    }
+
+    #[test]
+    fn sanitize_strips_bidi_embedding_u202c() {
+        // U+202C POP DIRECTIONAL FORMATTING
+        let out = sanitize_member_label("a\u{202C}b");
+        assert_eq!(out, "ab", "U+202C PDF must be stripped");
+        assert_clean(&out, "U+202C");
+    }
+
+    #[test]
+    fn sanitize_strips_bidi_embedding_u202d() {
+        // U+202D LEFT-TO-RIGHT OVERRIDE
+        let out = sanitize_member_label("a\u{202D}b");
+        assert_eq!(out, "ab", "U+202D LRO must be stripped");
+        assert_clean(&out, "U+202D");
+    }
+
+    #[test]
+    fn sanitize_strips_bidi_isolate_u2067() {
+        // U+2067 RIGHT-TO-LEFT ISOLATE
+        let out = sanitize_member_label("a\u{2067}b");
+        assert_eq!(out, "ab", "U+2067 RLI must be stripped");
+        assert_clean(&out, "U+2067");
+    }
+
+    #[test]
+    fn sanitize_strips_bidi_isolate_u2068() {
+        // U+2068 FIRST STRONG ISOLATE
+        let out = sanitize_member_label("a\u{2068}b");
+        assert_eq!(out, "ab", "U+2068 FSI must be stripped");
+        assert_clean(&out, "U+2068");
+    }
+
+    #[test]
+    fn sanitize_100k_char_input_does_not_panic() {
+        // C-2 row 8: 100 000-char input returns without panic.
+        // The sanitizer must not be O(n²) and must not truncate (width clamping
+        // is later `fit()`'s job, not the sanitizer's).
+        let big = "x".repeat(100_000);
+        let out = sanitize_member_label(&big);
+        // Must have processed every character (no truncation by sanitizer).
+        assert_eq!(
+            out.chars().count(),
+            100_000,
+            "sanitizer must not truncate; truncation is fit()'s job"
+        );
+        assert_clean(&out, "100k 'x'");
+    }
+
+    #[test]
+    fn sanitize_path_traversal_like_name_passes_through() {
+        // C-2 row 9: path-traversal-like names are NOT a display threat;
+        // the data boundary (SkillName::parse in the resolver) rejects them for
+        // install. At display time they pass through unchanged.
+        let out = sanitize_member_label("../etc/passwd");
+        assert_eq!(out, "../etc/passwd", "path-traversal name passes through at display");
+        assert_clean(&out, "../etc/passwd");
     }
 
     // C5: Hint tiers are view-mode-aware.

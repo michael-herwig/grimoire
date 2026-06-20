@@ -26,6 +26,8 @@
 //! [`app`].
 
 pub mod app;
+pub mod bundle_member_fetch;
+pub mod bundle_members;
 pub mod detail;
 pub mod event;
 pub mod init_dialog;

@@ -197,15 +197,27 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
     let (mut checker, mut rx) = UpdateChecker::new(Arc::clone(&ctx.access), ctx.registry.clone());
     arm_background_checks(&ctx, &state, &mut checker);
 
+    // Bundle-member fetch checker: a separate bounded JoinSet for lazy bundle
+    // expansion. Created unconditionally so the event loop is shape-stable;
+    // offline is gated inside the LoadBundleMembers arm below.
+    let (mut bundle_checker, mut bundle_rx) =
+        super::bundle_member_fetch::BundleMemberChecker::new(Arc::clone(&ctx.access));
+
     loop {
         // Reap finished background tasks so panics surface (deliberately
         // swallowed in raw mode — see `UpdateChecker::reap_finished`) and the
         // JoinSet does not accumulate completed handles for the whole session.
         checker.reap_finished();
+        // Mirror for bundle-member fetches: reap completed tasks each tick.
+        bundle_checker.reap_finished();
         // Drain any background results that arrived since the last tick and
         // redraw if state changed — the 200ms poll below doubles as the
         // result-drain tick (no event needed to surface a flipped icon).
         if drain_checks(&ctx, &mut state, &mut checker, &mut rx) {
+            terminal.draw(|f| draw(f, &frame(&state)))?;
+        }
+        // Drain bundle-member fetch results similarly.
+        if drain_bundle_member_checks(&mut state, &mut bundle_rx, bundle_checker.generation()) {
             terminal.draw(|f| draw(f, &frame(&state)))?;
         }
 
@@ -246,6 +258,12 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                 state.set_status("refreshing catalog…");
                 terminal.draw(|f| draw(f, &frame(&state)))?;
                 reload_into(&ctx, &mut state, true).await;
+                // Invalidate any in-flight or cached bundle-member results
+                // spawned under the previous catalog version: the refresh may
+                // have changed which bundles exist or their member lists.
+                // Must mirror the UpdateChecker::bump_generation() pattern below.
+                bundle_checker.bump_generation();
+                state.bundle_members.clear();
                 // Re-arm the background checks against the freshly-loaded
                 // rows (the `r` key is an explicit "check again" too).
                 arm_background_checks(&ctx, &state, &mut checker);
@@ -264,6 +282,78 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
             TuiAction::LoadVersions { row } => {
                 load_versions(&ctx, &mut state, row).await;
             }
+            TuiAction::LoadBundleMembers { row: _, bundle_repo } => {
+                // Lock-first (offline-first): try to serve the member list from
+                // the lock snapshot before hitting the network. This satisfies
+                // the offline gate and keeps UX snappy — the lock is always
+                // fresher than any previous network fetch in most sessions.
+                let lock = lock_io::load(&ctx.lock_path).ok();
+                let install_state = load_state(&ctx).unwrap_or_else(|_| InstallState::empty(&ctx.state_path));
+                let active = detect_clients(&ctx.workspace, ctx.scope);
+
+                let lock_members: Option<Vec<crate::oci::bundle::BundleMember>> = lock.as_ref().and_then(|l| {
+                    // Find the LockedBundle whose `repo` matches this bundle_repo.
+                    l.bundles
+                        .iter()
+                        .find(|b| b.repo == bundle_repo)
+                        .map(|b| b.members.clone())
+                });
+
+                if let Some(members) = lock_members {
+                    // Build MemberNode list from the lock snapshot via the shared
+                    // translation helper (DRY: same path as the async-drain path).
+                    // Build a O(n) set of row repos for the related-highlight check (D2/P3.7).
+                    let row_repos: std::collections::HashSet<&str> =
+                        state.rows.iter().map(|r| r.repo.as_str()).collect();
+                    let member_count = members.len();
+                    let nodes: Vec<super::bundle_members::MemberNode> = members
+                        .iter()
+                        .filter_map(|m| {
+                            // Derive per-member install state from the lock + install record
+                            // before calling the shared translation helper.
+                            let member_state = crate::oci::Identifier::parse(&m.id)
+                                .ok()
+                                .map(|parsed| {
+                                    derive_artifact_state(
+                                        parsed.registry(),
+                                        parsed.repository(),
+                                        lock.as_ref(),
+                                        &install_state,
+                                        &ctx.roots,
+                                        &active,
+                                    )
+                                })
+                                .unwrap_or(ArtifactState::NotInstalled);
+                            super::bundle_members::member_node_from(m, &row_repos, member_state)
+                        })
+                        .collect();
+                    // Warn when a non-empty lock snapshot produced zero valid nodes —
+                    // the silent empty-Ready would be invisible without this signal.
+                    if member_count > 0 && nodes.is_empty() {
+                        tracing::warn!(
+                            bundle_repo = %bundle_repo,
+                            member_count = member_count,
+                            "all locked bundle members had unparseable ids; member list will be empty"
+                        );
+                    }
+                    let key = (state.scope_label.clone(), bundle_repo);
+                    state
+                        .bundle_members
+                        .insert(key, super::bundle_members::BundleMemberCache::Ready(nodes));
+                } else if ctx.offline {
+                    // No lock data AND offline — nothing to fetch.
+                    let key = (state.scope_label.clone(), bundle_repo);
+                    state
+                        .bundle_members
+                        .insert(key, super::bundle_members::BundleMemberCache::Offline);
+                } else {
+                    // No lock data, online — spawn a background fetch.
+                    // The Loading placeholder was already inserted by the Expand handler
+                    // in event.rs, so the UI shows feedback immediately.
+                    let options = crate::resolve::resolve_options::ResolveOptions::default();
+                    bundle_checker.spawn_fetch(state.scope_label.clone(), bundle_repo, &options);
+                }
+            }
             TuiAction::OpenUrl { url } => {
                 state.set_status(match open_url(&url) {
                     Ok(()) => format!("opened {url}"),
@@ -280,6 +370,12 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                     // config here, so a view toggled with `t` survives the swap.
                     state.set_tree_options(ctx.tui_options.group_by_type, ctx.tui_options.tree_separators.clone());
                     recompute_states(&ctx, &mut state);
+                    // Invalidate the bundle-member cache: the new scope has a
+                    // different lock/install state and a different scope_label key.
+                    // A BundleMembersMsg from a fetch spawned under the old scope
+                    // must be discarded (stale generation) — bump to ensure that.
+                    bundle_checker.bump_generation();
+                    state.bundle_members.clear();
                     // The new scope has a different lock/state — re-check its
                     // installed rows against the registry.
                     arm_background_checks(&ctx, &state, &mut checker);
@@ -497,6 +593,71 @@ fn drain_checks(
     }
     if changed {
         update_idle_breadcrumb(state);
+    }
+    changed
+}
+
+/// Drain every pending [`BundleMembersMsg`] non-blockingly and apply it to
+/// `state.bundle_members`. Returns `true` when anything changed (so the
+/// caller redraws).
+///
+/// Mirrors the `drain_checks` shape for `CheckMsg`: discard results whose
+/// generation stamp is stale (scope toggled or catalog refreshed since spawn).
+/// On `Ready` (fresh), write `BundleMemberCache::Ready` into the cache keyed
+/// by `(scope_label, bundle_repo)`. On `Failed` (fresh), write
+/// `BundleMemberCache::Failed(reason)`.
+///
+/// The `generation` parameter is the live generation from the
+/// `BundleMemberChecker` (P3 wires this; for the P1 stub the function is
+/// unreachable).
+fn drain_bundle_member_checks(
+    state: &mut TuiState,
+    rx: &mut tokio::sync::mpsc::Receiver<super::bundle_member_fetch::BundleMembersMsg>,
+    live_generation: u64,
+) -> bool {
+    use super::bundle_member_fetch::BundleMembersMsg;
+    use super::bundle_members::BundleMemberCache;
+
+    let mut changed = false;
+    while let Ok(msg) = rx.try_recv() {
+        match msg {
+            BundleMembersMsg::Ready {
+                bundle_repo,
+                members,
+                generation,
+            } => {
+                if !is_generation_fresh(generation, live_generation) {
+                    continue;
+                }
+                // Translate raw BundleMember list into MemberNode list via the
+                // shared helper (DRY: same path as the lock-first path above).
+                // The async-drain path has no lock context, so state is NotInstalled.
+                // Build a O(n) set of row repos for the related-highlight check (D2/P3.7).
+                let row_repos: std::collections::HashSet<&str> = state.rows.iter().map(|r| r.repo.as_str()).collect();
+                let nodes: Vec<super::bundle_members::MemberNode> = members
+                    .iter()
+                    .filter_map(|m| super::bundle_members::member_node_from(m, &row_repos, ArtifactState::NotInstalled))
+                    .collect();
+
+                let key = (state.scope_label.clone(), bundle_repo);
+                state.bundle_members.insert(key, BundleMemberCache::Ready(nodes));
+                changed = true;
+            }
+            BundleMembersMsg::Failed {
+                bundle_repo,
+                reason,
+                generation,
+            } => {
+                if !is_generation_fresh(generation, live_generation) {
+                    continue;
+                }
+                let key = (state.scope_label.clone(), bundle_repo);
+                // Reason stored RAW per the two-boundary invariant: sanitize only at
+                // display time (flatten_with_members / tree_render_rows), never here.
+                state.bundle_members.insert(key, BundleMemberCache::Failed(reason));
+                changed = true;
+            }
+        }
     }
     changed
 }
