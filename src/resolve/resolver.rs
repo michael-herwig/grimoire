@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use tokio::task::JoinSet;
 
-use crate::oci::bundle::{BUNDLE_LAYER_SIZE_LIMIT, BundleManifest, MAX_BUNDLE_MEMBERS};
+use crate::oci::bundle::{BUNDLE_LAYER_SIZE_LIMIT, BundleManifest, BundleMember, MAX_BUNDLE_MEMBERS};
 use crate::skill::SkillName;
 
 use super::resolve_error::{ResolveError, ResolveErrorKind};
@@ -324,31 +324,7 @@ async fn expand_bundles(
             id: bundle_id.clone(),
         };
 
-        // Bound the WHOLE fetch chain (tag resolve + manifest + blob) by the
-        // per-artifact timeout, so a hung registry on any leg cannot stall
-        // the resolve indefinitely (the per-artifact-timeout contract).
-        let (blob, pinned) = match tokio::time::timeout(
-            options.per_artifact_timeout,
-            fetch_bundle_layer(&bundle_ref, bundle_id, access, options),
-        )
-        .await
-        {
-            Ok(result) => result?,
-            Err(_elapsed) => return Err(ResolveError::new(bundle_ref, ResolveErrorKind::ResolveTimeout)),
-        };
-
-        let bundle_manifest = BundleManifest::from_layer_bytes(&blob)
-            .map_err(|e| ResolveError::new(bundle_ref.clone(), ResolveErrorKind::BundleInvalid(e.to_string())))?;
-
-        if bundle_manifest.members.len() > MAX_BUNDLE_MEMBERS {
-            return Err(ResolveError::new(
-                bundle_ref.clone(),
-                ResolveErrorKind::BundleInvalid(format!(
-                    "bundle declares {} members, exceeds the limit of {MAX_BUNDLE_MEMBERS}",
-                    bundle_manifest.members.len()
-                )),
-            ));
-        }
+        let (members, pinned) = fetch_bundle_members(&bundle_ref, bundle_id, access, options).await?;
 
         let bundle_repo = bundle_id.registry_repository();
         let bundle_tag = bundle_provenance_tag(bundle_id);
@@ -360,10 +336,10 @@ async fn expand_bundles(
             repo: bundle_repo.clone(),
             tag: bundle_tag.clone(),
             pinned,
-            members: bundle_manifest.members.clone(),
+            members: members.clone(),
         });
 
-        for member in bundle_manifest.members {
+        for member in members {
             if member.kind == ArtifactKind::Bundle {
                 return Err(ResolveError::new(
                     bundle_ref.clone(),
@@ -399,6 +375,57 @@ async fn expand_bundles(
         }
     }
     Ok((out, snapshots))
+}
+
+/// Fetch and parse a bundle's member list, enforcing the `MAX_BUNDLE_MEMBERS`
+/// cap and the `BUNDLE_LAYER_SIZE_LIMIT` size guard.
+///
+/// Wraps the entire fetch chain (tag resolve → manifest → single-layer blob)
+/// in the per-artifact timeout from `options`, parses the blob as a
+/// [`BundleManifest`], and applies the count cap before returning.
+///
+/// Returns the raw `(members, pinned_identifier)` tuple. The caller is
+/// responsible for member-level validation (nested-bundle reject,
+/// `SkillName`/`Identifier` parse checks) and for the [`LockedBundle`]
+/// snapshot construction that requires the pinned id.
+///
+/// # Errors
+///
+/// Returns a [`ResolveError`] on timeout, registry error, oversized layer,
+/// parse failure, or exceeded member count.
+pub async fn fetch_bundle_members(
+    bundle_ref: &ArtifactRef,
+    bundle_id: &Identifier,
+    access: &Arc<dyn OciAccess>,
+    options: &ResolveOptions,
+) -> Result<(Vec<BundleMember>, PinnedIdentifier), ResolveError> {
+    // Bound the WHOLE fetch chain (tag resolve + manifest + blob) by the
+    // per-artifact timeout, so a hung registry on any leg cannot stall
+    // the resolve indefinitely (the per-artifact-timeout contract).
+    let (blob, pinned) = match tokio::time::timeout(
+        options.per_artifact_timeout,
+        fetch_bundle_layer(bundle_ref, bundle_id, access, options),
+    )
+    .await
+    {
+        Ok(result) => result?,
+        Err(_elapsed) => return Err(ResolveError::new(bundle_ref.clone(), ResolveErrorKind::ResolveTimeout)),
+    };
+
+    let bundle_manifest = BundleManifest::from_layer_bytes(&blob)
+        .map_err(|e| ResolveError::new(bundle_ref.clone(), ResolveErrorKind::BundleInvalid(e.to_string())))?;
+
+    if bundle_manifest.members.len() > MAX_BUNDLE_MEMBERS {
+        return Err(ResolveError::new(
+            bundle_ref.clone(),
+            ResolveErrorKind::BundleInvalid(format!(
+                "bundle declares {} members, exceeds the limit of {MAX_BUNDLE_MEMBERS}",
+                bundle_manifest.members.len()
+            )),
+        ));
+    }
+
+    Ok((bundle_manifest.members, pinned))
 }
 
 /// Fetch and integrity-check a bundle's members-layer blob: resolve the tag
