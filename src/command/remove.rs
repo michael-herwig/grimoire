@@ -170,9 +170,22 @@ pub(crate) fn drop_from_lock(
                             true
                         } else {
                             stale = true;
+                            // Use the first contributor's repo+tag to name the bundle
+                            // in the explanatory note. contributors is non-empty when
+                            // Origin::Bundles is returned (the resolver always records
+                            // at least the declaring bundle).
+                            let (bundle_repo, bundle_tag) = contributors
+                                .first()
+                                .map(|b| (b.repo.as_str(), b.tag.as_str()))
+                                .unwrap_or(("(unknown bundle)", ""));
+                            let bundle_label = if bundle_tag.is_empty() {
+                                bundle_repo.to_string()
+                            } else {
+                                format!("{bundle_repo}:{bundle_tag}")
+                            };
                             notes.push(format!(
-                                "{} '{}' is still provided by a declared bundle at a different reference; run `grim lock` to re-resolve it",
-                                key.0, key.1
+                                "{} '{}' is now provided by bundle '{}' at a different version; the lock is marked stale — run `grim lock` to pin the bundle's version",
+                                key.0, key.1, bundle_label
                             ));
                             false
                         }
@@ -457,10 +470,17 @@ mod tests {
             out.lock.metadata.declaration_hash, prev.metadata.declaration_hash,
             "the hash restamp is skipped — the lock is honestly stale"
         );
+        // The note must be explanatory (names the bundle, mentions grim lock,
+        // says "stale") — not a dead-end warning that reads like an error.
+        let note = out.notes.first().expect("one note produced");
+        assert!(note.contains("grim lock"), "the user is told to re-resolve: {note}");
         assert!(
-            out.notes.iter().any(|n| n.contains("grim lock")),
-            "the user is told to re-resolve: {:?}",
-            out.notes
+            note.contains("stale"),
+            "the note communicates the lock is stale, not an error: {note}"
+        );
+        assert!(
+            note.contains("localhost:5000/acme/stack"),
+            "the note names the bundle so the user knows which bundle provides it: {note}"
         );
     }
 

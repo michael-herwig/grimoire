@@ -164,9 +164,28 @@ impl TuiContext {
 /// failures are surfaced *in* the status line, not as a hard error — the
 /// TUI degrades rather than crashing (offline included).
 pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
+    // Redirect tracing output to $GRIM_HOME/tui.log for the duration of
+    // the alt-screen session. Declared BEFORE the terminal guard so it
+    // drops AFTER it (Rust drops locals in reverse declaration order):
+    // the alt-screen is left first, then stderr logging is restored, so
+    // any log record emitted during the guard's own Drop reaches the
+    // user's shell cleanly rather than corrupting a restored screen.
+    //
+    // The file open runs off the Tokio runtime (spawn_blocking) so that
+    // blocking std::fs I/O never stalls an async task — quality-rust
+    // block-tier rule.
+    let grim_home = crate::env::grim_home();
+    let log_file = crate::log_switch::open_log_file_off_thread(grim_home).await;
+    let _log_guard =
+        crate::log_switch::global_writer().and_then(|w| crate::log_switch::LogSinkGuard::redirect_to(w, log_file));
+
     let _guard = TerminalGuard::enter()?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
+    // Clear any pre-existing content from before the session (e.g. shell
+    // prompt lines) so the first frame is pristine. This is a one-shot
+    // clear on enter only; per-frame clears would cause visible flicker.
+    terminal.clear()?;
 
     let mut state = TuiState::new();
     // The live terminal size feeds the detail pane's scroll clamp; the
@@ -230,9 +249,11 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
         // A terminal resize must redraw immediately — the layout is
         // recomputed every `draw`, but only key events reached it before.
         // The new size also re-clamps the detail scroll (the pane's
-        // geometry just changed).
+        // geometry just changed). Clear first to erase any resize
+        // artifacts (stale cells outside the new viewport).
         if let Event::Resize(w, h) = ev {
             state.set_term_size((w, h));
+            terminal.clear()?;
             terminal.draw(|f| draw(f, &frame(&state)))?;
             continue;
         }
@@ -304,7 +325,14 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                             }
                         }
                         BatchOp::Uninstall => match perform_member_uninstall(&ctx, repo.clone(), kind).await {
-                            Ok(()) => Some("uninstalled".to_string()),
+                            Ok(notes) => {
+                                // Surface the first note (e.g. id-mismatch stale explanation)
+                                // instead of the bland "uninstalled" when the lock mutation
+                                // produced one; the bundle badge also flips to `stale` via
+                                // the `recompute_states` call below.
+                                let label = notes.into_iter().next().unwrap_or_else(|| "uninstalled".to_string());
+                                Some(label)
+                            }
                             Err(e) => {
                                 state.set_status(format!("member uninstall failed: {e:#}"));
                                 None
@@ -1238,6 +1266,7 @@ fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
         kind,
         &name,
     )?;
+    // TODO: surface notes in the batch-uninstall status line (run_batch path).
     Ok(())
 }
 
@@ -1622,33 +1651,61 @@ async fn perform_member(
     perform(ctx, &synthetic_row, is_update).await
 }
 
-/// Perform a member uninstall action, reusing the [`perform_uninstall`] seam
-/// keyed on `(kind, repo)`. Returns an `Err` (status breadcrumb) when `repo`
-/// fails `split_repo` (C-12 defense-in-depth).
+/// Perform a member uninstall action, reusing the shared seams for file
+/// deletion and config/lock mutation. Returns the notes produced by the
+/// lock mutation (e.g. an id-mismatch stale note), or an `Err` (status
+/// breadcrumb) when `repo` fails `split_repo` (C-12 defense-in-depth).
+/// An empty `Vec` on `Ok` means the uninstall completed without any notes.
 async fn perform_member_uninstall(
     ctx: &TuiContext,
     repo: String,
     kind: crate::oci::ArtifactKind,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<String>> {
     // C-12: validate split_repo at the boundary — return Err (no panic) on
     // a separator-less repo so the dispatch arm can show a status breadcrumb.
-    if split_repo(&repo).is_none() {
+    let Some((_registry, repository)) = split_repo(&repo) else {
         return Err(anyhow::anyhow!("malformed member repo: {repo}"));
-    }
-    // Build a minimal synthetic TuiRow so we can delegate to perform_uninstall.
-    let synthetic_row = TuiRow {
-        kind: kind.to_string(),
-        repo: repo.clone(),
-        description: String::new(),
-        summary: String::new(),
-        keywords: Vec::new(),
-        repository_url: None,
-        latest_tag: String::new(),
-        version: String::new(),
-        pinned_version: None,
-        state: crate::tui::state::ArtifactState::NotInstalled,
     };
-    perform_uninstall(ctx, &synthetic_row)
+    let member_kind = kind;
+    let name = repository.rsplit('/').next().unwrap_or(&repository).to_string();
+
+    // Delete materialized files + drop install-state record.
+    let mut install_state = load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
+    let involved_clients: Vec<crate::install::client_target::ClientTarget> = install_state
+        .get(member_kind, &name)
+        .map(|r| r.outputs.iter().filter_map(|c| c.client.parse().ok()).collect())
+        .unwrap_or_default();
+    let result = crate::install::uninstall::uninstall(&mut install_state, member_kind, &name, &ctx.roots)
+        .map_err(|e| anyhow::anyhow!("uninstall failed: {e}"))?;
+    if result.outcome == crate::install::uninstall::UninstallOutcome::Removed {
+        install_state
+            .persist(ctx.scope, &ctx.workspace, &ctx.roots.grim_home, &ctx.config_path)
+            .map_err(|e| anyhow::Error::new(e).context("install-state persist failed"))?;
+    }
+    for client in involved_clients {
+        if let Err(e) = client.vendor().sync_config(&install_state, &ctx.workspace, ctx.scope) {
+            tracing::warn!(client = %client, error = %e, "vendor config sync failed; delete completed, deregistration skipped");
+        }
+    }
+
+    // Undeclare from config + lock, threading notes back to the caller.
+    let _guard = match ctx.config_path.exists() {
+        true => Some(grim(ConfigFileLock::try_acquire(&ctx.config_path))?),
+        false => None,
+    };
+    let Ok((options, registries, mut set)) = load_scope_declaration(ctx) else {
+        return Ok(Vec::new());
+    };
+    let (_declared, notes) = undeclare_and_unlock(
+        &ctx.config_path,
+        &ctx.lock_path,
+        &options,
+        &registries,
+        &mut set,
+        member_kind,
+        &name,
+    )?;
+    Ok(notes)
 }
 
 #[cfg(test)]

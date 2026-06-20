@@ -29,6 +29,7 @@ mod env;
 mod error;
 mod install;
 mod lock;
+mod log_switch;
 mod mcp;
 mod oci;
 mod resolve;
@@ -152,12 +153,31 @@ fn main() -> std::process::ExitCode {
 }
 
 /// Initialize tracing from the `GRIM_LOG` env var (falls back to `warn`).
+///
+/// Installs a [`crate::log_switch::SwitchableWriter`] so the TUI can
+/// redirect log output to a file while alt-screen is active, then restore
+/// stderr on exit. The writer is stored in the process-global
+/// [`crate::log_switch::GLOBAL_WRITER`] so TUI code retrieves it without
+/// threading it through every call frame.
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::prelude::*;
 
     let filter = EnvFilter::try_from_env("GRIM_LOG").unwrap_or_else(|_| EnvFilter::new("warn"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .init();
+    let writer = crate::log_switch::SwitchableWriter::new();
+    // Store in the global before installing the subscriber so any code
+    // that calls `global_writer()` immediately after init_tracing() finds
+    // it. The OnceLock guarantees the assignment happens at most once.
+    let stored = crate::log_switch::set_global_writer(writer);
+
+    // Build and install the subscriber. `try_init` is used so a
+    // second call (e.g., in a test binary that also calls init_tracing)
+    // silently returns the error rather than panicking.
+    let _ = tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(stored.clone())
+                .with_filter(filter),
+        )
+        .try_init();
 }

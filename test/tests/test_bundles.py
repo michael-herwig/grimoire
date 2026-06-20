@@ -476,6 +476,92 @@ def test_remove_direct_with_bundle_id_mismatch_goes_stale(
     assert bundled.digest in healed["pinned"]
 
 
+def test_remove_standalone_skill_held_by_bundle_at_floating_tag_marks_stale_not_lost(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    # Real-world repro: a skill is declared standalone at floating tag
+    # :latest and a declared bundle pins the same skill at a different
+    # floating tag :0. While the direct declaration wins, the bundle member
+    # at :0 is never resolved. On `grim remove`, grim cannot prove which
+    # content :0 resolves to offline, so the lock goes stale. The artifact
+    # must NOT disappear — it is still provided by the bundle, awaiting a
+    # `grim lock` re-resolve. The user must see an explanatory note that
+    # names the bundle and says "stale" + "grim lock", not a dead-end error.
+    #
+    # Step 1: publish the skill at two different floating tags — same content
+    # is fine; the id mismatch is on the tag string, not the digest.
+    skill_at_zero = make_artifact(
+        f"{unique_repo}/grim-authoring",
+        "skill",
+        {"grim-authoring/SKILL.md": "---\nname: grim-authoring\n---\n# v0\n"},
+        tag="0",
+    )
+    skill_at_latest = make_artifact(
+        f"{unique_repo}/grim-authoring",
+        "skill",
+        {"grim-authoring/SKILL.md": "---\nname: grim-authoring\n---\n# latest\n"},
+        tag="latest",
+    )
+
+    # Step 2: publish a bundle that pins the member at :0.
+    bundle = make_bundle(
+        f"{unique_repo}/grim-essentials",
+        [("skill", "grim-authoring", skill_at_zero.fq)],
+        tag="1",
+    )
+
+    # Step 3: declare the skill standalone at :latest AND the bundle.
+    write_config(
+        project_dir,
+        skills={"grim-authoring": skill_at_latest.fq},
+        bundles={"grim-essentials": bundle.fq},
+    )
+    runner = grim_at(project_dir)
+    runner.run("lock")
+
+    rows = runner.json("status")
+    before = next(r for r in rows if r["name"] == "grim-authoring")
+    assert before["source"] == "direct", "standalone wins while declared at :latest"
+
+    # Step 4: remove the standalone declaration.
+    result = runner.run("remove", "skill", "grim-authoring")
+
+    # Step 5: the stderr note must be explanatory — names the bundle, says
+    # "stale" and "grim lock" — not a dead-end error phrase.
+    stderr = result.stderr or ""
+    assert "grim lock" in stderr.lower(), (
+        f"note must tell user to run `grim lock`: {stderr!r}"
+    )
+    assert "stale" in stderr.lower(), (
+        f"note must say the lock is stale: {stderr!r}"
+    )
+    assert "grim-essentials" in stderr, (
+        f"note must name the bundle so the user knows what provides it: {stderr!r}"
+    )
+
+    # Step 6: the artifact is NOT lost — the bundle row is stale (awaiting
+    # re-resolve), but status still surfaces the bundle row, not silence.
+    rows = runner.json("status")
+    states = {r["name"]: r["state"] for r in rows}
+    assert states.get("grim-essentials") == "stale", (
+        f"bundle row must surface staleness: {states}"
+    )
+
+    # Step 7: `grim lock` heals — the artifact resolves in from the bundle.
+    runner.run("lock")
+    rows = runner.json("status")
+    healed = next((r for r in rows if r["name"] == "grim-authoring"), None)
+    assert healed is not None, (
+        "artifact must reappear after `grim lock` re-resolves the bundle member"
+    )
+    assert healed["source"].startswith("bundle:"), (
+        "provenance must flip to the bundle after heal"
+    )
+    assert skill_at_zero.digest in healed["pinned"], (
+        "the healed entry must be pinned to the bundle member's (:0) content digest"
+    )
+
+
 def test_uninstall_direct_keeps_lock_entry_held_by_bundle(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:

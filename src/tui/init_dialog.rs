@@ -141,9 +141,18 @@ impl InitDialog {
 ///
 /// A terminal-setup, draw, or event-read I/O failure.
 pub fn run(dialog: &mut InitDialog) -> io::Result<InitDialogOutcome> {
+    // Redirect tracing to the log file for this alt-screen session.
+    // Declared before `_guard` so it outlives the terminal guard and
+    // restores stderr only after the alt-screen is already left.
+    let grim_home = crate::env::grim_home();
+    let _log_guard =
+        crate::log_switch::global_writer().and_then(|w| crate::log_switch::LogSinkGuard::redirect(w, &grim_home));
+
     let _guard = TerminalGuard::enter()?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
+    // Clear pre-existing terminal content before the dialog appears.
+    terminal.clear()?;
 
     loop {
         terminal.draw(|f| draw_dialog(f, dialog))?;

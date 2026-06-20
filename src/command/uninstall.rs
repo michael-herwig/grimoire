@@ -111,7 +111,7 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
     // 2. Undeclare from the config + lock (the `remove` half), so a later
     //    `install` does not silently bring it back.
     let mut set = scope.set.clone();
-    let declared = undeclare_and_unlock(
+    let (declared, _notes) = undeclare_and_unlock(
         &scope.config_path,
         &scope.lock_path,
         &scope.options,
@@ -155,7 +155,7 @@ pub(crate) fn undeclare_and_unlock(
     set: &mut crate::config::declaration::DesiredSet,
     kind: ArtifactKind,
     name: &str,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<(bool, Vec<String>)> {
     let set_before = set.clone();
     let declared = match kind {
         ArtifactKind::Skill => set.skills.remove(name).is_some(),
@@ -167,14 +167,16 @@ pub(crate) fn undeclare_and_unlock(
         set.invalidate_declaration_hash_cache();
         super::grim(write_config(config_path, options, registries, set))?;
     }
+    let mut notes = Vec::new();
     if let Ok(previous) = lock_io::load(lock_path) {
         let outcome = super::remove::drop_from_lock(&previous, kind, name, &set_before, set);
+        notes = outcome.notes.clone();
         for note in &outcome.notes {
             tracing::warn!("{note}");
         }
         super::grim(lock_io::save(lock_path, &outcome.lock, Some(&previous)))?;
     }
-    Ok(declared)
+    Ok((declared, notes))
 }
 
 /// Map a filesystem / install-state I/O failure to a classifiable
@@ -267,7 +269,7 @@ mod tests {
         let lock = lock_with_skills(set.declaration_hash_cached(), &[("alpha", 'a'), ("beta", 'b')]);
         lock_io::save(&lock_path, &lock, None).unwrap();
 
-        let declared = undeclare_and_unlock(
+        let (declared, _notes) = undeclare_and_unlock(
             &config_path,
             &lock_path,
             &ConfigOptions::default(),
@@ -322,7 +324,7 @@ mod tests {
         lock.skills.push(member);
         lock_io::save(&lock_path, &lock, None).unwrap();
 
-        let declared = undeclare_and_unlock(
+        let (declared, _notes) = undeclare_and_unlock(
             &config_path,
             &lock_path,
             &ConfigOptions::default(),
@@ -387,6 +389,7 @@ mod tests {
             "pack-a",
         )
         .expect("bundle undeclare succeeds");
+        // Return value (declared, notes) not needed for this assertion.
 
         let saved = lock_io::load(&lock_path).unwrap();
         assert_eq!(saved.skills.len(), 1, "the shared member survives");
@@ -416,7 +419,7 @@ mod tests {
         let lock = lock_with_skills(&format!("sha256:{}", sha('f')), &[("ghost", 'c')]);
         lock_io::save(&lock_path, &lock, None).unwrap();
 
-        let declared = undeclare_and_unlock(
+        let (declared, _notes) = undeclare_and_unlock(
             &config_path,
             &lock_path,
             &ConfigOptions::default(),
