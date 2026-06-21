@@ -661,6 +661,46 @@ def test_uninstall_standalone_skill_held_by_bundle_at_other_tag_keeps_files(
     assert healed["source"].startswith("bundle:"), "provenance flips to the bundle"
 
 
+def test_uninstall_bundle_only_member_keeps_files(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    # A skill provided ONLY by a declared bundle (never declared standalone)
+    # must NOT have its files deleted by `grim uninstall` — the bundle holds it,
+    # so it stays desired; to remove it you remove the bundle. (Previously the
+    # file-retention gate only protected directly-declared artifacts, so a
+    # bundle-only member's files were deleted.)
+    sk = _member_skill(unique_repo, "code-review")
+    bundle = make_bundle(
+        f"{unique_repo}/stack",
+        [("skill", "code-review", sk.fq)],
+        tag="1.0.0",
+    )
+    write_config(project_dir, bundles={"stack": bundle.fq})
+    (project_dir / ".claude").mkdir(exist_ok=True)
+    runner = grim_at(project_dir)
+    runner.run("lock")
+    runner.run("install")
+    assert_dir_exists(project_dir / ".claude" / "skills" / "code-review")
+
+    report = runner.json("uninstall", "skill", "code-review")
+
+    # The report is honest: a protected no-op, not "uninstalled" or
+    # "not-installed" (the artifact is intentionally still present, via the bundle).
+    assert report["status"] == "kept-by-bundle", (
+        f"uninstall of a bundle-only member must report kept-by-bundle: {report}"
+    )
+
+    # Files survive — the bundle still provides the member.
+    assert_dir_exists(project_dir / ".claude" / "skills" / "code-review")
+    rows = runner.json("status")
+    after = next((r for r in rows if r["name"] == "code-review"), None)
+    assert after is not None, "the member survives — the bundle still holds it"
+    assert after["source"].startswith("bundle:"), "still provided by the bundle"
+    assert after["state"] == "installed", (
+        f"a bundle-only member's files must be kept on uninstall: {after}"
+    )
+
+
 def test_release_bundle_with_agent_member(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:

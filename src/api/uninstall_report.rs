@@ -24,6 +24,10 @@ pub enum UninstallStatus {
     /// Files deleted, install-state record dropped, config + lock entry
     /// undeclared.
     Uninstalled,
+    /// A declared bundle still provides this artifact and it was not directly
+    /// declared, so its files are kept and nothing was undeclared — remove the
+    /// bundle to remove it. The uninstall was intentionally a no-op.
+    KeptByBundle,
     /// Nothing was installed or declared for this name (no-op).
     NotInstalled,
 }
@@ -32,6 +36,7 @@ impl std::fmt::Display for UninstallStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Uninstalled => "uninstalled",
+            Self::KeptByBundle => "kept-by-bundle",
             Self::NotInstalled => "not-installed",
         })
     }

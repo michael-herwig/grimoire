@@ -531,6 +531,63 @@ Companion TUI fixes in the same change:
   ([high] regression), `recompute_states_refreshes_stale_bundle_member_states`
   (stale-badge repro); fixture `registry_with_bundle` gains a second skill tag.
 
+---
+
+## Bug-fix decision: bundle-provided members are protected from deletion; derivation is snapshot-aware
+
+**Status:** Accepted (supersedes the "member-delete deletes files" sub-decision above)
+**Date:** 2026-06-21
+**Deciders:** Maintainer (mherwig) + Claude
+
+### 1. Root cause (two faces of one gap — snapshot membership treated as second-class)
+
+- **Bug A — a bundle-provided member could be deleted (files removed).** The
+  file-retention gate `bundle_holds_after_direct_removal` short-circuited to
+  `false` for any artifact not *directly declared* (the `directly_declared`
+  precondition), so a bundle-only member's files were deleted at every delete
+  site. This was the prior "Discriminator = directly declared" sub-decision —
+  the maintainer reversed it: a member a declared bundle provides must not be
+  individually deletable; to remove it you remove the bundle.
+- **Bug B — a bundle-provided member (files on disk) often showed
+  NotInstalled.** `derive_artifact_state` *required* a top-level lock entry. The
+  id-mismatch stale-drop (`drop_from_lock`, `Origin::Bundles` branch) deliberately
+  drops the top-level entry while keeping files + install record + `[[bundle]]`
+  snapshot; derivation then read NotInstalled until `grim lock` re-created the
+  entry. The *read* path ignored snapshot membership just as the *gate* did.
+
+### 2. Decision (binding)
+
+- **Protect any artifact a declared bundle provides.** Generalize the gate
+  (renamed `declared_bundle_provides`): drop the `directly_declared` precondition
+  so it fires for bundle-only members too. A directly-declared+bundle artifact
+  still degrades to dropping the direct declaration (files kept); a bundle-only
+  member keeps everything and the TUI surfaces "provided by a bundle — remove the
+  bundle to remove it". Removing the **bundle** still deletes its members
+  (`bundle_uninstall_targets`, unchanged). The old member-delete-deletes-files
+  feature is dropped.
+- **Make derivation snapshot-aware.** `derive_artifact_state` no longer *requires*
+  a top-level lock entry: if absent, a `[[bundle]]` snapshot that names the
+  artifact (parsed like `member_node_from`) plus files + record yields `Installed`
+  (→ `ViaBundle`). The top-level fast path stays (it alone can distinguish
+  `Outdated`). New helper `bundle_snapshot_provides`.
+
+### 3. Implementation
+
+- `src/lock/effective_set.rs`: `bundle_holds_after_direct_removal` →
+  `declared_bundle_provides` (drop `directly_declared` precondition; `Bundle` kind
+  still false). Unit test `does_not_hold_for_bundle_only_member` →
+  `holds_for_bundle_only_member` (now true).
+- `src/tui/app.rs`: two-tier `derive_artifact_state` + `bundle_snapshot_provides`;
+  `direct_removal_keeps_files` → `bundle_provides_files`; `perform_member_uninstall`
+  surfaces the "provided by a bundle" note; `aliased_member_uninstall_targets_member_name_not_basename`
+  → `aliased_bundle_member_is_protected_from_deletion`; new repros
+  `deleting_bundle_only_member_keeps_files`, `bundle_member_stays_via_bundle_after_idmismatch_lock_drop`.
+- `src/command/uninstall.rs`: gate rename; CLI `grim uninstall` of a
+  bundle-provided member now keeps files.
+- **Deferred (follow-up):** `grim status` / `status_badge` share the
+  top-level-lock-entry-only assumption, so an id-mismatch member is omitted from
+  `grim status` until `grim lock` heals it — TUI/CLI parity not yet unified.
+
 ## Changelog
 
 | Date | Author | Change |
@@ -539,3 +596,4 @@ Companion TUI fixes in the same change:
 | 2026-06-20 | Claude (approved by maintainer) | Add standalone↔bundle id-mismatch reconcile bug-fix decision (Option C: honest staleness retained, message reworded, outcome surfaced in TUI status line) |
 | 2026-06-21 | Claude (approved by maintainer) | Add file-retention gate: uninstall / TUI delete must not delete files a declared bundle still provides (degrade to `remove`); gate `bundle_holds_after_direct_removal` at all three delete sites |
 | 2026-06-21 | Claude (approved by maintainer) | Complete the delete side: TUI bundle-delete derives file-deletion targets from the effective-set diff `E_before \ E_after` (deletes snapshot-only members orphaned by a prior id-mismatch removal); resolve the real `[bundles]` binding before deleting (Codex [high]); refresh stale member badges in `recompute_states` |
+| 2026-06-21 | Claude (approved by maintainer) | Protect bundle-provided members from deletion (generalize gate → `declared_bundle_provides`, no `directly_declared` precondition); snapshot-aware `derive_artifact_state` (two-tier: top-level entry, else declaration-matched `[[bundle]]` snapshot via `snapshot_declared_repos`/`effective_set`, so a stale/retagged snapshot provides nothing — Codex [medium]); CLI `UninstallStatus::KeptByBundle` for the protected no-op (Codex [medium]) |

@@ -22,7 +22,7 @@ column formats.
 | `grim list` | List installed artifacts |
 | `grim update [<ref>]` | Pull newer versions |
 | `grim remove <kind> <name>` | Undeclare an artifact (config + lock only; files left on disk) |
-| `grim uninstall <kind> <name>` | Full inverse of install: delete files, drop the install record, undeclare (config + lock). Shared seam reused by the TUI delete action |
+| `grim uninstall <kind> <name>` | Full inverse of install: delete files, drop the install record, undeclare (config + lock). Shared seam reused by the TUI delete action. **Exception:** an artifact a declared bundle still provides keeps its files (a directly-declared one degrades to `remove`; a bundle-only member is a no-op — remove the bundle to remove it) |
 | `grim release <path> <ref>` | Push a single artifact to a registry (validate, pack, push with cascade tags) |
 | `grim publish` | Batch-release all packages declared in a `publish.toml` manifest; validates whole manifest before any push; fixed kind order (skills → rules → agents → bundles), skip-existing by default |
 | `grim login [<registry>]` | Authenticate to a registry; store the credential via the docker-compatible credential store (helper or, with `--allow-insecure-store`, plaintext) |

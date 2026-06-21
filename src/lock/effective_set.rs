@@ -121,10 +121,9 @@ pub fn snapshot_matches(binding: &str, declared_id: &Identifier, snapshot: &Lock
     snapshot.tag == declared_tag
 }
 
-/// Whether removing the **direct** declaration of `(kind, name)` would leave
-/// the artifact still provided by a declared bundle — so its materialized
-/// files must NOT be deleted on uninstall, because it stays in the effective
-/// desired set.
+/// Whether a declared bundle provides `(kind, name)` — so its materialized
+/// files must NOT be deleted on uninstall, because the artifact stays in the
+/// effective desired set.
 ///
 /// This is the *file-retention* gate, deliberately broader than the
 /// lock-retention rule in [`crate::command::remove::drop_from_lock`]: the lock
@@ -133,37 +132,41 @@ pub fn snapshot_matches(binding: &str, declared_id: &Identifier, snapshot: &Lock
 /// version is reconciled later by `grim lock` + update). Deleting still-desired
 /// files is the surprising, destructive behavior this guard prevents.
 ///
-/// Fires only for an artifact that is *currently* declared directly — so
-/// removing its direct entry is meaningful. A bundle-only member is never gated
-/// here: uninstalling one is the explicit "delete this member's files" action
-/// (the TUI member-delete feature). `Bundle` kind is never bundle-held.
+/// It fires for **both** a directly-declared artifact a bundle also provides
+/// (dropping the direct declaration leaves the bundle-provided variant) **and**
+/// a bundle-only member (provided solely by a bundle): to remove a
+/// bundle-provided member you remove the bundle, never its files directly. The
+/// direct declaration (if any) is dropped before the check, so a standalone-only
+/// artifact (no bundle) is not gated and its files are deleted as usual.
+/// `Bundle` kind is never bundle-held.
 ///
 /// Pure + offline: expands the lock's `[[bundle]]` snapshots via
 /// [`effective_set`]. Returns `false` when the snapshots are incomplete
 /// (pre-cache lock) — bundle membership is then unknowable offline, so the
 /// caller falls back to the pre-effective-set behavior (delete the files).
-pub fn bundle_holds_after_direct_removal(
-    set: &DesiredSet,
-    cached: &[LockedBundle],
-    kind: ArtifactKind,
-    name: &str,
-) -> bool {
-    let directly_declared = match kind {
-        ArtifactKind::Skill => set.skills.contains_key(name),
-        ArtifactKind::Rule => set.rules.contains_key(name),
-        ArtifactKind::Agent => set.agents.contains_key(name),
-        ArtifactKind::Bundle => false,
-    };
-    if !directly_declared {
+pub fn declared_bundle_provides(set: &DesiredSet, cached: &[LockedBundle], kind: ArtifactKind, name: &str) -> bool {
+    // A bundle is never itself "provided by a bundle".
+    if kind == ArtifactKind::Bundle {
         return false;
     }
+    // Drop any DIRECT declaration of this artifact, then ask whether a declared
+    // bundle still provides it. For a directly-declared artifact this answers
+    // "would a bundle still hold it after I drop my standalone declaration"; for
+    // a bundle-only member the removal is a no-op and it answers "does a declared
+    // bundle provide it" — both must keep the files.
     let mut after = set.clone();
-    let _removed = match kind {
-        ArtifactKind::Skill => after.skills.remove(name).is_some(),
-        ArtifactKind::Rule => after.rules.remove(name).is_some(),
-        ArtifactKind::Agent => after.agents.remove(name).is_some(),
-        ArtifactKind::Bundle => false,
-    };
+    match kind {
+        ArtifactKind::Skill => {
+            after.skills.remove(name);
+        }
+        ArtifactKind::Rule => {
+            after.rules.remove(name);
+        }
+        ArtifactKind::Agent => {
+            after.agents.remove(name);
+        }
+        ArtifactKind::Bundle => {}
+    }
     after.invalidate_declaration_hash_cache();
     effective_set(&after, cached)
         .map(|e| e.contains_key(&(kind, name.to_string())))
@@ -303,7 +306,7 @@ mod tests {
         assert_eq!(e.len(), 1);
     }
 
-    // ── bundle_holds_after_direct_removal (file-retention gate) ─────────────
+    // ── declared_bundle_provides (file-retention gate) ─────────────
 
     #[test]
     fn holds_when_bundle_provides_same_identifier() {
@@ -316,12 +319,7 @@ mod tests {
             "1",
             &[(ArtifactKind::Skill, "cr", "ghcr.io/acme/cr:1")],
         )];
-        assert!(bundle_holds_after_direct_removal(
-            &set,
-            &cache,
-            ArtifactKind::Skill,
-            "cr"
-        ));
+        assert!(declared_bundle_provides(&set, &cache, ArtifactKind::Skill, "cr"));
     }
 
     #[test]
@@ -340,26 +338,22 @@ mod tests {
             "1",
             &[(ArtifactKind::Skill, "cr", "ghcr.io/acme/cr:0")],
         )];
-        assert!(bundle_holds_after_direct_removal(
-            &set,
-            &cache,
-            ArtifactKind::Skill,
-            "cr"
-        ));
+        assert!(declared_bundle_provides(&set, &cache, ArtifactKind::Skill, "cr"));
     }
 
     #[test]
     fn does_not_hold_when_no_bundle_provides_it() {
         // Direct only, no bundle names it → normal uninstall deletes.
         let set = set_with(&[("cr", "ghcr.io/acme/cr:1")], &[]);
-        assert!(!bundle_holds_after_direct_removal(&set, &[], ArtifactKind::Skill, "cr"));
+        assert!(!declared_bundle_provides(&set, &[], ArtifactKind::Skill, "cr"));
     }
 
     #[test]
-    fn does_not_hold_for_bundle_only_member() {
-        // Not directly declared — a pure bundle member. Uninstalling it is the
-        // explicit member-delete action, so the gate must NOT fire (files are
-        // deleted, the member becomes re-installable).
+    fn holds_for_bundle_only_member() {
+        // Not directly declared — a pure bundle member. A declared bundle
+        // provides it, so the gate MUST fire (files kept; to remove it you
+        // remove the bundle). This is the corrected behavior: the old
+        // member-delete-deletes-files semantics are dropped.
         let set = set_with(&[], &[("stack", "ghcr.io/acme/stack:1")]);
         let cache = [snapshot(
             "stack",
@@ -367,12 +361,7 @@ mod tests {
             "1",
             &[(ArtifactKind::Skill, "cr", "ghcr.io/acme/cr:1")],
         )];
-        assert!(!bundle_holds_after_direct_removal(
-            &set,
-            &cache,
-            ArtifactKind::Skill,
-            "cr"
-        ));
+        assert!(declared_bundle_provides(&set, &cache, ArtifactKind::Skill, "cr"));
     }
 
     #[test]
@@ -380,7 +369,7 @@ mod tests {
         // A declared bundle with no matching snapshot (pre-cache lock):
         // membership is unknowable offline → fall back to deleting.
         let set = set_with(&[("cr", "ghcr.io/acme/cr:1")], &[("stack", "ghcr.io/acme/stack:1")]);
-        assert!(!bundle_holds_after_direct_removal(&set, &[], ArtifactKind::Skill, "cr"));
+        assert!(!declared_bundle_provides(&set, &[], ArtifactKind::Skill, "cr"));
     }
 
     #[test]
@@ -388,11 +377,6 @@ mod tests {
         // A bundle is never "held by a bundle".
         let set = set_with(&[], &[("stack", "ghcr.io/acme/stack:1")]);
         let cache = [snapshot("stack", "ghcr.io/acme/stack", "1", &[])];
-        assert!(!bundle_holds_after_direct_removal(
-            &set,
-            &cache,
-            ArtifactKind::Bundle,
-            "stack"
-        ));
+        assert!(!declared_bundle_provides(&set, &cache, ArtifactKind::Bundle, "stack"));
     }
 }

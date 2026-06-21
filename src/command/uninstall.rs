@@ -15,7 +15,7 @@
 //! artifact stays in the effective desired set, so it remains desired. There
 //! `uninstall` degrades to dropping the direct declaration (exactly like
 //! `grim remove`), keeping the bundle-provided files intact
-//! (`bundle_holds_after_direct_removal`).
+//! (`declared_bundle_provides`).
 
 use clap::Args;
 
@@ -79,7 +79,7 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
     // leaving the bundle-provided files intact. Decided offline from the lock's
     // cached bundle snapshots; a pre-cache lock falls back to deleting.
     let held_by_bundle = lock_io::load(&scope.lock_path).ok().is_some_and(|lock| {
-        crate::lock::effective_set::bundle_holds_after_direct_removal(&scope.set, &lock.bundles, kind, &args.name)
+        crate::lock::effective_set::declared_bundle_provides(&scope.set, &lock.bundles, kind, &args.name)
     });
 
     // 1. Delete materialized files + drop the install-state record — UNLESS a
@@ -145,6 +145,11 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
 
     let status = if file_removed || declared {
         UninstallStatus::Uninstalled
+    } else if held_by_bundle {
+        // A bundle-only member: a declared bundle still provides it, so the files
+        // were kept and there was no direct declaration to drop — an intentional
+        // no-op, not a "nothing here" result. Remove the bundle to remove it.
+        UninstallStatus::KeptByBundle
     } else {
         UninstallStatus::NotInstalled
     };

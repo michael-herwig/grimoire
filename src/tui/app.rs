@@ -368,10 +368,15 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                 let lock = lock_io::load(&ctx.lock_path).ok();
                 let install_state = load_state(&ctx).unwrap_or_else(|_| InstallState::empty(&ctx.state_path));
                 let active = detect_clients(&ctx.workspace, ctx.scope);
-                // Direct declarations decide the via-bundle badge: a member also
-                // declared standalone shows plain `installed`, not `via-bundle`.
-                let direct_repos = load_scope_declaration(&ctx)
-                    .map(|(_, _, set)| direct_declared_repos(&set))
+                // Direct declarations decide the via-bundle badge; a declaration-
+                // matched bundle snapshot lets a stale-dropped member still derive
+                // via the snapshot. A member also declared standalone shows plain
+                // `installed`, not `via-bundle`.
+                let (direct_repos, snapshot_repos) = load_scope_declaration(&ctx)
+                    .map(|(_, _, set)| {
+                        let cached = lock.as_ref().map(|l| l.bundles.as_slice()).unwrap_or(&[]);
+                        (direct_declared_repos(&set), snapshot_declared_repos(&set, cached))
+                    })
                     .unwrap_or_default();
 
                 let lock_members: Option<Vec<crate::oci::bundle::BundleMember>> = lock.as_ref().and_then(|l| {
@@ -406,6 +411,7 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                                         &ctx.roots,
                                         &active,
                                         &direct_repos,
+                                        &snapshot_repos,
                                     )
                                 })
                                 .unwrap_or(ArtifactState::NotInstalled);
@@ -540,7 +546,7 @@ fn schedule_row_checks_forced(
     if !force && !UpdateChecker::should_schedule(checker.last_scheduled(), now) {
         return;
     }
-    let (lock, _install_state, _declared_bundle_repos, _direct_repos) = load_scope_for_badges(ctx);
+    let (lock, _install_state, _declared_bundle_repos, _direct_repos, _snapshot_repos) = load_scope_for_badges(ctx);
     let Some(lock) = lock else {
         return; // No lock ⇒ no pins to compare against.
     };
@@ -592,7 +598,7 @@ fn recheck_rows(ctx: &TuiContext, state: &TuiState, checker: &mut UpdateChecker,
     if ctx.offline {
         return;
     }
-    let (lock, _install_state, _declared_bundle_repos, _direct_repos) = load_scope_for_badges(ctx);
+    let (lock, _install_state, _declared_bundle_repos, _direct_repos, _snapshot_repos) = load_scope_for_badges(ctx);
     let Some(lock) = lock else {
         return; // No lock ⇒ no pins to compare against.
     };
@@ -726,8 +732,11 @@ fn drain_bundle_member_checks(
                 let lock = lock_io::load(&ctx.lock_path).ok();
                 let install_state = load_state(ctx).unwrap_or_else(|_| InstallState::empty(&ctx.state_path));
                 let active = detect_clients(&ctx.workspace, ctx.scope);
-                let direct_repos = load_scope_declaration(ctx)
-                    .map(|(_, _, set)| direct_declared_repos(&set))
+                let (direct_repos, snapshot_repos) = load_scope_declaration(ctx)
+                    .map(|(_, _, set)| {
+                        let cached = lock.as_ref().map(|l| l.bundles.as_slice()).unwrap_or(&[]);
+                        (direct_declared_repos(&set), snapshot_declared_repos(&set, cached))
+                    })
                     .unwrap_or_default();
                 // Build a O(n) set of row repos for the related-highlight check (D2/P3.7).
                 let row_repos: std::collections::HashSet<&str> = state.rows.iter().map(|r| r.repo.as_str()).collect();
@@ -746,6 +755,7 @@ fn drain_bundle_member_checks(
                                     &ctx.roots,
                                     &active,
                                     &direct_repos,
+                                    &snapshot_repos,
                                 )
                             })
                             .unwrap_or(ArtifactState::NotInstalled);
@@ -781,7 +791,7 @@ fn drain_bundle_member_checks(
 /// the same path the initial load uses) and merge them, preserving live
 /// per-row `↑` flags, pins, and re-applying the kind-sort + filter.
 fn drain_catalog_ready(ctx: &TuiContext, state: &mut TuiState, catalog: &Catalog) {
-    let (lock, install_state, declared_bundle_repos, direct_repos) = load_scope_for_badges(ctx);
+    let (lock, install_state, declared_bundle_repos, direct_repos, snapshot_repos) = load_scope_for_badges(ctx);
     let active = detect_clients(&ctx.workspace, ctx.scope);
     let badge = BadgeContext {
         lock: lock.as_ref(),
@@ -790,6 +800,7 @@ fn drain_catalog_ready(ctx: &TuiContext, state: &mut TuiState, catalog: &Catalog
         active: &active,
         declared_bundle_repos: &declared_bundle_repos,
         direct_repos: &direct_repos,
+        snapshot_repos: &snapshot_repos,
     };
     let fresh = rows_from_catalog(catalog, &badge);
     state.merge_catalog_rows(fresh);
@@ -857,7 +868,7 @@ async fn reload_into(ctx: &TuiContext, state: &mut TuiState, force: bool) {
         .await
     {
         Ok(catalog) => {
-            let (lock, install_state, declared_bundle_repos, direct_repos) = load_scope_for_badges(ctx);
+            let (lock, install_state, declared_bundle_repos, direct_repos, snapshot_repos) = load_scope_for_badges(ctx);
             let active = detect_clients(&ctx.workspace, ctx.scope);
             let badge = BadgeContext {
                 lock: lock.as_ref(),
@@ -866,6 +877,7 @@ async fn reload_into(ctx: &TuiContext, state: &mut TuiState, force: bool) {
                 active: &active,
                 declared_bundle_repos: &declared_bundle_repos,
                 direct_repos: &direct_repos,
+                snapshot_repos: &snapshot_repos,
             };
             let rows = rows_from_catalog(&catalog, &badge);
             let n = rows.len();
@@ -913,6 +925,10 @@ struct BadgeContext<'a> {
     /// `[agents]` — used to flag an installed-but-not-directly-declared row as
     /// `ViaBundle` (present only because a bundle provides it).
     direct_repos: &'a std::collections::BTreeSet<(ArtifactKind, String)>,
+    /// `(kind, registry/repository)` provided by a currently-declared bundle
+    /// (from `effective_set`) — lets a row whose top-level lock entry was dropped
+    /// as stale still derive `ViaBundle`/`Installed` from the snapshot.
+    snapshot_repos: &'a std::collections::BTreeSet<(ArtifactKind, String)>,
 }
 
 /// Project a catalog into TUI rows, deriving each state from the scope's
@@ -959,6 +975,7 @@ fn derive_row_state(kind: &str, registry: &str, repository: &str, ctx: &BadgeCon
             ctx.roots,
             ctx.active,
             ctx.direct_repos,
+            ctx.snapshot_repos,
         )
     }
 }
@@ -1004,6 +1021,7 @@ fn derive_bundle_state(bundle_repo: &str, declared_bundle_repos: &std::collectio
 /// into `NotInstalled`, so a broken/tampered install is distinguishable
 /// from a never-installed entry. No lock entry or no record at all is
 /// still `NotInstalled`.
+#[allow(clippy::too_many_arguments)]
 fn derive_artifact_state(
     kind: ArtifactKind,
     registry: &str,
@@ -1012,13 +1030,23 @@ fn derive_artifact_state(
     state: &InstallState,
     roots: &AnchorRoots,
     active: &[ClientTarget],
+    snapshot_repos: &std::collections::BTreeSet<(ArtifactKind, String)>,
 ) -> ArtifactState {
-    let Some(locked) = lock.and_then(|l| {
+    // A top-level lock entry lets us distinguish Outdated. If it is absent, a
+    // CURRENTLY-DECLARED bundle whose snapshot names this artifact still proves
+    // it is provided via a bundle — its top-level entry may have been dropped as
+    // honestly stale on an id mismatch while its files + record + snapshot all
+    // remain. `snapshot_repos` is declaration-aware (built from `effective_set`),
+    // so a stale/retagged snapshot whose bundle is no longer declared does not
+    // count. Without either signal, it is not installed.
+    let locked = lock.and_then(|l| {
         l.iter_artifacts()
             .find(|a| a.kind == kind && a.pinned.registry() == registry && a.pinned.repository() == repository)
-    }) else {
+    });
+    let via_snapshot = locked.is_none() && snapshot_repos.contains(&(kind, format!("{registry}/{repository}")));
+    if locked.is_none() && !via_snapshot {
         return ArtifactState::NotInstalled;
-    };
+    }
     let Some(record) = state
         .iter_records()
         .find(|r| r.kind == kind && r.pinned.registry() == registry && r.pinned.repository() == repository)
@@ -1052,18 +1080,45 @@ fn derive_artifact_state(
             Err(_) => return ArtifactState::IntegrityMissing,
         }
     }
-    if record.pinned.eq_content(&locked.pinned) {
-        ArtifactState::Installed
-    } else {
-        ArtifactState::Outdated
+    match locked {
+        // A top-level lock entry: compare the pinned digest to flag Outdated.
+        Some(locked) if record.pinned.eq_content(&locked.pinned) => ArtifactState::Installed,
+        Some(_) => ArtifactState::Outdated,
+        // Snapshot-provided only (no top-level entry): no pinned identifier to
+        // compare, so plain Installed — `member_display_state` promotes it to
+        // ViaBundle for a member/row not also declared standalone.
+        None => ArtifactState::Installed,
     }
+}
+
+/// The set of `(kind, registry/repository)` a CURRENTLY-DECLARED bundle provides
+/// — every `Origin::Bundles` member of the effective desired set. Built from
+/// [`crate::lock::effective_set::effective_set`], so it honors `snapshot_matches`
+/// (a stale/retagged `[[bundle]]` snapshot whose bundle is no longer declared at
+/// that id is excluded). The via-bundle fallback in [`derive_artifact_state`]
+/// trusts only these. Empty when the cache is incomplete offline (the fallback
+/// then yields NotInstalled — the same offline degradation as the gate).
+fn snapshot_declared_repos(
+    set: &DesiredSet,
+    cached: &[crate::lock::locked_bundle::LockedBundle],
+) -> std::collections::BTreeSet<(ArtifactKind, String)> {
+    crate::lock::effective_set::effective_set(set, cached)
+        .map(|e| {
+            e.iter()
+                .filter_map(|((kind, _name), origin)| match origin {
+                    crate::lock::effective_set::Origin::Bundles { id, .. } => Some((*kind, id.registry_repository())),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Recompute every row's [`ArtifactState`] against the currently-active
 /// scope's lock + install-state (used after a scope toggle — the catalog
 /// itself is scope-independent, only the per-row state changes).
 fn recompute_states(ctx: &TuiContext, state: &mut TuiState) {
-    let (lock, install_state, declared_bundle_repos, direct_repos) = load_scope_for_badges(ctx);
+    let (lock, install_state, declared_bundle_repos, direct_repos, snapshot_repos) = load_scope_for_badges(ctx);
     let active = detect_clients(&ctx.workspace, ctx.scope);
     let badge = BadgeContext {
         lock: lock.as_ref(),
@@ -1072,6 +1127,7 @@ fn recompute_states(ctx: &TuiContext, state: &mut TuiState) {
         active: &active,
         declared_bundle_repos: &declared_bundle_repos,
         direct_repos: &direct_repos,
+        snapshot_repos: &snapshot_repos,
     };
     for r in &mut state.rows {
         if let Some((registry, repository)) = split_repo(&r.repo) {
@@ -1082,7 +1138,15 @@ fn recompute_states(ctx: &TuiContext, state: &mut TuiState) {
     // otherwise only rebuilt on re-expand / scope toggle. Refresh it here too so
     // an expanded bundle's members reflect an install/uninstall immediately,
     // instead of showing the state captured when the bundle was first expanded.
-    refresh_member_states(state, lock.as_ref(), &install_state, &ctx.roots, &active, &direct_repos);
+    refresh_member_states(
+        state,
+        lock.as_ref(),
+        &install_state,
+        &ctx.roots,
+        &active,
+        &direct_repos,
+        &snapshot_repos,
+    );
 }
 
 /// Re-derive the install state of every cached bundle-member node for the
@@ -1100,6 +1164,7 @@ fn refresh_member_states(
     roots: &AnchorRoots,
     active: &[ClientTarget],
     direct_repos: &std::collections::BTreeSet<(ArtifactKind, String)>,
+    snapshot_repos: &std::collections::BTreeSet<(ArtifactKind, String)>,
 ) {
     let scope_label = state.scope_label.clone();
     for ((entry_scope, _bundle_repo), cache) in state.bundle_members.iter_mut() {
@@ -1122,6 +1187,7 @@ fn refresh_member_states(
                 roots,
                 active,
                 direct_repos,
+                snapshot_repos,
             );
         }
     }
@@ -1161,8 +1227,9 @@ fn member_display_state(
     roots: &AnchorRoots,
     active: &[ClientTarget],
     direct_repos: &std::collections::BTreeSet<(ArtifactKind, String)>,
+    snapshot_repos: &std::collections::BTreeSet<(ArtifactKind, String)>,
 ) -> ArtifactState {
-    let derived = derive_artifact_state(kind, registry, repository, lock, state, roots, active);
+    let derived = derive_artifact_state(kind, registry, repository, lock, state, roots, active, snapshot_repos);
     if derived == ArtifactState::Installed && !direct_repos.contains(&(kind, format!("{registry}/{repository}"))) {
         ArtifactState::ViaBundle
     } else {
@@ -1190,11 +1257,12 @@ fn load_state(ctx: &TuiContext) -> io::Result<InstallState> {
 /// Best-effort scope load for badges (advisory — never fails the TUI).
 ///
 /// Returns the active scope's lock, install state, the set of declared bundle
-/// `registry/repository` values (drives bundle row state), and the set of
-/// directly-declared `(kind, registry/repository)` (drives the via-bundle badge:
-/// an installed artifact NOT directly declared is present only via a bundle).
-/// The declaration is read fresh (the config can change while the TUI runs); any
-/// read failure degrades to empty sets.
+/// `registry/repository` values (drives bundle row state), the set of
+/// directly-declared `(kind, registry/repository)` (drives the via-bundle badge),
+/// and the set of `(kind, registry/repository)` a currently-declared bundle
+/// provides (lets a stale-dropped member still derive via the snapshot). The
+/// declaration is read fresh (the config can change while the TUI runs); any read
+/// failure degrades to empty sets.
 #[allow(clippy::type_complexity)]
 fn load_scope_for_badges(
     ctx: &TuiContext,
@@ -1203,16 +1271,22 @@ fn load_scope_for_badges(
     InstallState,
     std::collections::BTreeSet<String>,
     std::collections::BTreeSet<(ArtifactKind, String)>,
+    std::collections::BTreeSet<(ArtifactKind, String)>,
 ) {
     let lock = lock_io::load(&ctx.lock_path).ok();
     let state = load_state(ctx).unwrap_or_else(|_| InstallState::empty(&ctx.state_path));
-    let (declared_bundle_repos, direct_repos) = load_scope_declaration(ctx)
+    let cached = lock.as_ref().map(|l| l.bundles.as_slice()).unwrap_or(&[]);
+    let (declared_bundle_repos, direct_repos, snapshot_repos) = load_scope_declaration(ctx)
         .map(|(_options, _registries, set)| {
             let bundles = set.bundles.values().map(|id| id.registry_repository()).collect();
-            (bundles, direct_declared_repos(&set))
+            (
+                bundles,
+                direct_declared_repos(&set),
+                snapshot_declared_repos(&set, cached),
+            )
         })
         .unwrap_or_default();
-    (lock, state, declared_bundle_repos, direct_repos)
+    (lock, state, declared_bundle_repos, direct_repos, snapshot_repos)
 }
 
 /// Lazily fetch the tag list for `row` and feed it to the open picker.
@@ -1331,7 +1405,7 @@ async fn run_batch(ctx: &TuiContext, state: &mut TuiState, rows: &[usize], op: B
 /// bundle row expands into the member records its lock provenance names;
 /// the undeclare seam then drops the `[bundles]` entry and evicts the
 /// members from the lock. A directly-declared row a declared bundle still
-/// provides keeps its files ([`direct_removal_keeps_files`]) — the delete
+/// provides keeps its files ([`bundle_provides_files`]) — the delete
 /// degrades to dropping the direct declaration, like `grim remove`.
 fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
     let (_registry, repository) =
@@ -1369,7 +1443,7 @@ fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
         ArtifactKind::Bundle => bundle_uninstall_targets(ctx, &name, &row.repo),
         // A directly-declared artifact a declared bundle still provides keeps
         // its files (it stays desired) — delete nothing, just undeclare below.
-        _ if direct_removal_keeps_files(ctx, kind, &name) => Vec::new(),
+        _ if bundle_provides_files(ctx, kind, &name) => Vec::new(),
         _ => vec![(kind, name.clone())],
     };
 
@@ -1682,23 +1756,25 @@ fn load_scope_declaration(
     }
 }
 
-/// Whether deleting the directly-declared artifact `(kind, name)` must keep
-/// its files because a declared bundle still provides it — the file-retention
-/// gate from [`crate::lock::effective_set::bundle_holds_after_direct_removal`].
+/// Whether deleting `(kind, name)` must keep its files because a declared
+/// bundle provides it — the file-retention gate from
+/// [`crate::lock::effective_set::declared_bundle_provides`].
 ///
-/// Loads the lock + the active scope's declaration fresh (the config can change
-/// while the TUI runs). Any load failure means the guard cannot prove the
+/// Fires for BOTH a directly-declared artifact a bundle also provides (the
+/// delete degrades to dropping the direct declaration, files kept) AND a
+/// bundle-only member (the delete keeps everything — remove the bundle to remove
+/// it). Loads the lock + the active scope's declaration fresh (the config can
+/// change while the TUI runs). Any load failure means the guard cannot prove the
 /// artifact is held → `false` (the caller deletes, the pre-effective-set
-/// behavior). A pure bundle member (not directly declared) is never held here,
-/// so the TUI member-delete action still deletes its files.
-fn direct_removal_keeps_files(ctx: &TuiContext, kind: ArtifactKind, name: &str) -> bool {
+/// behavior).
+fn bundle_provides_files(ctx: &TuiContext, kind: ArtifactKind, name: &str) -> bool {
     let Ok(lock) = lock_io::load(&ctx.lock_path) else {
         return false;
     };
     let Ok((_options, _registries, set)) = load_scope_declaration(ctx) else {
         return false;
     };
-    crate::lock::effective_set::bundle_holds_after_direct_removal(&set, &lock.bundles, kind, name)
+    crate::lock::effective_set::declared_bundle_provides(&set, &lock.bundles, kind, name)
 }
 
 /// Map a catalog row's kind string (`skill`/`rule`/`bundle`) onto the
@@ -1947,12 +2023,13 @@ async fn perform_member_uninstall(
         false => None,
     };
 
-    // Delete materialized files + drop install-state record — UNLESS the member
-    // is ALSO directly declared and a declared bundle still provides it, in
-    // which case the files stay (it remains desired) and only the declaration
-    // is dropped below. A pure bundle member is never gated, so the
-    // member-delete action still deletes its files (re-installable).
-    if !direct_removal_keeps_files(ctx, member_kind, &name) {
+    // Delete materialized files + drop the install-state record — UNLESS a
+    // declared bundle provides this artifact, in which case the files stay (it
+    // remains desired): a directly-declared member degrades to dropping its
+    // declaration; a bundle-only member keeps everything (remove the bundle to
+    // remove it).
+    let kept = bundle_provides_files(ctx, member_kind, &name);
+    if !kept {
         let mut install_state = load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
         let involved_clients: Vec<crate::install::client_target::ClientTarget> = install_state
             .get(member_kind, &name)
@@ -1977,7 +2054,7 @@ async fn perform_member_uninstall(
     let Ok((options, registries, mut set)) = load_scope_declaration(ctx) else {
         return Ok(Vec::new());
     };
-    let (_declared, notes) = undeclare_and_unlock(
+    let (declared, mut notes) = undeclare_and_unlock(
         &ctx.config_path,
         &ctx.lock_path,
         &options,
@@ -1986,6 +2063,13 @@ async fn perform_member_uninstall(
         member_kind,
         &name,
     )?;
+    // A bundle-only member (kept, never directly declared) has nothing to
+    // undeclare — tell the user the delete was a no-op and why.
+    if kept && !declared {
+        notes.push(format!(
+            "'{name}' is provided by a bundle — remove the bundle to remove it"
+        ));
+    }
     Ok(notes)
 }
 
@@ -2352,7 +2436,7 @@ mod tests {
         );
 
         // The bundle row badge derives `installed` from its members.
-        let (lock, install_state, declared_bundle_repos, direct_repos) = load_scope_for_badges(&ctx);
+        let (lock, install_state, declared_bundle_repos, direct_repos, snapshot_repos) = load_scope_for_badges(&ctx);
         let badge = BadgeContext {
             lock: lock.as_ref(),
             state: &install_state,
@@ -2360,6 +2444,7 @@ mod tests {
             active: &ClientTarget::ALL,
             declared_bundle_repos: &declared_bundle_repos,
             direct_repos: &direct_repos,
+            snapshot_repos: &snapshot_repos,
         };
         assert_eq!(
             derive_row_state("bundle", "localhost:5050", "grimoire/bundles/starter-pack", &badge),
@@ -2395,7 +2480,7 @@ mod tests {
         let lock = lock_io::load(&ctx.lock_path).expect("lock saved");
         assert!(lock.skills.is_empty(), "members must be evicted from the lock");
 
-        let (lock, install_state, declared_bundle_repos, direct_repos) = load_scope_for_badges(&ctx);
+        let (lock, install_state, declared_bundle_repos, direct_repos, snapshot_repos) = load_scope_for_badges(&ctx);
         let badge = BadgeContext {
             lock: lock.as_ref(),
             state: &install_state,
@@ -2403,6 +2488,7 @@ mod tests {
             active: &ClientTarget::ALL,
             declared_bundle_repos: &declared_bundle_repos,
             direct_repos: &direct_repos,
+            snapshot_repos: &snapshot_repos,
         };
         assert_eq!(
             derive_row_state("bundle", "localhost:5050", "grimoire/bundles/starter-pack", &badge),
@@ -2564,8 +2650,11 @@ mod tests {
         let lock = lock_io::load(&ctx.lock_path).ok();
         let install_state = load_state(ctx).unwrap_or_else(|_| InstallState::empty(&ctx.state_path));
         let active = detect_clients(&ctx.workspace, ctx.scope);
-        let direct_repos = load_scope_declaration(ctx)
-            .map(|(_, _, set)| direct_declared_repos(&set))
+        let (direct_repos, snapshot_repos) = load_scope_declaration(ctx)
+            .map(|(_, _, set)| {
+                let cached = lock.as_ref().map(|l| l.bundles.as_slice()).unwrap_or(&[]);
+                (direct_declared_repos(&set), snapshot_declared_repos(&set, cached))
+            })
             .unwrap_or_default();
         member_display_state(
             ArtifactKind::Skill,
@@ -2576,7 +2665,47 @@ mod tests {
             &ctx.roots,
             &active,
             &direct_repos,
+            &snapshot_repos,
         )
+    }
+
+    #[tokio::test]
+    async fn snapshot_repos_excludes_undeclared_bundle() {
+        // Codex [medium]: a lingering [[bundle]] snapshot whose bundle is NOT in
+        // the active [bundles] (removed / retagged out of band) must NOT count as
+        // providing its members — snapshot_declared_repos honors the live
+        // declaration, so the via-bundle fallback never trusts a stale snapshot.
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path();
+        std::fs::write(workspace.join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+        let ctx = test_ctx(workspace, registry_with_bundle().await);
+
+        let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
+        bundle_row.kind = "bundle".to_string();
+        bundle_row.state = ArtifactState::NotInstalled;
+        perform(&ctx, &bundle_row, false, None)
+            .await
+            .expect("bundle install succeeds");
+        let lock = lock_io::load(&ctx.lock_path).expect("lock loads");
+        assert!(!lock.bundles.is_empty(), "the [[bundle]] snapshot is present");
+
+        let (_options, _registries, declared) = load_scope_declaration(&ctx).expect("declaration loads");
+        let provided = snapshot_declared_repos(&declared, &lock.bundles);
+        assert!(
+            provided.contains(&(ArtifactKind::Skill, "localhost:5050/grimoire/skills/demo".to_string())),
+            "a declared bundle provides its member: {provided:?}"
+        );
+
+        // Drop the bundle from the declaration (out-of-band removal) while the
+        // snapshot lingers in the lock → it must provide nothing.
+        let mut undeclared = declared.clone();
+        undeclared.bundles.clear();
+        undeclared.invalidate_declaration_hash_cache();
+        let stale = snapshot_declared_repos(&undeclared, &lock.bundles);
+        assert!(
+            stale.is_empty(),
+            "an undeclared bundle's lingering snapshot must provide nothing: {stale:?}"
+        );
     }
 
     #[tokio::test]
@@ -2644,13 +2773,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn aliased_member_uninstall_targets_member_name_not_basename() {
-        // Codex [high]: a bundle member whose skill repo basename ("cool-tool")
-        // differs from the member's install key ("demo", the skill's own name).
-        // The install-state record is keyed by the member name, so member delete
-        // must target that name — keying by the repo basename silently misses
-        // the record and orphans the files. The TUI now threads the member name
-        // (DisplayRow::Member.label) through the action.
+    async fn aliased_bundle_member_is_protected_from_deletion() {
+        // A bundle member whose skill repo basename ("cool-tool") differs from
+        // its install key ("demo", the skill's own name). The install-state
+        // record is keyed by the member name. Member delete must keep the files
+        // (the bundle provides it — remove the bundle to remove it), and the
+        // member name (DisplayRow::Member.label) — not the repo basename — is
+        // what the action threads through to the keep-files gate.
         let tmp = tempfile::tempdir().unwrap();
         let workspace = tmp.path();
         std::fs::write(workspace.join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
@@ -2682,8 +2811,9 @@ mod tests {
             ArtifactState::ViaBundle
         );
 
-        // Member delete keyed by the member name removes the files (keying by
-        // the basename "cool-tool" would be a silent no-op).
+        // Member delete keeps the files — the bundle provides the member; the
+        // member name is threaded to the keep-files gate (the repo basename would
+        // not match the install record).
         perform_member_uninstall(
             &ctx,
             "localhost:5050/grimoire/skills/cool-tool".to_string(),
@@ -2693,8 +2823,8 @@ mod tests {
         .await
         .expect("member uninstall succeeds");
         assert!(
-            !workspace.join(".claude/skills/demo").exists(),
-            "the aliased member's files must be deleted when targeted by its name"
+            workspace.join(".claude/skills/demo/SKILL.md").is_file(),
+            "a bundle-provided member's files must be kept — remove the bundle to remove it"
         );
     }
 
@@ -2715,7 +2845,7 @@ mod tests {
             .await
             .expect("bundle install succeeds");
 
-        let (lock, install_state, declared_bundle_repos, direct_repos) = load_scope_for_badges(&ctx);
+        let (lock, install_state, declared_bundle_repos, direct_repos, snapshot_repos) = load_scope_for_badges(&ctx);
         let badge = BadgeContext {
             lock: lock.as_ref(),
             state: &install_state,
@@ -2723,6 +2853,7 @@ mod tests {
             active: &ClientTarget::ALL,
             declared_bundle_repos: &declared_bundle_repos,
             direct_repos: &direct_repos,
+            snapshot_repos: &snapshot_repos,
         };
         assert_eq!(
             derive_row_state("skill", "localhost:5050", "grimoire/skills/demo", &badge),
@@ -2737,7 +2868,7 @@ mod tests {
         perform(&ctx, &skill_row, false, None)
             .await
             .expect("skill install succeeds");
-        let (lock, install_state, declared_bundle_repos, direct_repos) = load_scope_for_badges(&ctx);
+        let (lock, install_state, declared_bundle_repos, direct_repos, snapshot_repos) = load_scope_for_badges(&ctx);
         let badge = BadgeContext {
             lock: lock.as_ref(),
             state: &install_state,
@@ -2745,11 +2876,95 @@ mod tests {
             active: &ClientTarget::ALL,
             declared_bundle_repos: &declared_bundle_repos,
             direct_repos: &direct_repos,
+            snapshot_repos: &snapshot_repos,
         };
         assert_eq!(
             derive_row_state("skill", "localhost:5050", "grimoire/skills/demo", &badge),
             ArtifactState::Installed,
             "once declared standalone the row is plain installed"
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_bundle_only_member_keeps_files() {
+        // Bug 1: a skill provided ONLY by a declared bundle must NOT have its
+        // files deleted by the member-delete action — to remove it you remove
+        // the bundle. (Was: the gate only protected directly-declared artifacts,
+        // so a bundle-only member's files were deleted.)
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path();
+        std::fs::write(workspace.join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+        let ctx = test_ctx(workspace, registry_with_bundle().await);
+
+        let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
+        bundle_row.kind = "bundle".to_string();
+        bundle_row.state = ArtifactState::NotInstalled;
+        perform(&ctx, &bundle_row, false, None)
+            .await
+            .expect("bundle install succeeds");
+        assert!(workspace.join(".claude/skills/demo/SKILL.md").is_file());
+
+        // Member delete on a bundle-only member must keep the files.
+        perform_member_uninstall(
+            &ctx,
+            "localhost:5050/grimoire/skills/demo".to_string(),
+            ArtifactKind::Skill,
+            "demo".to_string(),
+        )
+        .await
+        .expect("member uninstall succeeds");
+        assert!(
+            workspace.join(".claude/skills/demo/SKILL.md").is_file(),
+            "a bundle-only member's files must be kept — remove the bundle to remove it"
+        );
+    }
+
+    #[tokio::test]
+    async fn bundle_member_stays_via_bundle_after_idmismatch_lock_drop() {
+        // Bug 2: install a skill standalone at :latest, install a bundle pinning
+        // it at :1.0.0 (id mismatch), delete the standalone skill. The keep-files
+        // gate keeps the files, but drop_from_lock drops the top-level lock entry
+        // as honestly stale. The member's files + install record + [[bundle]]
+        // snapshot all remain — yet the badge wrongly read NotInstalled because
+        // derive required a top-level lock entry. It must read ViaBundle.
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path();
+        std::fs::write(workspace.join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+        let ctx = test_ctx(workspace, registry_with_bundle().await);
+
+        let mut skill_row = installed_row("localhost:5050/grimoire/skills/demo");
+        skill_row.latest_tag = "latest".to_string();
+        skill_row.state = ArtifactState::NotInstalled;
+        perform(&ctx, &skill_row, false, None)
+            .await
+            .expect("skill install succeeds");
+
+        let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
+        bundle_row.kind = "bundle".to_string();
+        bundle_row.state = ArtifactState::NotInstalled;
+        perform(&ctx, &bundle_row, false, None)
+            .await
+            .expect("bundle install succeeds");
+
+        // Delete the standalone skill: files kept (bundle holds it at a different
+        // id), but the top-level lock entry is dropped as honestly stale.
+        perform_uninstall(&ctx, &skill_row).expect("skill delete succeeds");
+        assert!(
+            workspace.join(".claude/skills/demo/SKILL.md").is_file(),
+            "files kept while the bundle still holds the skill"
+        );
+        let lock = lock_io::load(&ctx.lock_path).expect("lock loads");
+        assert!(
+            lock.skills.is_empty(),
+            "id-mismatch drops the top-level lock entry (honest staleness)"
+        );
+        assert!(!lock.bundles.is_empty(), "the [[bundle]] snapshot is kept");
+
+        assert_eq!(
+            member_badge(&ctx, "localhost:5050", "grimoire/skills/demo"),
+            ArtifactState::ViaBundle,
+            "a member present via the bundle (snapshot + files + record) must read \
+             via-bundle even with no top-level lock entry"
         );
     }
 
