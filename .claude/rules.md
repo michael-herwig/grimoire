@@ -31,7 +31,7 @@ Structural tests in `.claude/tests/test_ai_config.py` fail when catalog drifts f
 | Adopting a third-party library or tool | [product-tech-strategy.md](./rules/product-tech-strategy.md), `quality-{lang}.md` |
 | Starting any task (work-type routing) | [workflow-intent.md](./rules/workflow-intent.md) (global) — classifies work, checks GitHub context, routes to correct workflow |
 | Designing a new feature | [arch-principles.md](./rules/arch-principles.md), [workflow-feature.md](./rules/workflow-feature.md), `subsystem-{target}.md`, skill `architect` |
-| Fixing a bug | [workflow-bugfix.md](./rules/workflow-bugfix.md) — Reproduce → RCA → Regression Test → Fix → Verify |
+| Fixing a bug | [workflow-bugfix.md](./rules/workflow-bugfix.md) — Reproduce → RCA → Regression Test → Fix → Verify; skill `bugfix` (guided, enforces failing-test-first gate) |
 | Refactoring code | [workflow-refactor.md](./rules/workflow-refactor.md) — Safety Net → Scope → Transform → Verify → Repeat |
 | Documentation work | [docs-style.md](./rules/docs-style.md), skill `docs` |
 | Security-sensitive change | [quality-security.md](./rules/quality-security.md), [subsystem-ci.md](./rules/subsystem-ci.md), skill `security-auditor` |
@@ -130,6 +130,7 @@ Exempt from overlap detection (intended broad coupling):
 | Code quality audit | `code-check` |
 | Implementation / debugging | `builder` |
 | Test strategy | `qa-engineer` |
+| Fixing a bug (guided, failing-test-first) | `bugfix` |
 | Planning a feature (multi-agent) | `swarm-plan` |
 | Executing a feature (multi-agent) | `swarm-execute` |
 | Adversarial review | `swarm-review`, `codex-adversary` |

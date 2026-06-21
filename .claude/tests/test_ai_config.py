@@ -1168,6 +1168,7 @@ class TestAiConfigOverhaulPhase2:
         "swarm-execute": True,
         # Pure analysis / advisory — auto-invocation safe
         "architect": False,
+        "bugfix": False,
         "builder": False,
         "code-check": False,
         "deps": False,
