@@ -532,7 +532,7 @@ fn schedule_row_checks_forced(
     if !force && !UpdateChecker::should_schedule(checker.last_scheduled(), now) {
         return;
     }
-    let (lock, _install_state) = load_scope_for_badges(ctx);
+    let (lock, _install_state, _declared_bundle_repos) = load_scope_for_badges(ctx);
     let Some(lock) = lock else {
         return; // No lock ⇒ no pins to compare against.
     };
@@ -584,7 +584,7 @@ fn recheck_rows(ctx: &TuiContext, state: &TuiState, checker: &mut UpdateChecker,
     if ctx.offline {
         return;
     }
-    let (lock, _install_state) = load_scope_for_badges(ctx);
+    let (lock, _install_state, _declared_bundle_repos) = load_scope_for_badges(ctx);
     let Some(lock) = lock else {
         return; // No lock ⇒ no pins to compare against.
     };
@@ -769,9 +769,16 @@ fn drain_bundle_member_checks(
 /// the same path the initial load uses) and merge them, preserving live
 /// per-row `↑` flags, pins, and re-applying the kind-sort + filter.
 fn drain_catalog_ready(ctx: &TuiContext, state: &mut TuiState, catalog: &Catalog) {
-    let (lock, install_state) = load_scope_for_badges(ctx);
+    let (lock, install_state, declared_bundle_repos) = load_scope_for_badges(ctx);
     let active = detect_clients(&ctx.workspace, ctx.scope);
-    let fresh = rows_from_catalog(catalog, lock.as_ref(), &install_state, &ctx.roots, &active);
+    let badge = BadgeContext {
+        lock: lock.as_ref(),
+        state: &install_state,
+        roots: &ctx.roots,
+        active: &active,
+        declared_bundle_repos: &declared_bundle_repos,
+    };
+    let fresh = rows_from_catalog(catalog, &badge);
     state.merge_catalog_rows(fresh);
     // The background refresh re-walks the same browse window, so its
     // truncation verdict supersedes the initial load's (the cap may now be
@@ -837,9 +844,16 @@ async fn reload_into(ctx: &TuiContext, state: &mut TuiState, force: bool) {
         .await
     {
         Ok(catalog) => {
-            let (lock, install_state) = load_scope_for_badges(ctx);
+            let (lock, install_state, declared_bundle_repos) = load_scope_for_badges(ctx);
             let active = detect_clients(&ctx.workspace, ctx.scope);
-            let rows = rows_from_catalog(&catalog, lock.as_ref(), &install_state, &ctx.roots, &active);
+            let badge = BadgeContext {
+                lock: lock.as_ref(),
+                state: &install_state,
+                roots: &ctx.roots,
+                active: &active,
+                declared_bundle_repos: &declared_bundle_repos,
+            };
+            let rows = rows_from_catalog(&catalog, &badge);
             let n = rows.len();
             state.set_rows(rows);
             // Surface whether the browse window hit the cap so the row list
@@ -871,20 +885,26 @@ async fn reload_into(ctx: &TuiContext, state: &mut TuiState, force: bool) {
     }
 }
 
+/// Per-scope inputs for deriving a catalog row's badge state: the active lock,
+/// install state, anchor roots, active client set, and the declared bundle
+/// `registry/repository` set. Bundled (and passed by reference) to keep the
+/// row-derivation signatures small.
+struct BadgeContext<'a> {
+    lock: Option<&'a GrimoireLock>,
+    state: &'a InstallState,
+    roots: &'a AnchorRoots,
+    active: &'a [ClientTarget],
+    declared_bundle_repos: &'a std::collections::BTreeSet<String>,
+}
+
 /// Project a catalog into TUI rows, deriving each state from the scope's
-/// lock + install-state.
-fn rows_from_catalog(
-    catalog: &Catalog,
-    lock: Option<&GrimoireLock>,
-    state: &InstallState,
-    roots: &AnchorRoots,
-    active: &[ClientTarget],
-) -> Vec<TuiRow> {
+/// [`BadgeContext`] (lock + install-state + declared bundles).
+fn rows_from_catalog(catalog: &Catalog, ctx: &BadgeContext) -> Vec<TuiRow> {
     catalog
         .entries()
         .map(|e| {
             let kind = e.kind.clone().unwrap_or_else(|| "-".to_string());
-            let row_state = derive_row_state(&kind, &e.registry, &e.repository, lock, state, roots, active);
+            let row_state = derive_row_state(&kind, &e.registry, &e.repository, ctx);
             TuiRow {
                 kind,
                 repo: e.repo(),
@@ -903,121 +923,49 @@ fn rows_from_catalog(
         .collect()
 }
 
-/// Kind-aware row state: a bundle row aggregates the states of the
-/// members its lock provenance names; everything else derives directly
-/// from its own lock entry + install record.
-fn derive_row_state(
-    kind: &str,
-    registry: &str,
-    repository: &str,
-    lock: Option<&GrimoireLock>,
-    state: &InstallState,
-    roots: &AnchorRoots,
-    active: &[ClientTarget],
-) -> ArtifactState {
+/// Kind-aware row state: a bundle row is installed iff it is declared in the
+/// active scope's `[bundles]` (`ctx.declared_bundle_repos`); every other kind
+/// derives from its own lock entry + install record.
+fn derive_row_state(kind: &str, registry: &str, repository: &str, ctx: &BadgeContext) -> ArtifactState {
     if row_kind(kind) == ArtifactKind::Bundle {
-        derive_bundle_state(&format!("{registry}/{repository}"), lock, state, roots, active)
+        derive_bundle_state(&format!("{registry}/{repository}"), ctx.declared_bundle_repos)
     } else {
-        derive_artifact_state(row_kind(kind), registry, repository, lock, state, roots, active)
+        derive_artifact_state(
+            row_kind(kind),
+            registry,
+            repository,
+            ctx.lock,
+            ctx.state,
+            ctx.roots,
+            ctx.active,
+        )
     }
 }
 
 /// Derive a bundle row's state.
 ///
-/// Primary path (snapshot-present): look up ALL `[[bundle]]` `LockedBundle`
-/// entries whose `repo` matches `bundle_repo` (multiple binding names can
-/// resolve the same registry/repository). For each member in every matching
-/// snapshot, parse the member's `id` to `(registry, repository, kind)`, find
-/// the matching `LockedArtifact` by registry+repository+**kind** identity
-/// **irrespective of provenance** (direct-wins entries have an empty
-/// `bundles` vec but are still installed on disk and must not be missed),
-/// derive its `ArtifactState`, and apply worst-of aggregation across ALL
-/// snapshots' members. A snapshot member with no matching lock entry
-/// contributes `NotInstalled`.
+/// A bundle row is "installed" iff the bundle **itself** is declared — i.e.
+/// `bundle_repo` (`registry/repository`) is one of the `registry/repository`
+/// values in the active scope's `[bundles]` table. This is exactly the user's
+/// rule: a bundle is installed only when it appears in the `.toml`.
 ///
-/// Fallback (no `LockedBundle` snapshot matches, e.g. a lock written by an
-/// older grim that predates the `[[bundle]]` cache): enumerate lock
-/// artifacts by bundle provenance — same behaviour as the original
-/// implementation, for backwards compatibility.
+/// Deriving from the *live declaration* (not the lock) is deliberate: it is
+/// robust to a pre-cache lock that predates the `[[bundle]]` snapshot, and to a
+/// stale/lingering snapshot left by a hand-edit, branch switch, or
+/// retag-without-relock — neither of which must mislead the row.
 ///
-/// Worst-of semantics: no members (empty snapshots or no provenance
-/// matches) ⇒ `NotInstalled`.
-fn derive_bundle_state(
-    bundle_repo: &str,
-    lock: Option<&GrimoireLock>,
-    state: &InstallState,
-    roots: &AnchorRoots,
-    active: &[ClientTarget],
-) -> ArtifactState {
-    let Some(lock) = lock else {
-        return ArtifactState::NotInstalled;
-    };
-    /// Severity rank for worst-of aggregation: a healthier state never
-    /// masks a degraded member.
-    fn rank(s: ArtifactState) -> u8 {
-        match s {
-            ArtifactState::Installed => 0,
-            ArtifactState::Outdated => 1,
-            ArtifactState::NotInstalled => 2,
-            ArtifactState::Modified => 3,
-            ArtifactState::IntegrityMissing => 4,
-        }
+/// It deliberately does **NOT** depend on whether the member artifacts are
+/// installed. A bundle is installed because it is declared, not because its
+/// skills happen to be present: installing member skills standalone must never
+/// flip an undeclared bundle to "installed", and a declared bundle's row must
+/// not flip as its members are installed or removed. Per-member health is
+/// surfaced on the member rows, never folded into the bundle row.
+fn derive_bundle_state(bundle_repo: &str, declared_bundle_repos: &std::collections::BTreeSet<String>) -> ArtifactState {
+    if declared_bundle_repos.contains(bundle_repo) {
+        ArtifactState::Installed
+    } else {
+        ArtifactState::NotInstalled
     }
-
-    // Primary path: aggregate across ALL LockedBundle snapshots whose repo
-    // matches. Multiple binding names can resolve to the same
-    // registry/repository; only inspecting the first snapshot (`.find`) would
-    // miss a missing/modified member in any subsequent one (FIX 2).
-    let matching_bundles: Vec<_> = lock.bundles.iter().filter(|b| b.repo == bundle_repo).collect();
-    if !matching_bundles.is_empty() {
-        return matching_bundles
-            .iter()
-            .flat_map(|locked_bundle| locked_bundle.members.iter())
-            .map(|m| {
-                // Parse the member id to get registry + repository. A
-                // member with an unparseable id contributes NotInstalled
-                // (same defensive posture as the expand path at line ~412).
-                let Some(parsed) = Identifier::parse(&m.id).ok() else {
-                    return ArtifactState::NotInstalled;
-                };
-                // Find the lock artifact by registry + repository + KIND.
-                // A lock may hold the same registry/repository under
-                // different kinds (skill vs rule vs agent are separate
-                // arrays). Matching by kind prevents a same-repo skill from
-                // masking a missing rule member (FIX 1: kind-blind matching).
-                let member_registry = parsed.registry();
-                let member_repository = parsed.repository();
-                derive_artifact_state(
-                    m.kind,
-                    member_registry,
-                    member_repository,
-                    Some(lock),
-                    state,
-                    roots,
-                    active,
-                )
-            })
-            .max_by_key(|s| rank(*s))
-            .unwrap_or(ArtifactState::NotInstalled);
-    }
-
-    // Fallback: no LockedBundle snapshot (pre-cache lock). Enumerate by
-    // provenance — original behaviour, kept for backwards compatibility.
-    lock.iter_artifacts()
-        .filter(|a| a.bundles.iter().any(|b| b.repo == bundle_repo))
-        .map(|m| {
-            derive_artifact_state(
-                m.kind,
-                m.pinned.registry(),
-                m.pinned.repository(),
-                Some(lock),
-                state,
-                roots,
-                active,
-            )
-        })
-        .max_by_key(|s| rank(*s))
-        .unwrap_or(ArtifactState::NotInstalled)
 }
 
 /// Derive the richer TUI [`ArtifactState`] for `(kind, registry, repository)`.
@@ -1094,19 +1042,18 @@ fn derive_artifact_state(
 /// scope's lock + install-state (used after a scope toggle — the catalog
 /// itself is scope-independent, only the per-row state changes).
 fn recompute_states(ctx: &TuiContext, state: &mut TuiState) {
-    let (lock, install_state) = load_scope_for_badges(ctx);
+    let (lock, install_state, declared_bundle_repos) = load_scope_for_badges(ctx);
     let active = detect_clients(&ctx.workspace, ctx.scope);
+    let badge = BadgeContext {
+        lock: lock.as_ref(),
+        state: &install_state,
+        roots: &ctx.roots,
+        active: &active,
+        declared_bundle_repos: &declared_bundle_repos,
+    };
     for r in &mut state.rows {
         if let Some((registry, repository)) = split_repo(&r.repo) {
-            r.state = derive_row_state(
-                &r.kind,
-                &registry,
-                &repository,
-                lock.as_ref(),
-                &install_state,
-                &ctx.roots,
-                &active,
-            );
+            r.state = derive_row_state(&r.kind, &registry, &repository, &badge);
         }
     }
 }
@@ -1129,10 +1076,18 @@ fn load_state(ctx: &TuiContext) -> io::Result<InstallState> {
 }
 
 /// Best-effort scope load for badges (advisory — never fails the TUI).
-fn load_scope_for_badges(ctx: &TuiContext) -> (Option<GrimoireLock>, InstallState) {
+///
+/// Returns the active scope's lock, install state, and the set of declared
+/// bundle `registry/repository` values (from the live `[bundles]` table) used
+/// to derive bundle row state. The declaration is read fresh (the config can
+/// change while the TUI runs); any read failure degrades to an empty set.
+fn load_scope_for_badges(ctx: &TuiContext) -> (Option<GrimoireLock>, InstallState, std::collections::BTreeSet<String>) {
     let lock = lock_io::load(&ctx.lock_path).ok();
     let state = load_state(ctx).unwrap_or_else(|_| InstallState::empty(&ctx.state_path));
-    (lock, state)
+    let declared_bundle_repos = load_scope_declaration(ctx)
+        .map(|(_options, _registries, set)| set.bundles.values().map(|id| id.registry_repository()).collect())
+        .unwrap_or_default();
+    (lock, state, declared_bundle_repos)
 }
 
 /// Lazily fetch the tag list for `row` and feed it to the open picker.
@@ -2165,17 +2120,16 @@ mod tests {
         );
 
         // The bundle row badge derives `installed` from its members.
-        let (lock, install_state) = load_scope_for_badges(&ctx);
+        let (lock, install_state, declared_bundle_repos) = load_scope_for_badges(&ctx);
+        let badge = BadgeContext {
+            lock: lock.as_ref(),
+            state: &install_state,
+            roots: &ctx.roots,
+            active: &ClientTarget::ALL,
+            declared_bundle_repos: &declared_bundle_repos,
+        };
         assert_eq!(
-            derive_row_state(
-                "bundle",
-                "localhost:5050",
-                "grimoire/bundles/starter-pack",
-                lock.as_ref(),
-                &install_state,
-                &ctx.roots,
-                &ClientTarget::ALL,
-            ),
+            derive_row_state("bundle", "localhost:5050", "grimoire/bundles/starter-pack", &badge),
             ArtifactState::Installed
         );
     }
@@ -2208,17 +2162,16 @@ mod tests {
         let lock = lock_io::load(&ctx.lock_path).expect("lock saved");
         assert!(lock.skills.is_empty(), "members must be evicted from the lock");
 
-        let (lock, install_state) = load_scope_for_badges(&ctx);
+        let (lock, install_state, declared_bundle_repos) = load_scope_for_badges(&ctx);
+        let badge = BadgeContext {
+            lock: lock.as_ref(),
+            state: &install_state,
+            roots: &ctx.roots,
+            active: &ClientTarget::ALL,
+            declared_bundle_repos: &declared_bundle_repos,
+        };
         assert_eq!(
-            derive_row_state(
-                "bundle",
-                "localhost:5050",
-                "grimoire/bundles/starter-pack",
-                lock.as_ref(),
-                &install_state,
-                &ctx.roots,
-                &ClientTarget::ALL,
-            ),
+            derive_row_state("bundle", "localhost:5050", "grimoire/bundles/starter-pack", &badge),
             ArtifactState::NotInstalled
         );
     }
@@ -2314,8 +2267,6 @@ mod tests {
     /// counts the agent member and that the bundle-expand helpers collect it.
     #[test]
     fn bundle_with_agent_member_state_and_expand() {
-        use crate::install::install_state::InstallState;
-
         let agent_member = stamp(
             locked("my-agent", ArtifactKind::Agent, 'a'),
             "r/bundles/ai-pack",
@@ -2324,34 +2275,14 @@ mod tests {
         let mut lock = lock_fixture(vec![], vec![]);
         lock.agents = vec![agent_member];
 
-        // derive_bundle_state: agent member provenance matches → bundle
-        // reports NotInstalled (no install record) rather than hiding the
-        // member entirely.
-        let state = InstallState::empty(std::path::Path::new("/nonexistent"));
-        let stub_roots = AnchorRoots {
-            workspace: std::path::PathBuf::from("/nonexistent"),
-            grim_home: std::path::PathBuf::from("/nonexistent"),
-            claude_root: None,
-            copilot_root: None,
-            opencode_skills: None,
-        };
+        // derive_bundle_state: the bundle is NOT declared (empty declared set),
+        // so the row is NotInstalled regardless of the agent member present in
+        // the lock — member presence never drives the bundle row.
+        let none_declared = std::collections::BTreeSet::<String>::new();
         assert_eq!(
-            derive_bundle_state(
-                "r/bundles/ai-pack",
-                Some(&lock),
-                &state,
-                &stub_roots,
-                &ClientTarget::ALL
-            ),
+            derive_bundle_state("r/bundles/ai-pack", &none_declared),
             ArtifactState::NotInstalled,
-            "bundle with only an agent member derives NotInstalled when not installed"
-        );
-
-        // A bundle with no matching provenance in the lock is NotInstalled.
-        assert_eq!(
-            derive_bundle_state("r/bundles/other", Some(&lock), &state, &stub_roots, &ClientTarget::ALL),
-            ArtifactState::NotInstalled,
-            "bundle with no matching provenance is NotInstalled"
+            "an undeclared bundle is NotInstalled even though a member is present"
         );
 
         // bundle_members_lock: agent member is included.
@@ -2373,663 +2304,54 @@ mod tests {
         assert_eq!(targets[0], (ArtifactKind::Agent, "my-agent".to_string()));
     }
 
-    /// C4: a bundle whose member was installed to claude + opencode must read
-    /// `Installed` after the opencode client is removed — the stale opencode
-    /// output must not poison the member (and, via worst-of aggregation, the
-    /// bundle row) to `IntegrityMissing`.
+    // ── derive_bundle_state: declared gate (installed iff in [bundles]) ────────
+    //
+    // A bundle row is installed iff its `registry/repository` is declared in the
+    // active scope's `[bundles]` table (the declared-repos set). The function
+    // takes ONLY that set — by construction it cannot be swayed by member
+    // install health, a pre-cache lock with no snapshot, or a stale/lingering
+    // snapshot. Installing or uninstalling member skills can never flip the row;
+    // an undeclared bundle stays NotInstalled even with every member installed.
+
+    fn declared(repos: &[&str]) -> std::collections::BTreeSet<String> {
+        repos.iter().map(|s| (*s).to_string()).collect()
+    }
+
     #[test]
-    fn derive_bundle_state_installed_when_active_clients_intact() {
-        use crate::install::content_hash::content_hash;
-        use crate::install::install_state::{ClientOutput, InstallRecord};
-        use crate::install::path_anchor::{AnchoredPath, PathAnchor};
-
-        let tmp = tempfile::tempdir().unwrap();
-        let ws = tmp.path();
-
-        // The member rule installed to claude (present + intact). The opencode
-        // file is absent (the user removed that client).
-        let claude_file = ws.join(".claude/rules/demo.md");
-        std::fs::create_dir_all(claude_file.parent().unwrap()).unwrap();
-        std::fs::write(&claude_file, b"# demo\n").unwrap();
-        let claude_hash = content_hash(&claude_file).unwrap();
-
-        let member = stamp(locked("demo", ArtifactKind::Rule, 'a'), "r/bundles/pack", "latest");
-        let lock = lock_fixture(vec![], vec![member.clone()]);
-
-        let mut state = InstallState::empty(&ws.join("state.json"));
-        state.record(InstallRecord {
-            kind: ArtifactKind::Rule,
-            name: "demo".to_string(),
-            pinned: member.pinned.clone(),
-            outputs: vec![
-                ClientOutput {
-                    client: "claude".to_string(),
-                    target: AnchoredPath {
-                        anchor: PathAnchor::Workspace,
-                        relative: ".claude/rules/demo.md".to_string(),
-                    },
-                    content_hash: claude_hash,
-                    support_dir: None,
-                },
-                ClientOutput {
-                    client: "opencode".to_string(),
-                    target: AnchoredPath {
-                        anchor: PathAnchor::Workspace,
-                        relative: ".opencode/rules/demo.md".to_string(),
-                    },
-                    content_hash: crate::oci::Digest::Sha256(sha('e')),
-                    support_dir: None,
-                },
-            ],
-        });
-
-        let roots = AnchorRoots {
-            workspace: ws.to_path_buf(),
-            grim_home: ws.to_path_buf(),
-            claude_root: None,
-            copilot_root: None,
-            opencode_skills: None,
-        };
-
-        // opencode is NOT active (removed) ⇒ its absent output is ignored; the
-        // claude member is intact ⇒ the bundle is Installed, not IntegrityMissing.
+    fn derive_bundle_state_installed_when_declared() {
+        let set = declared(&["r/bundles/pack"]);
         assert_eq!(
-            derive_bundle_state("r/bundles/pack", Some(&lock), &state, &roots, &[ClientTarget::Claude]),
+            derive_bundle_state("r/bundles/pack", &set),
             ArtifactState::Installed,
-            "a removed client's absent output must not poison the bundle row"
+            "a bundle declared in [bundles] is Installed"
         );
     }
 
-    // ── derive_bundle_state: snapshot-primary path ────────────────────────────
-
-    /// Build a minimal `LockedBundle` snapshot for `bundle_repo` listing
-    /// `members` by (name, id). The `pinned` field carries a deterministic
-    /// digest so callers do not need to supply one.
-    fn locked_bundle(
-        bundle_repo: &str,
-        members: Vec<crate::oci::bundle::BundleMember>,
-    ) -> crate::lock::locked_bundle::LockedBundle {
-        let id = Identifier::new_registry("bundles/pack", "localhost:5050")
-            .clone_with_digest(crate::oci::Digest::Sha256(sha('f')));
-        crate::lock::locked_bundle::LockedBundle {
-            name: "pack".to_string(),
-            repo: bundle_repo.to_string(),
-            tag: "latest".to_string(),
-            pinned: crate::oci::PinnedIdentifier::try_from(id).unwrap(),
-            members,
-        }
-    }
-
-    /// Build a `LockedArtifact` with an explicit registry (`localhost:5050`)
-    /// so its identity is parseable by `Identifier::parse` — required by the
-    /// snapshot-primary path in `derive_bundle_state`.
-    fn locked_reg(name: &str, kind: ArtifactKind, byte: char) -> crate::lock::locked_artifact::LockedArtifact {
-        let id =
-            Identifier::new_registry(name, "localhost:5050").clone_with_digest(crate::oci::Digest::Sha256(sha(byte)));
-        crate::lock::locked_artifact::LockedArtifact::direct(
-            name.to_string(),
-            kind,
-            crate::oci::PinnedIdentifier::try_from(id).unwrap(),
-        )
-    }
-
-    /// Scenario B regression: skills installed as DIRECT (empty `bundles`),
-    /// THEN the bundle is declared → resolver keeps them as direct entries
-    /// (direct-wins). A `[[bundle]]` LockedBundle snapshot is present and
-    /// all members are in the install state → bundle must derive `Installed`.
-    ///
-    /// This was the reported bug: provenance-only filter found zero members
-    /// (empty `bundles` vec) and returned `NotInstalled`.
     #[test]
-    fn derive_bundle_state_direct_members_with_snapshot_derives_installed() {
-        use crate::install::content_hash::content_hash;
-        use crate::install::install_state::{ClientOutput, InstallRecord, InstallState};
-        use crate::install::path_anchor::{AnchoredPath, PathAnchor};
-
-        let tmp = tempfile::tempdir().unwrap();
-        let ws = tmp.path();
-
-        // Write two member files on disk so content_hash + existence checks pass.
-        let skill_file = ws.join(".claude/skills/code-review/SKILL.md");
-        std::fs::create_dir_all(skill_file.parent().unwrap()).unwrap();
-        std::fs::write(&skill_file, b"# code-review\n").unwrap();
-        let skill_hash = content_hash(&skill_file).unwrap();
-
-        let rule_file = ws.join(".claude/rules/lint-rule.md");
-        std::fs::create_dir_all(rule_file.parent().unwrap()).unwrap();
-        std::fs::write(&rule_file, b"# lint-rule\n").unwrap();
-        let rule_hash = content_hash(&rule_file).unwrap();
-
-        // Direct lock entries — empty `bundles` vec (direct-wins resolver).
-        let skill_art = locked_reg("code-review", ArtifactKind::Skill, 'a');
-        let rule_art = locked_reg("lint-rule", ArtifactKind::Rule, 'b');
-
-        // LockedBundle snapshot referencing those members by id.
-        let bundle_repo = "localhost:5050/bundles/ai-pack";
-        let snapshot = locked_bundle(
-            bundle_repo,
-            vec![
-                crate::oci::bundle::BundleMember {
-                    kind: ArtifactKind::Skill,
-                    name: "code-review".to_string(),
-                    id: "localhost:5050/code-review:latest".to_string(),
-                },
-                crate::oci::bundle::BundleMember {
-                    kind: ArtifactKind::Rule,
-                    name: "lint-rule".to_string(),
-                    id: "localhost:5050/lint-rule:latest".to_string(),
-                },
-            ],
-        );
-
-        let mut lock = lock_fixture(vec![skill_art.clone()], vec![rule_art.clone()]);
-        lock.bundles = vec![snapshot];
-
-        let roots = AnchorRoots {
-            workspace: ws.to_path_buf(),
-            grim_home: ws.to_path_buf(),
-            claude_root: None,
-            copilot_root: None,
-            opencode_skills: None,
-        };
-
-        let mut state = InstallState::empty(&ws.join("state.json"));
-        state.record(InstallRecord {
-            kind: ArtifactKind::Skill,
-            name: "code-review".to_string(),
-            pinned: skill_art.pinned.clone(),
-            outputs: vec![ClientOutput {
-                client: "claude".to_string(),
-                target: AnchoredPath {
-                    anchor: PathAnchor::Workspace,
-                    relative: ".claude/skills/code-review/SKILL.md".to_string(),
-                },
-                content_hash: skill_hash,
-                support_dir: None,
-            }],
-        });
-        state.record(InstallRecord {
-            kind: ArtifactKind::Rule,
-            name: "lint-rule".to_string(),
-            pinned: rule_art.pinned.clone(),
-            outputs: vec![ClientOutput {
-                client: "claude".to_string(),
-                target: AnchoredPath {
-                    anchor: PathAnchor::Workspace,
-                    relative: ".claude/rules/lint-rule.md".to_string(),
-                },
-                content_hash: rule_hash,
-                support_dir: None,
-            }],
-        });
-
+    fn derive_bundle_state_not_installed_when_not_declared() {
+        // The user's exact scenario: member skills installed standalone, but the
+        // bundle itself is NOT in [bundles]. Member install state is structurally
+        // irrelevant — the row derives only from the declaration. (Pre-Phase-K
+        // the row aggregated member health and flipped to Installed once the
+        // skills were installed.)
         assert_eq!(
-            derive_bundle_state(bundle_repo, Some(&lock), &state, &roots, &[ClientTarget::Claude]),
-            ArtifactState::Installed,
-            "Scenario B: direct-wins members + snapshot → Installed (regression)"
-        );
-    }
-
-    /// Scenario A unchanged: bundle-provenance members with a snapshot →
-    /// snapshot-primary path still returns `Installed` (no regression on
-    /// the happy path where members carry bundle provenance).
-    #[test]
-    fn derive_bundle_state_provenance_members_with_snapshot_still_installed() {
-        use crate::install::content_hash::content_hash;
-        use crate::install::install_state::{ClientOutput, InstallRecord, InstallState};
-        use crate::install::path_anchor::{AnchoredPath, PathAnchor};
-
-        let tmp = tempfile::tempdir().unwrap();
-        let ws = tmp.path();
-
-        let skill_file = ws.join(".claude/skills/my-skill/SKILL.md");
-        std::fs::create_dir_all(skill_file.parent().unwrap()).unwrap();
-        std::fs::write(&skill_file, b"# my-skill\n").unwrap();
-        let skill_hash = content_hash(&skill_file).unwrap();
-
-        let bundle_repo = "localhost:5050/bundles/my-bundle";
-        // Member carries bundle provenance (bundle-first scenario).
-        let art = locked_reg("my-skill", ArtifactKind::Skill, 'c');
-        let mut art_with_prov = art.clone();
-        art_with_prov
-            .bundles
-            .push(crate::lock::locked_artifact::BundleProvenance::new(
-                bundle_repo,
-                "latest",
-            ));
-
-        let snapshot = locked_bundle(
-            bundle_repo,
-            vec![crate::oci::bundle::BundleMember {
-                kind: ArtifactKind::Skill,
-                name: "my-skill".to_string(),
-                id: "localhost:5050/my-skill:latest".to_string(),
-            }],
-        );
-
-        let mut lock = lock_fixture(vec![art_with_prov.clone()], vec![]);
-        lock.bundles = vec![snapshot];
-
-        let roots = AnchorRoots {
-            workspace: ws.to_path_buf(),
-            grim_home: ws.to_path_buf(),
-            claude_root: None,
-            copilot_root: None,
-            opencode_skills: None,
-        };
-
-        let mut state = InstallState::empty(&ws.join("state.json"));
-        state.record(InstallRecord {
-            kind: ArtifactKind::Skill,
-            name: "my-skill".to_string(),
-            pinned: art_with_prov.pinned.clone(),
-            outputs: vec![ClientOutput {
-                client: "claude".to_string(),
-                target: AnchoredPath {
-                    anchor: PathAnchor::Workspace,
-                    relative: ".claude/skills/my-skill/SKILL.md".to_string(),
-                },
-                content_hash: skill_hash,
-                support_dir: None,
-            }],
-        });
-
-        assert_eq!(
-            derive_bundle_state(bundle_repo, Some(&lock), &state, &roots, &[ClientTarget::Claude]),
-            ArtifactState::Installed,
-            "Scenario A: bundle-provenance members + snapshot → Installed"
-        );
-    }
-
-    /// Mixed provenance: one member direct (empty bundles), one with
-    /// bundle provenance → snapshot-primary path covers both → Installed.
-    #[test]
-    fn derive_bundle_state_mixed_provenance_snapshot_installed() {
-        use crate::install::content_hash::content_hash;
-        use crate::install::install_state::{ClientOutput, InstallRecord, InstallState};
-        use crate::install::path_anchor::{AnchoredPath, PathAnchor};
-
-        let tmp = tempfile::tempdir().unwrap();
-        let ws = tmp.path();
-
-        let f1 = ws.join(".claude/skills/skill-a/SKILL.md");
-        std::fs::create_dir_all(f1.parent().unwrap()).unwrap();
-        std::fs::write(&f1, b"# a\n").unwrap();
-        let hash1 = content_hash(&f1).unwrap();
-
-        let f2 = ws.join(".claude/rules/rule-b.md");
-        std::fs::create_dir_all(f2.parent().unwrap()).unwrap();
-        std::fs::write(&f2, b"# b\n").unwrap();
-        let hash2 = content_hash(&f2).unwrap();
-
-        let bundle_repo = "localhost:5050/bundles/mixed-pack";
-
-        // skill-a: DIRECT (empty bundles vec).
-        let skill_art = locked_reg("skill-a", ArtifactKind::Skill, 'd');
-
-        // rule-b: carries bundle provenance.
-        let rule_art = locked_reg("rule-b", ArtifactKind::Rule, 'e');
-        let mut rule_with_prov = rule_art.clone();
-        rule_with_prov
-            .bundles
-            .push(crate::lock::locked_artifact::BundleProvenance::new(
-                bundle_repo,
-                "latest",
-            ));
-
-        let snapshot = locked_bundle(
-            bundle_repo,
-            vec![
-                crate::oci::bundle::BundleMember {
-                    kind: ArtifactKind::Skill,
-                    name: "skill-a".to_string(),
-                    id: "localhost:5050/skill-a:latest".to_string(),
-                },
-                crate::oci::bundle::BundleMember {
-                    kind: ArtifactKind::Rule,
-                    name: "rule-b".to_string(),
-                    id: "localhost:5050/rule-b:latest".to_string(),
-                },
-            ],
-        );
-
-        let mut lock = lock_fixture(vec![skill_art.clone()], vec![rule_with_prov.clone()]);
-        lock.bundles = vec![snapshot];
-
-        let roots = AnchorRoots {
-            workspace: ws.to_path_buf(),
-            grim_home: ws.to_path_buf(),
-            claude_root: None,
-            copilot_root: None,
-            opencode_skills: None,
-        };
-
-        let mut state = InstallState::empty(&ws.join("state.json"));
-        state.record(InstallRecord {
-            kind: ArtifactKind::Skill,
-            name: "skill-a".to_string(),
-            pinned: skill_art.pinned.clone(),
-            outputs: vec![ClientOutput {
-                client: "claude".to_string(),
-                target: AnchoredPath {
-                    anchor: PathAnchor::Workspace,
-                    relative: ".claude/skills/skill-a/SKILL.md".to_string(),
-                },
-                content_hash: hash1,
-                support_dir: None,
-            }],
-        });
-        state.record(InstallRecord {
-            kind: ArtifactKind::Rule,
-            name: "rule-b".to_string(),
-            pinned: rule_with_prov.pinned.clone(),
-            outputs: vec![ClientOutput {
-                client: "claude".to_string(),
-                target: AnchoredPath {
-                    anchor: PathAnchor::Workspace,
-                    relative: ".claude/rules/rule-b.md".to_string(),
-                },
-                content_hash: hash2,
-                support_dir: None,
-            }],
-        });
-
-        assert_eq!(
-            derive_bundle_state(bundle_repo, Some(&lock), &state, &roots, &[ClientTarget::Claude]),
-            ArtifactState::Installed,
-            "Mixed provenance: both direct and bundle-prov members → Installed"
-        );
-    }
-
-    /// Worst-of: one snapshot member installed, one absent → bundle derives
-    /// `NotInstalled` (the worst member's state surfaces).
-    #[test]
-    fn derive_bundle_state_snapshot_worst_of_member_missing() {
-        use crate::install::content_hash::content_hash;
-        use crate::install::install_state::{ClientOutput, InstallRecord, InstallState};
-        use crate::install::path_anchor::{AnchoredPath, PathAnchor};
-
-        let tmp = tempfile::tempdir().unwrap();
-        let ws = tmp.path();
-
-        let skill_file = ws.join(".claude/skills/present/SKILL.md");
-        std::fs::create_dir_all(skill_file.parent().unwrap()).unwrap();
-        std::fs::write(&skill_file, b"# present\n").unwrap();
-        let skill_hash = content_hash(&skill_file).unwrap();
-
-        let bundle_repo = "localhost:5050/bundles/partial-pack";
-
-        let present_art = locked_reg("present", ArtifactKind::Skill, '1');
-        let absent_art = locked_reg("absent", ArtifactKind::Skill, '2');
-
-        let snapshot = locked_bundle(
-            bundle_repo,
-            vec![
-                crate::oci::bundle::BundleMember {
-                    kind: ArtifactKind::Skill,
-                    name: "present".to_string(),
-                    id: "localhost:5050/present:latest".to_string(),
-                },
-                crate::oci::bundle::BundleMember {
-                    kind: ArtifactKind::Skill,
-                    name: "absent".to_string(),
-                    id: "localhost:5050/absent:latest".to_string(),
-                },
-            ],
-        );
-
-        let mut lock = lock_fixture(vec![present_art.clone(), absent_art], vec![]);
-        lock.bundles = vec![snapshot];
-
-        let roots = AnchorRoots {
-            workspace: ws.to_path_buf(),
-            grim_home: ws.to_path_buf(),
-            claude_root: None,
-            copilot_root: None,
-            opencode_skills: None,
-        };
-
-        let mut state = InstallState::empty(&ws.join("state.json"));
-        // Only the first member has an install record.
-        state.record(InstallRecord {
-            kind: ArtifactKind::Skill,
-            name: "present".to_string(),
-            pinned: present_art.pinned.clone(),
-            outputs: vec![ClientOutput {
-                client: "claude".to_string(),
-                target: AnchoredPath {
-                    anchor: PathAnchor::Workspace,
-                    relative: ".claude/skills/present/SKILL.md".to_string(),
-                },
-                content_hash: skill_hash,
-                support_dir: None,
-            }],
-        });
-
-        assert_eq!(
-            derive_bundle_state(bundle_repo, Some(&lock), &state, &roots, &[ClientTarget::Claude]),
+            derive_bundle_state("r/bundles/pack", &declared(&["r/bundles/other"])),
             ArtifactState::NotInstalled,
-            "partial install: absent member must surface as NotInstalled via worst-of"
+            "installing member skills must not flip an undeclared bundle to Installed"
+        );
+        assert_eq!(
+            derive_bundle_state("r/bundles/pack", &declared(&[])),
+            ArtifactState::NotInstalled,
+            "no declared bundles ⇒ NotInstalled"
         );
     }
 
-    /// Fallback: no `[[bundle]]` snapshot in the lock → old provenance path
-    /// still returns the correct result (backwards-compat for pre-cache locks).
     #[test]
-    fn derive_bundle_state_no_snapshot_fallback_to_provenance() {
-        use crate::install::install_state::InstallState;
-
-        // A member with bundle provenance, no LockedBundle in lock.bundles.
-        let member = stamp(
-            locked("fallback-skill", ArtifactKind::Skill, 'g'),
-            "r/bundles/old-pack",
-            "v1",
-        );
-        let lock = lock_fixture(vec![member], vec![]);
-        // lock.bundles is empty — no snapshot.
-
-        let state = InstallState::empty(std::path::Path::new("/nonexistent"));
-        let stub_roots = AnchorRoots {
-            workspace: std::path::PathBuf::from("/nonexistent"),
-            grim_home: std::path::PathBuf::from("/nonexistent"),
-            claude_root: None,
-            copilot_root: None,
-            opencode_skills: None,
-        };
-
-        // Without an install record, the provenance-path fallback also returns
-        // NotInstalled (the member is locked but not materialized).
+    fn derive_bundle_state_matches_only_its_own_repo() {
         assert_eq!(
-            derive_bundle_state(
-                "r/bundles/old-pack",
-                Some(&lock),
-                &state,
-                &stub_roots,
-                &ClientTarget::ALL
-            ),
+            derive_bundle_state("r/bundles/other", &declared(&["r/bundles/pack"])),
             ArtifactState::NotInstalled,
-            "fallback provenance path: member locked but not installed → NotInstalled"
-        );
-
-        // No matching provenance → NotInstalled.
-        assert_eq!(
-            derive_bundle_state("r/bundles/other", Some(&lock), &state, &stub_roots, &ClientTarget::ALL),
-            ArtifactState::NotInstalled,
-            "fallback provenance path: no matching bundle → NotInstalled"
-        );
-    }
-
-    /// FIX 1 regression: kind-blind matching. A bundle snapshot lists a RULE
-    /// member at repo R. The lock also contains a SKILL at the same repo R
-    /// that IS installed. Without the kind fix, `derive_artifact_state` would
-    /// match the skill record for the rule member and wrongly report `Installed`.
-    /// With the fix the rule member finds no lock entry for (Rule, R) → the
-    /// member contributes `NotInstalled` → bundle derives `NotInstalled`.
-    #[test]
-    fn derive_bundle_state_kind_collision_rule_member_not_matched_by_skill_record() {
-        use crate::install::content_hash::content_hash;
-        use crate::install::install_state::{ClientOutput, InstallRecord, InstallState};
-        use crate::install::path_anchor::{AnchoredPath, PathAnchor};
-
-        let tmp = tempfile::tempdir().unwrap();
-        let ws = tmp.path();
-
-        // Write the skill file on disk so its install check passes.
-        let skill_file = ws.join(".claude/skills/shared-repo/SKILL.md");
-        std::fs::create_dir_all(skill_file.parent().unwrap()).unwrap();
-        std::fs::write(&skill_file, b"# shared\n").unwrap();
-        let skill_hash = content_hash(&skill_file).unwrap();
-
-        let bundle_repo = "localhost:5050/bundles/kind-test";
-
-        // The lock holds a SKILL at `localhost:5050/shared-repo` (installed).
-        let skill_art = locked_reg("shared-repo", ArtifactKind::Skill, 'a');
-
-        // The bundle snapshot lists a RULE at the SAME registry/repository
-        // but there is NO rule record in the lock at all — the rule is missing.
-        let snapshot = locked_bundle(
-            bundle_repo,
-            vec![crate::oci::bundle::BundleMember {
-                kind: ArtifactKind::Rule,
-                name: "shared-repo".to_string(),
-                id: "localhost:5050/shared-repo:latest".to_string(),
-            }],
-        );
-
-        // Lock has the skill but no rule for shared-repo.
-        let mut lock = lock_fixture(vec![skill_art.clone()], vec![]);
-        lock.bundles = vec![snapshot];
-
-        let roots = AnchorRoots {
-            workspace: ws.to_path_buf(),
-            grim_home: ws.to_path_buf(),
-            claude_root: None,
-            copilot_root: None,
-            opencode_skills: None,
-        };
-
-        // Install the SKILL (not the rule).
-        let mut state = InstallState::empty(&ws.join("state.json"));
-        state.record(InstallRecord {
-            kind: ArtifactKind::Skill,
-            name: "shared-repo".to_string(),
-            pinned: skill_art.pinned.clone(),
-            outputs: vec![ClientOutput {
-                client: "claude".to_string(),
-                target: AnchoredPath {
-                    anchor: PathAnchor::Workspace,
-                    relative: ".claude/skills/shared-repo/SKILL.md".to_string(),
-                },
-                content_hash: skill_hash,
-                support_dir: None,
-            }],
-        });
-
-        // The bundle snapshot member is a RULE; no rule is installed.
-        // Before FIX 1, derive_artifact_state matched the skill record
-        // (same registry+repo) and returned Installed — incorrect.
-        // After FIX 1, the kind mismatch means no lock entry is found → NotInstalled.
-        assert_eq!(
-            derive_bundle_state(bundle_repo, Some(&lock), &state, &roots, &[ClientTarget::Claude]),
-            ArtifactState::NotInstalled,
-            "FIX 1 regression: missing rule member must not be masked by an installed skill at the same repo"
-        );
-    }
-
-    /// FIX 2 regression: multi-snapshot aggregation. Two LockedBundle entries
-    /// share the same `repo` (different binding names). One snapshot has all
-    /// members installed; the other has a member missing. Before FIX 2 only
-    /// the first matching snapshot was inspected, hiding the missing member.
-    /// After FIX 2, worst-of across both snapshots surfaces `NotInstalled`.
-    #[test]
-    fn derive_bundle_state_multi_snapshot_missing_member_surfaces_via_worst_of() {
-        use crate::install::content_hash::content_hash;
-        use crate::install::install_state::{ClientOutput, InstallRecord, InstallState};
-        use crate::install::path_anchor::{AnchoredPath, PathAnchor};
-
-        let tmp = tempfile::tempdir().unwrap();
-        let ws = tmp.path();
-
-        // Write the installed skill file on disk.
-        let skill_file = ws.join(".claude/skills/present-skill/SKILL.md");
-        std::fs::create_dir_all(skill_file.parent().unwrap()).unwrap();
-        std::fs::write(&skill_file, b"# present\n").unwrap();
-        let skill_hash = content_hash(&skill_file).unwrap();
-
-        let bundle_repo = "localhost:5050/bundles/multi-snap";
-
-        let present_art = locked_reg("present-skill", ArtifactKind::Skill, 'p');
-        // `absent-skill` is in the lock but has no install record.
-        let absent_art = locked_reg("absent-skill", ArtifactKind::Skill, 'q');
-
-        // First snapshot: only the present skill → fully installed.
-        let snap1 = {
-            let id = Identifier::new_registry("bundles/snap1", "localhost:5050")
-                .clone_with_digest(crate::oci::Digest::Sha256(sha('f')));
-            crate::lock::locked_bundle::LockedBundle {
-                name: "binding-a".to_string(),
-                repo: bundle_repo.to_string(),
-                tag: "v1".to_string(),
-                pinned: crate::oci::PinnedIdentifier::try_from(id).unwrap(),
-                members: vec![crate::oci::bundle::BundleMember {
-                    kind: ArtifactKind::Skill,
-                    name: "present-skill".to_string(),
-                    id: "localhost:5050/present-skill:latest".to_string(),
-                }],
-            }
-        };
-        // Second snapshot (different binding name, same repo): lists the absent
-        // skill — this member has no install record, so it contributes NotInstalled.
-        let snap2 = {
-            let id = Identifier::new_registry("bundles/snap2", "localhost:5050")
-                .clone_with_digest(crate::oci::Digest::Sha256(sha('g')));
-            crate::lock::locked_bundle::LockedBundle {
-                name: "binding-b".to_string(),
-                repo: bundle_repo.to_string(),
-                tag: "v2".to_string(),
-                pinned: crate::oci::PinnedIdentifier::try_from(id).unwrap(),
-                members: vec![crate::oci::bundle::BundleMember {
-                    kind: ArtifactKind::Skill,
-                    name: "absent-skill".to_string(),
-                    id: "localhost:5050/absent-skill:latest".to_string(),
-                }],
-            }
-        };
-
-        let mut lock = lock_fixture(vec![present_art.clone(), absent_art], vec![]);
-        lock.bundles = vec![snap1, snap2];
-
-        let roots = AnchorRoots {
-            workspace: ws.to_path_buf(),
-            grim_home: ws.to_path_buf(),
-            claude_root: None,
-            copilot_root: None,
-            opencode_skills: None,
-        };
-
-        // Only the present-skill has an install record.
-        let mut state = InstallState::empty(&ws.join("state.json"));
-        state.record(InstallRecord {
-            kind: ArtifactKind::Skill,
-            name: "present-skill".to_string(),
-            pinned: present_art.pinned.clone(),
-            outputs: vec![ClientOutput {
-                client: "claude".to_string(),
-                target: AnchoredPath {
-                    anchor: PathAnchor::Workspace,
-                    relative: ".claude/skills/present-skill/SKILL.md".to_string(),
-                },
-                content_hash: skill_hash,
-                support_dir: None,
-            }],
-        });
-
-        // Before FIX 2, only snap1 was inspected (`.find`), returning Installed.
-        // After FIX 2, snap2's absent-skill is also seen → NotInstalled via worst-of.
-        assert_eq!(
-            derive_bundle_state(bundle_repo, Some(&lock), &state, &roots, &[ClientTarget::Claude]),
-            ArtifactState::NotInstalled,
-            "FIX 2 regression: absent member in second snapshot must surface via worst-of"
+            "another declared bundle does not mark this one installed"
         );
     }
 
