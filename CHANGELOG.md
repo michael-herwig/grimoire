@@ -5,15 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.0] - 2026-06-21
 
 ### Added
 
-- Collapsible grouped tree view in `grim tui` (toggle with `t`); configurable via `[options.tui]` — `default_view`, `group_by_type`, `tree_separators` *(tui)*
+- Add grouped tree view with scrollable help overlay *(tui)*
+- Show bundle members as virtual tree children *(tui)*
+- Make [[registries]] the single source of truth for the default registry *(config)*
+- Collapsible bundle nodes with per-member install *(tui)*
+- Add via-bundle badge; key member actions by member name *(tui)*
 
 ### Changed
 
-- `grim init` now writes the default registry as a `[[registries]]` entry with `default = true` instead of `[options].default_registry`. The `[[registries]]` shape is what the multi-registry resolver treats as authoritative, so fresh configs are unambiguous. `[options].default_registry` is deprecated for new writes but still read for back-compat. Two `[[registries]]` entries with `default = true` are now a parse error (exit 78).
+- Extract fetch_bundle_members seam from expand_bundles *(resolve)*
+
+### Fixed
+
+- TOML-escape the registry url written by grim init *(config)*
+- Keep log output off the alternate screen and clarify the bundle-supersede note *(tui)*
+- Mark a bundle installed when its members are installed directly *(tui)*
+- Keep files when a declared bundle still provides the artifact *(uninstall)*
+- Derive bundle row state from the declaration, not member installs *(tui)*
+- Delete orphaned bundle members and refresh stale member badges *(tui)*
+- Protect bundle-provided members and derive via-bundle from the snapshot *(tui)*
 
 ## [0.5.0] - 2026-06-19
 
@@ -40,6 +54,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Use the OCI empty config media type so GitLab accepts manifests *(oci)*
 - Drop the custom artifactType too — GitLab rejects it *(oci)*
 - Apply swarm-review remediations across gitlab-registry-compat
+
+### Release
+
+- V0.5.0
 
 ## [0.4.3] - 2026-06-14
 
@@ -225,6 +243,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Make release-update.sh executable; add rolling-release regression tests
 - Contact loopback registries over plain HTTP on any port
+[0.6.0]: https://github.com/michael-herwig/grimoire/compare/v0.5.0..v0.6.0
 [0.5.0]: https://github.com/michael-herwig/grimoire/compare/v0.4.3..v0.5.0
 [0.4.3]: https://github.com/michael-herwig/grimoire/compare/v0.4.2..v0.4.3
 [0.4.2]: https://github.com/michael-herwig/grimoire/compare/v0.4.1..v0.4.2
