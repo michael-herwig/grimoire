@@ -394,9 +394,82 @@ DO restamp, no stale. This is Option B narrowed to the digest-proven case and
 never pins an unproven digest. Tracked separately; not required by the reported
 bug (its bundle is unpinned).
 
+---
+
+## Bug-fix decision: uninstall must not delete bundle-held files (file-retention gate)
+
+**Status:** Accepted (completes the file side of this ADR)
+**Date:** 2026-06-21
+**Deciders:** Maintainer (mherwig) + Claude
+
+### 1. Root cause (precise)
+
+The effective-set rework (Option 1) made the **lock** mutation
+(`drop_from_lock`) bundle-aware, but `grim uninstall` / TUI delete is **two
+steps** and only step 2 was healed:
+
+1. **File deletion** (`command::uninstall::run` step 1 / `tui::app::perform_uninstall`
+   non-bundle arm / `tui::app::perform_member_uninstall`) deleted the
+   materialized files + dropped the install record **unconditionally**.
+2. **Declaration mutation** (`undeclare_and_unlock` → `drop_from_lock`) kept the
+   lock entry when a declared bundle still provided the artifact.
+
+So removing the **direct** declaration of an artifact a declared bundle also
+provides kept the lock entry (correct) but **still deleted the files** —
+leaving a `missing` artifact that is still desired. The ADR Context already
+flagged this ("`grim uninstall` additionally deletes the files") but Option 1
+only fixed the lock; the file surface was never gated, and the half-fix was
+codified by `test_uninstall_direct_keeps_lock_entry_held_by_bundle`
+(`state == "missing"`). The TUI **bundle**-row delete *was* already gated
+(`bundle_uninstall_targets` → `drop_from_lock`), making the standalone path an
+inconsistent outlier.
+
+### 2. Decision (binding): keep files whenever a declared bundle still provides the artifact
+
+A directly-declared artifact that a declared bundle still names — at **any**
+identifier — stays in the effective desired set once the direct declaration is
+removed. Uninstall therefore **degrades to `grim remove`** for that artifact:
+drop the direct declaration, reconcile the lock, **keep the files and the
+install record**. New pure gate
+`effective_set::bundle_holds_after_direct_removal(set, cached, kind, name)`
+applied at all three delete sites.
+
+Key sub-decisions:
+
+- **Broader than lock retention (deliberate).** The lock entry survives only on
+  an exact-identifier flip (§ id-mismatch above); the *files* survive whenever a
+  bundle names the artifact at any id. Rationale: files are content on disk —
+  deleting content a declared bundle still wants is the destructive surprise the
+  maintainer reported. Version reconciliation is `grim lock` + update's job; the
+  id-mismatch path keeps the files, marks the bundle row stale, and heals on the
+  next `grim lock` (no file ever lost).
+- **Discriminator = "directly declared".** The gate fires only when the artifact
+  is *currently* declared directly. A **bundle-only member** is never gated, so
+  the TUI member-delete feature (delete a member's files → re-installable) is
+  preserved. This cleanly separates "remove my standalone declaration" (keep
+  files the bundle backs) from "delete this member" (delete files).
+- **Pre-cache fallback.** When the lock carries no usable `[[bundle]]` snapshot
+  (pre-cache lock), membership is unknowable offline → the gate returns `false`
+  and uninstall deletes (the prior behavior). Fully offline.
+
+### 3. Implementation
+
+- `src/lock/effective_set.rs`: `bundle_holds_after_direct_removal` (pure) + unit
+  tests (same-id, different-id, no-bundle, bundle-only member, incomplete cache,
+  bundle kind).
+- `src/command/uninstall.rs`: compute `held_by_bundle` before step 1; skip file
+  deletion + record drop + config-sync when held.
+- `src/tui/app.rs`: `direct_removal_keeps_files` I/O wrapper; gate the
+  `perform_uninstall` standalone arm and `perform_member_uninstall`.
+- Tests: `test/tests/test_bundles.py` —
+  `test_uninstall_standalone_skill_held_by_bundle_keeps_files` (same-id) and
+  `…_at_other_tag_keeps_files` (id-mismatch, heals via `grim lock`); replaces the
+  now-incorrect `test_uninstall_direct_keeps_lock_entry_held_by_bundle`.
+
 ## Changelog
 
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-06-11 | Claude (approved by maintainer) | Initial accepted draft |
 | 2026-06-20 | Claude (approved by maintainer) | Add standalone↔bundle id-mismatch reconcile bug-fix decision (Option C: honest staleness retained, message reworded, outcome surfaced in TUI status line) |
+| 2026-06-21 | Claude (approved by maintainer) | Add file-retention gate: uninstall / TUI delete must not delete files a declared bundle still provides (degrade to `remove`); gate `bundle_holds_after_direct_removal` at all three delete sites |
