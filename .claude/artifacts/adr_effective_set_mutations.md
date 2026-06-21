@@ -466,6 +466,71 @@ Key sub-decisions:
   `…_at_other_tag_keeps_files` (id-mismatch, heals via `grim lock`); replaces the
   now-incorrect `test_uninstall_direct_keeps_lock_entry_held_by_bundle`.
 
+---
+
+## Bug-fix decision: TUI bundle-delete must delete orphaned member files (file-deletion via the effective-set diff)
+
+**Status:** Accepted (completes the *delete* side of the file surface)
+**Date:** 2026-06-21
+**Deciders:** Maintainer (mherwig) + Claude
+
+### 1. Root cause (precise)
+
+The file-retention gate above fixed the *keep* direction (don't delete files a
+bundle still holds). The mirror *delete* direction was still wrong on the TUI
+bundle-row delete. `tui::app::bundle_uninstall_targets` derived the
+file-deletion set from **lock entries** (`previous.iter_artifacts()` minus the
+`drop_from_lock` survivors). But a member only the bundle provides whose direct
+declaration was removed earlier at a **different identifier** has its lock entry
+**dropped as honestly stale** (the id-mismatch rule of this ADR) while its
+install record + files persist. Deleting the bundle — the member's last holder —
+then computed an empty/short target set (the lock entry was already gone), so
+the member's files were **orphaned on disk**. This is the inverse of the
+retention bug: the lock was set-aware, the file surface was not.
+
+Sequence that orphans (maintainer's repro): install skill standalone (`:latest`)
+→ install bundle (pins the same skill `:1.0.0`) → delete the skill (kept; lock
+entry dropped stale on the id mismatch) → delete the bundle → **files remain**.
+
+### 2. Decision (binding): derive deletion targets from `E_before \ E_after`
+
+`bundle_uninstall_targets` now computes the file-deletion set from the
+**effective-set difference** — `effective_set(set_before) \ effective_set(set_after)`
+— the same set theory `drop_from_lock` uses, but applied to the **file** surface.
+The effective set expands the bundle's `[[bundle]]` snapshot, so it sees a
+snapshot-only member whose lock entry is gone; its install record (keyed by
+`(kind, name)`) is still present, so `install::uninstall` deletes the files. A
+member another declaration still holds stays in `E_after` and is therefore not a
+target. Falls back to the prior lock-entry diff when the effective set is
+incomputable offline (pre-cache lock / snapshot mismatch).
+
+Companion TUI fixes in the same change:
+
+- **Binding resolution (Codex [high]).** The bundle row carries only the repo;
+  the `[bundles]` binding can be any name (`grim add --name`). `perform_uninstall`
+  now resolves the real binding from the declaration (`resolve_bundle_binding`:
+  exactly one repo match → that binding; none → repo-basename legacy/foreign
+  fallback; **>1 alias → refuse** before any mutation) and reuses it for **both**
+  target selection and the undeclare, so an aliased bundle can no longer have its
+  files deleted while its declaration is left dangling.
+- **Stale member badges.** `recompute_states` (run after every batch / member
+  action) now also re-derives the cached bundle-member node states
+  (`refresh_member_states`), so an expanded bundle's members reflect an
+  install/uninstall immediately instead of the state captured at expand time.
+  Member derivation stays keyed by repo identity (kind + registry/repository),
+  matching catalog-row semantics; binding-name keying was considered and
+  **deferred** (would diverge member rows from row derivation).
+
+### 3. Implementation
+
+- `src/tui/app.rs`: `bundle_uninstall_targets` effective-set-diff path (+ legacy
+  fallback); `resolve_bundle_binding`; `perform_uninstall` resolves the binding
+  under the flock; `refresh_member_states` called from `recompute_states`.
+- Tests (`src/tui/app.rs`): `deleting_bundle_deletes_member_files_orphaned_by_prior_skill_delete`
+  (orphan repro, id-mismatch), `deleting_aliased_bundle_row_undeclares_and_deletes_members`
+  ([high] regression), `recompute_states_refreshes_stale_bundle_member_states`
+  (stale-badge repro); fixture `registry_with_bundle` gains a second skill tag.
+
 ## Changelog
 
 | Date | Author | Change |
@@ -473,3 +538,4 @@ Key sub-decisions:
 | 2026-06-11 | Claude (approved by maintainer) | Initial accepted draft |
 | 2026-06-20 | Claude (approved by maintainer) | Add standalone↔bundle id-mismatch reconcile bug-fix decision (Option C: honest staleness retained, message reworded, outcome surfaced in TUI status line) |
 | 2026-06-21 | Claude (approved by maintainer) | Add file-retention gate: uninstall / TUI delete must not delete files a declared bundle still provides (degrade to `remove`); gate `bundle_holds_after_direct_removal` at all three delete sites |
+| 2026-06-21 | Claude (approved by maintainer) | Complete the delete side: TUI bundle-delete derives file-deletion targets from the effective-set diff `E_before \ E_after` (deletes snapshot-only members orphaned by a prior id-mismatch removal); resolve the real `[bundles]` binding before deleting (Codex [high]); refresh stale member badges in `recompute_states` |

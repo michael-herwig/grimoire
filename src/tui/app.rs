@@ -1056,6 +1056,43 @@ fn recompute_states(ctx: &TuiContext, state: &mut TuiState) {
             r.state = derive_row_state(&r.kind, &registry, &repository, &badge);
         }
     }
+    // Member-node states live in a separate cache (`bundle_members`) that is
+    // otherwise only rebuilt on re-expand / scope toggle. Refresh it here too so
+    // an expanded bundle's members reflect an install/uninstall immediately,
+    // instead of showing the state captured when the bundle was first expanded.
+    refresh_member_states(state, lock.as_ref(), &install_state, &ctx.roots, &active);
+}
+
+/// Re-derive the install state of every cached bundle-member node for the
+/// active scope against the current lock + install-state, so an expanded
+/// bundle's members track an install/uninstall without a re-expand.
+///
+/// Only `Ready` entries keyed under the active `scope_label` are touched (the
+/// other scope's cache is cleared on toggle, never recomputed here). A member
+/// whose `member_repo` is absent or unsplittable is left unchanged — it never
+/// resolved to a real artifact.
+fn refresh_member_states(
+    state: &mut TuiState,
+    lock: Option<&GrimoireLock>,
+    install_state: &InstallState,
+    roots: &AnchorRoots,
+    active: &[ClientTarget],
+) {
+    let scope_label = state.scope_label.clone();
+    for ((entry_scope, _bundle_repo), cache) in state.bundle_members.iter_mut() {
+        if *entry_scope != scope_label {
+            continue;
+        }
+        let crate::tui::bundle_members::BundleMemberCache::Ready(nodes) = cache else {
+            continue;
+        };
+        for node in nodes.iter_mut() {
+            let Some((registry, repository)) = node.member_repo.as_deref().and_then(split_repo) else {
+                continue;
+            };
+            node.state = derive_artifact_state(node.kind, &registry, &repository, lock, install_state, roots, active);
+        }
+    }
 }
 
 /// Load the active scope's install state, routing through the scope-aware
@@ -1212,7 +1249,7 @@ fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
     let (_registry, repository) =
         split_repo(&row.repo).ok_or_else(|| anyhow::anyhow!("malformed catalog repo: {}", row.repo))?;
     let kind = row_kind(&row.kind);
-    let name = repository.rsplit('/').next().unwrap_or(&repository).to_string();
+    let basename = repository.rsplit('/').next().unwrap_or(&repository).to_string();
 
     // Hold the config flock for the whole read-modify-write. The keep-files
     // gate, the file deletion, and the config/lock undeclare must all see one
@@ -1223,6 +1260,16 @@ fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
     let _guard = match ctx.config_path.exists() {
         true => Some(grim(ConfigFileLock::try_acquire(&ctx.config_path))?),
         false => None,
+    };
+
+    // For a bundle row the catalog repo's basename is NOT necessarily the
+    // `[bundles]` binding name (`grim add --name`): resolve the real binding
+    // from the declaration (under the flock) so the file-deletion targets AND
+    // the undeclare act on the same entry — otherwise an aliased bundle would
+    // have its members' files deleted while its declaration is left dangling.
+    let name = match kind {
+        ArtifactKind::Bundle => resolve_bundle_binding(ctx, &row.repo, &basename)?,
+        _ => basename.clone(),
     };
 
     // The install-state records this row owns: itself for a skill/rule;
@@ -1410,17 +1457,62 @@ async fn perform(ctx: &TuiContext, row: &TuiRow, is_update: bool) -> anyhow::Res
     Ok(label)
 }
 
-/// Load the active scope's declaration fresh from disk: the config can
-/// change while the TUI runs (another `grim add`, an editor), so each
-/// install/uninstall re-reads rather than caching a parse from startup.
-/// A missing global config is an empty declaration (mirroring
-/// `scope_resolution::resolve`); a missing project config is an error.
-/// The lock entries deleting the bundle row would drop — the file-deletion
-/// targets for the TUI delete action. Computed through the shared
-/// [`crate::command::remove::drop_from_lock`] effective-set seam by
-/// simulating the undeclare, so a member another declaration still holds
-/// keeps its files. A binding the config does not declare (a legacy or
-/// foreign row) falls back to provenance-exclusive matching by repo.
+/// Resolve the `[bundles]` binding name for a bundle catalog row.
+///
+/// The catalog row carries the bundle's `registry/repository`, but the config
+/// declares it under an arbitrary binding name (`grim add --name`) that need
+/// not equal the repo's last path segment. Match the row repo against the
+/// declared bundle identifiers' `registry_repository()`:
+///
+/// - exactly one declared binding → that binding;
+/// - none declared (a legacy lock-only or foreign row) → the repo `basename`,
+///   so the provenance-exclusive fallback in [`bundle_uninstall_targets`] still
+///   runs and the (absent) undeclare is a harmless no-op;
+/// - more than one binding for the same repo → `Err` (ambiguous — refuse the
+///   delete rather than guess which alias to undeclare).
+///
+/// # Errors
+///
+/// When the row's repo is declared under multiple binding names.
+fn resolve_bundle_binding(ctx: &TuiContext, repo: &str, basename: &str) -> anyhow::Result<String> {
+    let Ok((_options, _registries, set)) = load_scope_declaration(ctx) else {
+        return Ok(basename.to_string());
+    };
+    let matches: Vec<&String> = set
+        .bundles
+        .iter()
+        .filter(|(_binding, id)| id.registry_repository() == repo)
+        .map(|(binding, _id)| binding)
+        .collect();
+    match matches.as_slice() {
+        [] => Ok(basename.to_string()),
+        [one] => Ok((*one).to_string()),
+        many => Err(anyhow::anyhow!(
+            "bundle '{repo}' is declared under {} binding names ({}); remove it with `grim remove bundle <name>`",
+            many.len(),
+            many.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+        )),
+    }
+}
+
+/// The artifacts whose materialized files the TUI delete action must remove
+/// when undeclaring the bundle `binding` — every `(kind, name)` in the
+/// **effective desired set before** the bundle is undeclared that is no longer
+/// desired **after**.
+///
+/// Computed from the effective-set difference (`E_before \ E_after`) rather
+/// than a lock-entry diff: a member whose lock entry was already dropped as
+/// honestly stale by a prior id-mismatch removal still has its install-state
+/// record + files on disk, and the bundle's snapshot still names it — the
+/// effective set sees it, a lock-entry diff would orphan it. A member another
+/// declaration (a direct entry or another bundle) still holds stays in
+/// `E_after` and is therefore not a deletion target.
+///
+/// Falls back to the shared [`crate::command::remove::drop_from_lock`]
+/// lock-entry diff when the effective set is incomputable offline (pre-cache
+/// lock or a snapshot that no longer matches the declaration). A binding the
+/// config does not declare (a legacy or foreign row) falls back to
+/// provenance-exclusive matching by `repo`.
 fn bundle_uninstall_targets(ctx: &TuiContext, binding: &str, repo: &str) -> Vec<(ArtifactKind, String)> {
     let Ok(previous) = lock_io::load(&ctx.lock_path) else {
         return Vec::new();
@@ -1437,6 +1529,24 @@ fn bundle_uninstall_targets(ctx: &TuiContext, binding: &str, repo: &str) -> Vec<
             .collect();
     }
     set_after.invalidate_declaration_hash_cache();
+
+    // Prefer the effective-set diff: an artifact in the desired set BEFORE the
+    // bundle is undeclared but not AFTER must have its files deleted. This is
+    // the file-deletion counterpart to the lock-retention rule in
+    // `drop_from_lock`, and — crucially — it sees a snapshot-only member whose
+    // lock entry was already dropped by a prior id-mismatch removal (its
+    // install-state record + files persist, so deriving targets from lock
+    // entries alone would orphan it when the bundle, its last holder, is gone).
+    use crate::lock::effective_set::effective_set;
+    if let (Some(before), Some(after)) = (
+        effective_set(&set_before, &previous.bundles),
+        effective_set(&set_after, &previous.bundles),
+    ) {
+        return before.keys().filter(|key| !after.contains_key(*key)).cloned().collect();
+    }
+
+    // Fallback (pre-cache lock / snapshot mismatch — membership unknowable
+    // offline): the lock-entry diff via the shared `drop_from_lock` seam.
     let outcome =
         crate::command::remove::drop_from_lock(&previous, ArtifactKind::Bundle, binding, &set_before, &set_after);
     let kept: std::collections::HashSet<(ArtifactKind, String)> = outcome
@@ -2008,6 +2118,10 @@ mod tests {
         };
         let skill_digest = reg.push_manifest(&skill_repo, &skill_manifest).await.unwrap();
         reg.put_tag(&skill_repo, "1.0.0", &skill_digest).await.unwrap();
+        // A second tag at the SAME digest, so a standalone install can pin
+        // `:latest` while the bundle pins `:1.0.0` — a different identifier for
+        // the same artifact (exercises the id-mismatch declaration path).
+        reg.put_tag(&skill_repo, "latest", &skill_digest).await.unwrap();
 
         // The bundle: a single members-layer naming the skill.
         let members = BundleManifest::new(vec![BundleMember {
@@ -2173,6 +2287,151 @@ mod tests {
         assert_eq!(
             derive_row_state("bundle", "localhost:5050", "grimoire/bundles/starter-pack", &badge),
             ArtifactState::NotInstalled
+        );
+    }
+
+    #[tokio::test]
+    async fn recompute_states_refreshes_stale_bundle_member_states() {
+        // Bug 1: the bundle-member cache is derived once at expand time and was
+        // only rebuilt on re-expand / scope toggle. After installing the bundle
+        // (or its members), the expanded member rows kept their stale state — an
+        // installed member kept showing NotInstalled. recompute_states (run
+        // after every batch / member action) must also refresh the cached member
+        // states, not only the catalog-row states.
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path();
+        std::fs::write(workspace.join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+        let ctx = test_ctx(workspace, registry_with_bundle().await);
+
+        let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
+        bundle_row.kind = "bundle".to_string();
+        bundle_row.state = ArtifactState::NotInstalled;
+        perform(&ctx, &bundle_row, false)
+            .await
+            .expect("bundle install succeeds");
+        assert!(workspace.join(".claude/skills/demo/SKILL.md").is_file());
+
+        let mut state = TuiState::new();
+        state.set_scope_label(&ctx.scope_label);
+        state.set_rows(vec![bundle_row]);
+
+        // A STALE cache entry: the member is actually installed now, but the
+        // cache was built before the install and still reports NotInstalled.
+        let key = (
+            "project".to_string(),
+            "localhost:5050/grimoire/bundles/starter-pack".to_string(),
+        );
+        let stale = crate::tui::bundle_members::MemberNode {
+            kind: ArtifactKind::Skill,
+            label: "demo".to_string(),
+            member_repo: Some("localhost:5050/grimoire/skills/demo".to_string()),
+            state: ArtifactState::NotInstalled,
+            related: false,
+        };
+        state.bundle_members.insert(
+            key.clone(),
+            crate::tui::bundle_members::BundleMemberCache::Ready(vec![stale]),
+        );
+
+        recompute_states(&ctx, &mut state);
+
+        let crate::tui::bundle_members::BundleMemberCache::Ready(nodes) = &state.bundle_members[&key] else {
+            panic!("the member cache entry must remain Ready after recompute");
+        };
+        assert_eq!(
+            nodes[0].state,
+            ArtifactState::Installed,
+            "recompute_states must refresh a stale member-node state to Installed"
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_bundle_deletes_member_files_orphaned_by_prior_skill_delete() {
+        // Bug 2 (exact user repro, id-mismatch path): install a skill standalone
+        // at one tag, install a bundle that pins the SAME skill at a different
+        // tag, delete the standalone skill (kept — the bundle still holds it; its
+        // lock entry is dropped as honestly stale on the id mismatch), then
+        // delete the bundle. Nothing holds the skill any more, so its files MUST
+        // be deleted. They were orphaned because the file-deletion targets were
+        // derived from existing lock entries, and the skill's lock entry was
+        // already gone.
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path();
+        std::fs::write(workspace.join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+        let ctx = test_ctx(workspace, registry_with_bundle().await);
+
+        // 1. Standalone skill at :latest (the bundle pins :1.0.0 — a different id
+        //    for the same artifact).
+        let mut skill_row = installed_row("localhost:5050/grimoire/skills/demo");
+        skill_row.latest_tag = "latest".to_string();
+        skill_row.state = ArtifactState::NotInstalled;
+        perform(&ctx, &skill_row, false).await.expect("skill install succeeds");
+
+        // 2. Install the bundle (also provides demo, pinned at :1.0.0).
+        let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
+        bundle_row.kind = "bundle".to_string();
+        bundle_row.state = ArtifactState::NotInstalled;
+        perform(&ctx, &bundle_row, false)
+            .await
+            .expect("bundle install succeeds");
+        assert!(workspace.join(".claude/skills/demo/SKILL.md").is_file());
+
+        // 3. Delete the standalone skill — files kept, the bundle still holds it.
+        perform_uninstall(&ctx, &skill_row).expect("skill delete succeeds");
+        assert!(
+            workspace.join(".claude/skills/demo/SKILL.md").is_file(),
+            "files kept while the bundle still holds the skill"
+        );
+
+        // 4. Delete the bundle — the last holder is gone; member files MUST go.
+        perform_uninstall(&ctx, &bundle_row).expect("bundle delete succeeds");
+        assert!(
+            !workspace.join(".claude/skills/demo").exists(),
+            "the orphaned member's files must be deleted when the bundle is removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_aliased_bundle_row_undeclares_and_deletes_members() {
+        // Codex [high]: `grim add --name` lets a bundle be declared under an
+        // arbitrary binding ("team") that need not equal the repo basename
+        // ("starter-pack"). Deleting the catalog row (which carries only the
+        // repo) must resolve the real binding so the bundle is undeclared — not
+        // left dangling in the config while its members' files are deleted.
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path();
+        std::fs::write(workspace.join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+        let ctx = test_ctx(workspace, registry_with_bundle().await);
+
+        let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
+        bundle_row.kind = "bundle".to_string();
+        bundle_row.state = ArtifactState::NotInstalled;
+        perform(&ctx, &bundle_row, false)
+            .await
+            .expect("bundle install succeeds");
+        assert!(workspace.join(".claude/skills/demo/SKILL.md").is_file());
+
+        // Rename the binding starter-pack → team (as `grim add --name team` would).
+        let (options, registries, mut set) = load_scope_declaration(&ctx).expect("declaration loads");
+        let id = set
+            .bundles
+            .remove("starter-pack")
+            .expect("bundle declared under basename");
+        set.bundles.insert("team".to_string(), id);
+        set.invalidate_declaration_hash_cache();
+        write_config(&ctx.config_path, &options, &registries, &set).expect("rewrite config");
+
+        perform_uninstall(&ctx, &bundle_row).expect("aliased bundle delete succeeds");
+
+        let body = std::fs::read_to_string(&ctx.config_path).unwrap();
+        let cfg = ProjectConfig::from_toml_str(&body).expect("config parses");
+        assert!(
+            cfg.set.bundles.is_empty(),
+            "the aliased bundle must be undeclared: {body}"
+        );
+        assert!(
+            !workspace.join(".claude/skills/demo").exists(),
+            "the aliased bundle's member files must be deleted"
         );
     }
 
