@@ -1250,12 +1250,25 @@ async fn run_batch(ctx: &TuiContext, state: &mut TuiState, rows: &[usize], op: B
 /// by the TUI before it declared installs are dropped the same way. A
 /// bundle row expands into the member records its lock provenance names;
 /// the undeclare seam then drops the `[bundles]` entry and evicts the
-/// members from the lock.
+/// members from the lock. A directly-declared row a declared bundle still
+/// provides keeps its files ([`direct_removal_keeps_files`]) — the delete
+/// degrades to dropping the direct declaration, like `grim remove`.
 fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
     let (_registry, repository) =
         split_repo(&row.repo).ok_or_else(|| anyhow::anyhow!("malformed catalog repo: {}", row.repo))?;
     let kind = row_kind(&row.kind);
     let name = repository.rsplit('/').next().unwrap_or(&repository).to_string();
+
+    // Hold the config flock for the whole read-modify-write. The keep-files
+    // gate, the file deletion, and the config/lock undeclare must all see one
+    // consistent declaration snapshot: acquiring the lock BEFORE the gate
+    // closes a TOCTOU window where a concurrent `grim remove` of the bundle
+    // (between the gate decision and the undeclare) would orphan the kept
+    // files. Held to function end.
+    let _guard = match ctx.config_path.exists() {
+        true => Some(grim(ConfigFileLock::try_acquire(&ctx.config_path))?),
+        false => None,
+    };
 
     // The install-state records this row owns: itself for a skill/rule;
     // for a bundle, exactly the lock entries the undeclare would drop
@@ -1264,6 +1277,9 @@ fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
     // declaration still holds keeps its files.
     let targets: Vec<(ArtifactKind, String)> = match kind {
         ArtifactKind::Bundle => bundle_uninstall_targets(ctx, &name, &row.repo),
+        // A directly-declared artifact a declared bundle still provides keeps
+        // its files (it stays desired) — delete nothing, just undeclare below.
+        _ if direct_removal_keeps_files(ctx, kind, &name) => Vec::new(),
         _ => vec![(kind, name.clone())],
     };
 
@@ -1308,13 +1324,9 @@ fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
     }
 
     // Undeclare from the config + lock through the `grim uninstall` seam
-    // (config flock held for the read-modify-write), so the badge no
-    // longer derives "installed" and a later `grim install` does not
-    // silently bring the entry back.
-    let _guard = match ctx.config_path.exists() {
-        true => Some(grim(ConfigFileLock::try_acquire(&ctx.config_path))?),
-        false => None,
-    };
+    // (the config flock acquired at the top is still held for this
+    // read-modify-write), so the badge no longer derives "installed" and a
+    // later `grim install` does not silently bring the entry back.
     // Post-action cleanup: the files are already deleted and the install state
     // persisted. If the declaration can no longer be read (a project config the
     // user removed, say), there is nothing left to undeclare — the goal is
@@ -1505,6 +1517,25 @@ fn load_scope_declaration(
             ))
         }
     }
+}
+
+/// Whether deleting the directly-declared artifact `(kind, name)` must keep
+/// its files because a declared bundle still provides it — the file-retention
+/// gate from [`crate::lock::effective_set::bundle_holds_after_direct_removal`].
+///
+/// Loads the lock + the active scope's declaration fresh (the config can change
+/// while the TUI runs). Any load failure means the guard cannot prove the
+/// artifact is held → `false` (the caller deletes, the pre-effective-set
+/// behavior). A pure bundle member (not directly declared) is never held here,
+/// so the TUI member-delete action still deletes its files.
+fn direct_removal_keeps_files(ctx: &TuiContext, kind: ArtifactKind, name: &str) -> bool {
+    let Ok(lock) = lock_io::load(&ctx.lock_path) else {
+        return false;
+    };
+    let Ok((_options, _registries, set)) = load_scope_declaration(ctx) else {
+        return false;
+    };
+    crate::lock::effective_set::bundle_holds_after_direct_removal(&set, &lock.bundles, kind, name)
 }
 
 /// Map a catalog row's kind string (`skill`/`rule`/`bundle`) onto the
@@ -1735,30 +1766,43 @@ async fn perform_member_uninstall(
     let member_kind = kind;
     let name = repository.rsplit('/').next().unwrap_or(&repository).to_string();
 
-    // Delete materialized files + drop install-state record.
-    let mut install_state = load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
-    let involved_clients: Vec<crate::install::client_target::ClientTarget> = install_state
-        .get(member_kind, &name)
-        .map(|r| r.outputs.iter().filter_map(|c| c.client.parse().ok()).collect())
-        .unwrap_or_default();
-    let result = crate::install::uninstall::uninstall(&mut install_state, member_kind, &name, &ctx.roots)
-        .map_err(|e| anyhow::anyhow!("uninstall failed: {e}"))?;
-    if result.outcome == crate::install::uninstall::UninstallOutcome::Removed {
-        install_state
-            .persist(ctx.scope, &ctx.workspace, &ctx.roots.grim_home, &ctx.config_path)
-            .map_err(|e| anyhow::Error::new(e).context("install-state persist failed"))?;
-    }
-    for client in involved_clients {
-        if let Err(e) = client.vendor().sync_config(&install_state, &ctx.workspace, ctx.scope) {
-            tracing::warn!(client = %client, error = %e, "vendor config sync failed; delete completed, deregistration skipped");
-        }
-    }
-
-    // Undeclare from config + lock, threading notes back to the caller.
+    // Hold the config flock for the whole read-modify-write so the keep-files
+    // gate, the file deletion, and the undeclare see one consistent
+    // declaration snapshot (closes the TOCTOU window where a concurrent
+    // `grim remove` between the gate and the undeclare could orphan the kept
+    // files). Held to function end.
     let _guard = match ctx.config_path.exists() {
         true => Some(grim(ConfigFileLock::try_acquire(&ctx.config_path))?),
         false => None,
     };
+
+    // Delete materialized files + drop install-state record — UNLESS the member
+    // is ALSO directly declared and a declared bundle still provides it, in
+    // which case the files stay (it remains desired) and only the declaration
+    // is dropped below. A pure bundle member is never gated, so the
+    // member-delete action still deletes its files (re-installable).
+    if !direct_removal_keeps_files(ctx, member_kind, &name) {
+        let mut install_state = load_state(ctx).map_err(|e| anyhow::anyhow!("install-state load failed: {e}"))?;
+        let involved_clients: Vec<crate::install::client_target::ClientTarget> = install_state
+            .get(member_kind, &name)
+            .map(|r| r.outputs.iter().filter_map(|c| c.client.parse().ok()).collect())
+            .unwrap_or_default();
+        let result = crate::install::uninstall::uninstall(&mut install_state, member_kind, &name, &ctx.roots)
+            .map_err(|e| anyhow::anyhow!("uninstall failed: {e}"))?;
+        if result.outcome == crate::install::uninstall::UninstallOutcome::Removed {
+            install_state
+                .persist(ctx.scope, &ctx.workspace, &ctx.roots.grim_home, &ctx.config_path)
+                .map_err(|e| anyhow::Error::new(e).context("install-state persist failed"))?;
+        }
+        for client in involved_clients {
+            if let Err(e) = client.vendor().sync_config(&install_state, &ctx.workspace, ctx.scope) {
+                tracing::warn!(client = %client, error = %e, "vendor config sync failed; delete completed, deregistration skipped");
+            }
+        }
+    }
+
+    // Undeclare from config + lock, threading notes back to the caller. The
+    // config flock acquired at the top is still held for this read-modify-write.
     let Ok((options, registries, mut set)) = load_scope_declaration(ctx) else {
         return Ok(Vec::new());
     };

@@ -9,6 +9,13 @@
 //! install-state record via the shared [`crate::install::uninstall`]
 //! seam, **and** undeclares the entry from the config + lock so nothing
 //! is left behind. The TUI delete action reuses the same seam.
+//!
+//! One exception: when the artifact is declared directly *and* a declared
+//! bundle still provides it, uninstall does **not** delete the files — the
+//! artifact stays in the effective desired set, so it remains desired. There
+//! `uninstall` degrades to dropping the direct declaration (exactly like
+//! `grim remove`), keeping the bundle-provided files intact
+//! (`bundle_holds_after_direct_removal`).
 
 use clap::Args;
 
@@ -65,46 +72,61 @@ pub async fn run(ctx: &Context, args: &UninstallArgs) -> anyhow::Result<(Uninsta
         None => None,
     };
 
-    // 1. Delete materialized files + drop the install-state record.
-    let mut state = super::grim(scope_resolution::load_state(&scope).map_err(|e| state_io(&scope.state_path, e)))?;
-    let involved_clients: Vec<crate::install::client_target::ClientTarget> = state
-        .get(kind, &args.name)
-        .map(|r| r.outputs.iter().filter_map(|c| c.client.parse().ok()).collect())
-        .unwrap_or_default();
-    let result = super::grim(
-        uninstall(&mut state, kind, &args.name, &scope.roots).map_err(|e| uninstall_error(&scope.workspace, e)),
-    )?;
-    let file_removed = result.outcome == UninstallOutcome::Removed;
-    if file_removed {
-        // The single `persist` seam handles project-scope dir creation, the
-        // atomic write, and the conditional legacy-file reap in one place.
-        super::grim(
-            state
-                .persist(
-                    scope.scope,
-                    &scope.workspace,
-                    &scope.roots.grim_home,
-                    &scope.config_path,
-                )
-                .map_err(|e| match e {
-                    crate::install::install_state::PersistError::EnsureDir { path, source }
-                    | crate::install::install_state::PersistError::Save { path, source } => state_io(&path, source),
-                }),
-        )?;
-    }
+    // A directly-declared artifact a declared bundle still provides stays in
+    // the effective desired set once the direct declaration is removed —
+    // deleting its files would orphan something still desired. In that case
+    // `uninstall` degrades to dropping the direct declaration (like `remove`),
+    // leaving the bundle-provided files intact. Decided offline from the lock's
+    // cached bundle snapshots; a pre-cache lock falls back to deleting.
+    let held_by_bundle = lock_io::load(&scope.lock_path).ok().is_some_and(|lock| {
+        crate::lock::effective_set::bundle_holds_after_direct_removal(&scope.set, &lock.bundles, kind, &args.name)
+    });
 
-    // Converge vendor-owned config for every client the removed record
-    // carried (e.g. drops OpenCode's managed `instructions` glob when the
-    // last OpenCode rule is gone). The files and install state are already
-    // gone/persisted, so a config-sync failure is warn-only — the uninstall
-    // succeeds, never a hard failure after the primary action.
-    for client in involved_clients {
-        if let Err(e) = client.vendor().sync_config(&state, &scope.workspace, scope.scope) {
-            tracing::warn!(
-                client = %client,
-                error = %e,
-                "vendor config sync failed; uninstall completed, deregistration skipped"
-            );
+    // 1. Delete materialized files + drop the install-state record — UNLESS a
+    //    declared bundle still holds the artifact (see above), in which case
+    //    nothing is deleted and only the declaration is dropped in step 2.
+    let mut file_removed = false;
+    if !held_by_bundle {
+        let mut state = super::grim(scope_resolution::load_state(&scope).map_err(|e| state_io(&scope.state_path, e)))?;
+        let involved_clients: Vec<crate::install::client_target::ClientTarget> = state
+            .get(kind, &args.name)
+            .map(|r| r.outputs.iter().filter_map(|c| c.client.parse().ok()).collect())
+            .unwrap_or_default();
+        let result = super::grim(
+            uninstall(&mut state, kind, &args.name, &scope.roots).map_err(|e| uninstall_error(&scope.workspace, e)),
+        )?;
+        file_removed = result.outcome == UninstallOutcome::Removed;
+        if file_removed {
+            // The single `persist` seam handles project-scope dir creation, the
+            // atomic write, and the conditional legacy-file reap in one place.
+            super::grim(
+                state
+                    .persist(
+                        scope.scope,
+                        &scope.workspace,
+                        &scope.roots.grim_home,
+                        &scope.config_path,
+                    )
+                    .map_err(|e| match e {
+                        crate::install::install_state::PersistError::EnsureDir { path, source }
+                        | crate::install::install_state::PersistError::Save { path, source } => state_io(&path, source),
+                    }),
+            )?;
+        }
+
+        // Converge vendor-owned config for every client the removed record
+        // carried (e.g. drops OpenCode's managed `instructions` glob when the
+        // last OpenCode rule is gone). The files and install state are already
+        // gone/persisted, so a config-sync failure is warn-only — the uninstall
+        // succeeds, never a hard failure after the primary action.
+        for client in involved_clients {
+            if let Err(e) = client.vendor().sync_config(&state, &scope.workspace, scope.scope) {
+                tracing::warn!(
+                    client = %client,
+                    error = %e,
+                    "vendor config sync failed; uninstall completed, deregistration skipped"
+                );
+            }
         }
     }
 

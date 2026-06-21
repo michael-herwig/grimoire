@@ -562,12 +562,17 @@ def test_remove_standalone_skill_held_by_bundle_at_floating_tag_marks_stale_not_
     )
 
 
-def test_uninstall_direct_keeps_lock_entry_held_by_bundle(
+def test_uninstall_standalone_skill_held_by_bundle_keeps_files(
     grim_at, project_dir: Path, registry: str, unique_repo: str
 ) -> None:
-    # `grim uninstall` deletes the files (explicit user intent), but the
-    # lock entry survives when a declared bundle still names the artifact
-    # at the same identifier — the next install rematerializes it.
+    # Regression (maintainer report): a skill declared standalone that a
+    # declared bundle ALSO provides at the SAME identifier must NOT have its
+    # files deleted on `grim uninstall` — the bundle still holds it, so the
+    # artifact stays desired. Uninstall degrades to dropping the direct
+    # declaration (like `grim remove`): the files survive, the lock
+    # provenance flips to the bundle, and the state stays `installed`
+    # (NOT `missing`). Deleting still-desired files is the surprising,
+    # destructive behavior the maintainer objected to.
     sk = _member_skill(unique_repo, "code-review")
     bundle = make_bundle(
         f"{unique_repo}/stack",
@@ -587,12 +592,73 @@ def test_uninstall_direct_keeps_lock_entry_held_by_bundle(
 
     runner.json("uninstall", "skill", "code-review")
 
-    assert_not_exists(project_dir / ".claude" / "skills" / "code-review")
+    # The files survive — the bundle still provides the artifact.
+    assert_dir_exists(project_dir / ".claude" / "skills" / "code-review")
     rows = runner.json("status")
     after = next((r for r in rows if r["name"] == "code-review"), None)
-    assert after is not None, "the lock entry survives via the bundle"
-    assert after["source"].startswith("bundle:")
-    assert after["state"] == "missing", "files deleted, still desired"
+    assert after is not None, "the artifact survives — the bundle still holds it"
+    assert after["source"].startswith("bundle:"), "provenance flips to the bundle"
+    assert after["state"] == "installed", (
+        f"files retained, still provided by the bundle: {after}"
+    )
+
+
+def test_uninstall_standalone_skill_held_by_bundle_at_other_tag_keeps_files(
+    grim_at, project_dir: Path, registry: str, unique_repo: str
+) -> None:
+    # The harder real-world repro: the standalone is declared at :latest and
+    # the bundle pins the SAME skill at a different floating tag :0 (an id
+    # mismatch). `grim uninstall` of the standalone must STILL keep the files
+    # — the bundle holds the skill (at a different version it will reconcile
+    # via `grim lock`). The lock goes honestly stale (the :0 variant cannot be
+    # pinned offline), but the file is never lost.
+    sk_zero = make_artifact(
+        f"{unique_repo}/grim-authoring",
+        "skill",
+        {"grim-authoring/SKILL.md": "---\nname: grim-authoring\n---\n# v0\n"},
+        tag="0",
+    )
+    sk_latest = make_artifact(
+        f"{unique_repo}/grim-authoring",
+        "skill",
+        {"grim-authoring/SKILL.md": "---\nname: grim-authoring\n---\n# latest\n"},
+        tag="latest",
+    )
+    bundle = make_bundle(
+        f"{unique_repo}/grim-essentials",
+        [("skill", "grim-authoring", sk_zero.fq)],
+        tag="1",
+    )
+    write_config(
+        project_dir,
+        skills={"grim-authoring": sk_latest.fq},
+        bundles={"grim-essentials": bundle.fq},
+    )
+    (project_dir / ".claude").mkdir(exist_ok=True)
+    runner = grim_at(project_dir)
+    runner.run("lock")
+    runner.run("install")
+    assert_dir_exists(project_dir / ".claude" / "skills" / "grim-authoring")
+
+    runner.run("uninstall", "skill", "grim-authoring")
+
+    # Files survive despite the id mismatch — the bundle still holds it.
+    assert_dir_exists(project_dir / ".claude" / "skills" / "grim-authoring")
+
+    # The bundle row is stale (its :0 variant awaits a re-resolve).
+    rows = runner.json("status")
+    states = {r["name"]: r["state"] for r in rows}
+    assert states.get("grim-essentials") == "stale", (
+        f"bundle row must surface staleness: {states}"
+    )
+
+    # `grim lock` heals, and the file is still present (never deleted).
+    runner.run("lock")
+    assert_dir_exists(project_dir / ".claude" / "skills" / "grim-authoring")
+    rows = runner.json("status")
+    healed = next((r for r in rows if r["name"] == "grim-authoring"), None)
+    assert healed is not None, "the artifact reappears, healed from the bundle"
+    assert healed["source"].startswith("bundle:"), "provenance flips to the bundle"
 
 
 def test_release_bundle_with_agent_member(
