@@ -51,13 +51,13 @@ jobs:
     environment: ocx.sh
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
           lfs: true
 
       - name: Install OCX
-        uses: ocx-sh/setup-ocx@0a39e58f272e7b4e2e46cfa89cdbad2a3578d2cc # v1.1.0
+        uses: ocx-sh/setup-ocx@8cd2f38eed07c9b79aaed22e61f9ba6b36e967a3 # v1.2.2
         with:
           version: ${{ env.OCX_VERSION }}
           project: "" # binary-only; grimoire has no ocx.toml project to activate
