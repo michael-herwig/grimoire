@@ -1082,6 +1082,7 @@ fn project_group_rows(group: &catalog_service::CatalogGroup, ctx: &BadgeContext)
                 summary: e.summary.clone().unwrap_or_default(),
                 keywords: e.keywords.clone(),
                 repository_url: e.repository_url.clone(),
+                deprecated: e.deprecated.clone(),
                 latest_tag: e.latest_tag.clone().unwrap_or_default(),
                 // Show the explicit highest version; fall back to the
                 // representative tag when no semver tag exists.
@@ -1132,6 +1133,7 @@ fn rows_from_catalog(catalog: &Catalog, ctx: &BadgeContext) -> Vec<TuiRow> {
                 summary: e.summary.clone().unwrap_or_default(),
                 keywords: e.keywords.clone(),
                 repository_url: e.repository_url.clone(),
+                deprecated: e.deprecated.clone(),
                 latest_tag: e.latest_tag.clone().unwrap_or_default(),
                 // Show the explicit highest version; fall back to the
                 // representative tag when no semver tag exists.
@@ -2256,6 +2258,7 @@ async fn perform_member(
         repository_url: None,
         latest_tag: tag,
         version: String::new(),
+        deprecated: None,
         pinned_version: None,
         state: crate::tui::state::ArtifactState::NotInstalled,
     };
@@ -2463,6 +2466,7 @@ mod tests {
                 description: Some("a description".to_string()),
                 keywords: vec!["lint".to_string()],
                 repository_url: Some("https://example.invalid/repo".to_string()),
+                deprecated: None,
                 latest_tag: Some("1.2.3".to_string()),
                 version: Some("1.2.3".to_string()),
                 badge: StatusBadge::NotInstalled,
@@ -2554,6 +2558,7 @@ mod tests {
             repository_url: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
+            deprecated: None,
             pinned_version: None,
             state: ArtifactState::Installed,
         }
@@ -2758,6 +2763,7 @@ mod tests {
             repository_url: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
+            deprecated: None,
             pinned_version: None,
             state: ArtifactState::Installed,
         };
@@ -3904,6 +3910,7 @@ mod tests {
             repository_url: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
+            deprecated: None,
             pinned_version: None,
             state: ArtifactState::Installed,
         }
@@ -4038,6 +4045,7 @@ mod tests {
                 repository_url: None,
                 latest_tag: "latest".to_string(),
                 version: "1.0.0".to_string(),
+                deprecated: None,
                 pinned_version: None,
                 state: ArtifactState::Installed,
             },
@@ -4123,6 +4131,7 @@ mod tests {
             repository_url: None,
             latest_tag: "1.0.0".to_string(),
             version: String::new(),
+            deprecated: None,
             pinned_version: None,
             state: ArtifactState::NotInstalled,
         }];
@@ -4183,6 +4192,7 @@ mod p2_app_member_node_tests {
             repository_url: None,
             latest_tag: latest_tag.to_string(),
             version: "1.0.0".to_string(),
+            deprecated: None,
             pinned_version: pinned_version.map(|s| s.to_string()),
             state: ArtifactState::NotInstalled,
         }

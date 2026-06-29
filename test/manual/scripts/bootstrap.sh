@@ -111,6 +111,9 @@ SKILL_MATRIX=(
     "skills|code-reviewer|$CATALOG/skills/code-reviewer|1.0.0 1.1.0 1.2.0"
     "skills|commit-helper|$CATALOG/skills/commit-helper|1.0.0 2.0.0"
     "skills|hello-world|$CATALOG/skills/hello-world|1.0.0"
+    # old-reviewer carries metadata.deprecated -> com.grimoire.deprecated;
+    # demos the deprecation surface (search marker, TUI ⚠, add warning).
+    "skills|old-reviewer|$CATALOG/skills/old-reviewer|1.0.0"
 )
 RULE_MATRIX=(
     "rules|architecture-guide|$CATALOG/rules/architecture-guide.md|1.0.0"

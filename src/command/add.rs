@@ -102,10 +102,27 @@ pub async fn run(ctx: &Context, args: &AddArgs) -> anyhow::Result<(AddReport, Ex
     // published manifest's OCI `artifactType` (the kind is persisted in the
     // OCI artifact type at release time). The value_parser above constrains
     // the string to a known kind, so from_kind_str never returns None here.
-    let kind = match args.kind.as_deref() {
-        Some(k) => ArtifactKind::from_kind_str(k).unwrap_or(ArtifactKind::Rule),
-        None => infer_kind(&access, &id).await?,
+    let (kind, manifest) = match args.kind.as_deref() {
+        Some(k) => (
+            ArtifactKind::from_kind_str(k).unwrap_or(ArtifactKind::Rule),
+            // The explicit-kind path skips inference, so fetch the manifest
+            // best-effort purely to surface a deprecation notice.
+            fetch_manifest_best_effort(&access, &id).await,
+        ),
+        None => {
+            let (kind, manifest) = infer_kind(&access, &id).await?;
+            (kind, Some(manifest))
+        }
     };
+
+    // Acquisition-time deprecation notice: warn once when the resolved
+    // artifact's manifest carries a non-empty `com.grimoire.deprecated`.
+    if let Some(message) = manifest
+        .as_ref()
+        .and_then(|m| crate::oci::annotations::deprecation_message(&m.annotations))
+    {
+        tracing::warn!("{id} is deprecated: {message}");
+    }
 
     let mut set = scope.set.clone();
     declare(&mut set, kind, name.clone(), id.clone());
@@ -259,7 +276,10 @@ pub(crate) fn parse_reference(
 ///
 /// A registry/transport failure propagates with its own taxonomy;
 /// inability to determine the kind is [`CommandError::KindInferenceFailed`].
-async fn infer_kind(access: &Arc<dyn OciAccess>, id: &Identifier) -> anyhow::Result<ArtifactKind> {
+async fn infer_kind(
+    access: &Arc<dyn OciAccess>,
+    id: &Identifier,
+) -> anyhow::Result<(ArtifactKind, crate::oci::manifest::OciManifest)> {
     let not_inferable = || {
         crate::error::Error::from(CommandError::KindInferenceFailed {
             reference: id.to_string(),
@@ -269,7 +289,25 @@ async fn infer_kind(access: &Arc<dyn OciAccess>, id: &Identifier) -> anyhow::Res
     let digest = super::grim(access.resolve_digest(id, Operation::Query).await)?.ok_or_else(not_inferable)?;
     let pinned = PinnedIdentifier::try_from(id.clone_with_digest(digest)).map_err(|_| not_inferable())?;
     let manifest = super::grim(access.fetch_manifest(&pinned).await)?.ok_or_else(not_inferable)?;
-    crate::oci::annotations::kind_from_manifest(&manifest).ok_or_else(|| not_inferable().into())
+    let kind = crate::oci::annotations::kind_from_manifest(&manifest).ok_or_else(not_inferable)?;
+    // Return the manifest so the caller can also read the deprecation
+    // annotation off it without a second round-trip.
+    Ok((kind, manifest))
+}
+
+/// Best-effort fetch of `id`'s manifest for the deprecation check on the
+/// explicit-`--kind` path (the inference path already has the manifest).
+///
+/// Purely advisory: any failure (offline cache miss, unresolved tag,
+/// transport fault, foreign image) yields `None` so a deprecation notice is
+/// never the reason `grim add` fails — the artifact still installs.
+async fn fetch_manifest_best_effort(
+    access: &Arc<dyn OciAccess>,
+    id: &Identifier,
+) -> Option<crate::oci::manifest::OciManifest> {
+    let digest = access.resolve_digest(id, Operation::Query).await.ok()??;
+    let pinned = PinnedIdentifier::try_from(id.clone_with_digest(digest)).ok()?;
+    access.fetch_manifest(&pinned).await.ok()?
 }
 
 /// Re-serialize the declaration to `path` as the shared

@@ -612,6 +612,7 @@ mod tests {
             repository_url: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
+            deprecated: None,
             pinned_version: None,
             state: ArtifactState::NotInstalled,
         }
@@ -1077,6 +1078,7 @@ mod p2_event_member_node_tests {
             repository_url: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
+            deprecated: None,
             pinned_version: None,
             state: ArtifactState::NotInstalled,
         }
@@ -1095,6 +1097,7 @@ mod p2_event_member_node_tests {
             repository_url: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
+            deprecated: None,
             pinned_version: None,
             state: ArtifactState::NotInstalled,
         }
@@ -1678,6 +1681,7 @@ mod tree_event_tests {
                 repository_url: None,
                 latest_tag: "latest".to_string(),
                 version: "1.0.0".to_string(),
+                deprecated: None,
                 pinned_version: None,
                 state: ArtifactState::NotInstalled,
             },
@@ -1692,6 +1696,7 @@ mod tree_event_tests {
                 repository_url: None,
                 latest_tag: "latest".to_string(),
                 version: "1.0.0".to_string(),
+                deprecated: None,
                 pinned_version: None,
                 state: ArtifactState::NotInstalled,
             },
@@ -1812,6 +1817,7 @@ mod tree_event_tests {
             repository_url: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
+            deprecated: None,
             pinned_version: None,
             state: crate::tui::state::ArtifactState::NotInstalled,
         }]);

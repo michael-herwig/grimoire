@@ -135,6 +135,9 @@ pub struct TuiRow {
     /// HTTPS source-repository URL (already vetted by the catalog's
     /// `https://` read-back guard); target of the `o` open action.
     pub repository_url: Option<String>,
+    /// Publisher's deprecation message when the artifact is deprecated;
+    /// `None` otherwise. Drives the row marker + detail-pane highlight.
+    pub deprecated: Option<String>,
     /// The representative tag (empty string when absent) — may be the
     /// moving `latest` pointer; used as the resolution fallback.
     pub latest_tag: String,
@@ -1317,6 +1320,7 @@ mod tests {
             repository_url: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
+            deprecated: None,
             pinned_version: None,
             state,
         }
@@ -1921,6 +1925,7 @@ mod tests {
             repository_url: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
+            deprecated: None,
             pinned_version: None,
             state,
         }
@@ -2764,6 +2769,7 @@ mod tests {
             repository_url: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
+            deprecated: None,
             pinned_version: None,
             state: ArtifactState::Installed,
         };
@@ -3012,6 +3018,7 @@ mod p2_state_member_node_tests {
             repository_url: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
+            deprecated: None,
             pinned_version: None,
             state: ArtifactState::NotInstalled,
         }

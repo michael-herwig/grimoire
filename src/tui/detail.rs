@@ -26,11 +26,20 @@ pub const W_TAG: usize = 12;
 /// (`✘ integrity-missing`, 19 chars) so the header underline spans the
 /// full column instead of stopping at `Status`.
 pub const W_STATUS: usize = 19;
+/// Extra Catalog width reserved for the deprecation marker (` ⚠ deprecated`)
+/// appended inside the Status column on deprecated rows. Sized to the full
+/// marker — leading space + `⚠` (counted as two cells: U+26A0 is
+/// East-Asian-width-ambiguous and renders as two columns in some terminals) +
+/// space + the word `deprecated` (10) = 14 — so it never clips, even when the
+/// status label is at its widest (`✘ integrity-missing`).
+pub const W_DEPRECATED: usize = 14;
 /// Total terminal columns the Catalog needs to show every fixed-width
 /// column un-truncated: 2 (mark) + repo + 2 + kind + 2 + tag + 2 + status,
-/// plus 2 block borders. Selection is shown by row highlight (no leading
-/// symbol). Sized to exactly this side-by-side so Detail gets all slack.
-pub const CATALOG_WIDTH: u16 = (2 + W_REPO + 2 + W_KIND + 2 + W_TAG + 2 + W_STATUS) as u16 + 2 /* borders */;
+/// plus room for the trailing deprecation marker and 2 block borders.
+/// Selection is shown by row highlight (no leading symbol). Sized to exactly
+/// this side-by-side so Detail gets all slack.
+pub const CATALOG_WIDTH: u16 =
+    (2 + W_REPO + 2 + W_KIND + 2 + W_TAG + 2 + W_STATUS + 2 + W_DEPRECATED) as u16 + 2 /* borders */;
 /// Narrowest usable Detail column (the side-by-side layout threshold).
 pub const DETAIL_MIN_WIDTH: u16 = 30;
 
@@ -108,6 +117,12 @@ pub fn detail_lines(row: Option<&TuiRow>) -> Vec<DetailLine> {
             value: r.repository_url.clone().unwrap_or_else(|| "-".to_string()),
         },
     ]);
+    if let Some(msg) = &r.deprecated {
+        lines.push(DetailLine::MetaEntry {
+            label: "Deprecated:",
+            value: msg.clone(),
+        });
+    }
     if let Some(p) = &r.pinned_version {
         lines.push(DetailLine::MetaEntry {
             label: "Pinned:",
@@ -375,6 +390,52 @@ mod tests {
             identifier_value.as_ref().unwrap().contains("code-review"),
             "C-7: Identifier line must contain the label; got: {:?}",
             identifier_value
+        );
+    }
+
+    fn tui_row(deprecated: Option<&str>) -> TuiRow {
+        TuiRow {
+            kind: "skill".to_string(),
+            registry: "localhost:5000".to_string(),
+            repository: "acme/code-review".to_string(),
+            repo: "localhost:5000/acme/code-review".to_string(),
+            description: String::new(),
+            summary: "blurb".to_string(),
+            keywords: vec![],
+            repository_url: None,
+            deprecated: deprecated.map(str::to_string),
+            latest_tag: "1.0.0".to_string(),
+            version: "1.0.0".to_string(),
+            pinned_version: None,
+            state: ArtifactState::NotInstalled,
+        }
+    }
+
+    #[test]
+    fn detail_lines_show_deprecated_meta_entry_when_deprecated() {
+        let lines = detail_lines(Some(&tui_row(Some("use acme/code-review-2"))));
+        let dep = lines.iter().find_map(|l| match l {
+            DetailLine::MetaEntry {
+                label: "Deprecated:",
+                value,
+            } => Some(value.clone()),
+            _ => None,
+        });
+        assert_eq!(dep.as_deref(), Some("use acme/code-review-2"));
+    }
+
+    #[test]
+    fn detail_lines_omit_deprecated_meta_entry_when_not_deprecated() {
+        let lines = detail_lines(Some(&tui_row(None)));
+        assert!(
+            !lines.iter().any(|l| matches!(
+                l,
+                DetailLine::MetaEntry {
+                    label: "Deprecated:",
+                    ..
+                }
+            )),
+            "a non-deprecated row must not show a Deprecated: entry"
         );
     }
 

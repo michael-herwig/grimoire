@@ -125,6 +125,7 @@ pub async fn run(ctx: &Context, args: &SearchArgs) -> anyhow::Result<(SearchRepo
             repository: r.repository_url,
             latest_tag: r.latest_tag,
             version: r.version,
+            deprecated: r.deprecated,
             status: r.badge,
         })
         .collect();

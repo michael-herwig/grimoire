@@ -80,6 +80,9 @@ its members into the lock. `grim remove bundle <name>` undeclares the bundle and
 drops the members it contributed — a member another still-declared bundle also
 contributes only loses this bundle's provenance entry and stays locked.
 
+If the reference is [deprecated](./publishing.md#metadata-deprecated), `add`
+prints the publisher's notice on stderr and still completes the add.
+
 ## grim lock {#lock}
 
 Resolves the floating tags declared in `grimoire.toml` to concrete digests and
@@ -176,6 +179,11 @@ terminal that column is truncated to fit the width; piped output and
 `repository` field — the artifact's authored
 [repository URL](./publishing.md#metadata-repository), or `null` when the
 artifact has none.
+
+A [deprecated](./publishing.md#metadata-deprecated) entry is flagged in the
+`Status` cell with a comma-suffixed `deprecated` (e.g. `installed,deprecated`),
+and JSON carries the notice in a `deprecated` field (`null` when the artifact
+is not deprecated).
 
 ```sh
 grim search review

@@ -783,6 +783,7 @@ mod tests {
             repository_url: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
+            deprecated: None,
             pinned_version: None,
             state,
         }
@@ -809,6 +810,7 @@ mod tests {
             repository_url: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
+            deprecated: None,
             pinned_version: None,
             state,
         }
@@ -1671,6 +1673,7 @@ mod p2_member_node_tests {
             repository_url: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
+            deprecated: None,
             pinned_version: None,
             state,
         }
@@ -2127,6 +2130,7 @@ mod spec_multi_registry_tree_tests {
             repository_url: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
+            deprecated: None,
             pinned_version: None,
             state,
         }

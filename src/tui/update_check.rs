@@ -416,6 +416,7 @@ mod tests {
             repository_url: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
+            deprecated: None,
             pinned_version: None,
             state,
         }

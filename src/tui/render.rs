@@ -17,7 +17,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use super::detail::{
-    CATALOG_WIDTH, DETAIL_MIN_WIDTH, DetailLine, W_KIND, W_REPO, W_STATUS, W_TAG, detail_lines, scroll_max, viewport,
+    CATALOG_WIDTH, DETAIL_MIN_WIDTH, DetailLine, W_DEPRECATED, W_KIND, W_REPO, W_STATUS, W_TAG, detail_lines,
+    scroll_max, viewport,
 };
 
 /// Width of the Registry column shown in flat-view multi-registry mode.
@@ -250,6 +251,11 @@ pub struct RenderRow {
     /// [`RenderModel::show_registry_column`] is true; `None` for tree rows
     /// and single-registry flat rows (where the column is elided).
     pub registry: Option<String>,
+    /// Whether this row is deprecated. Drives the trailing, header-less `⚠`
+    /// indicator column (rendered in yellow by [`draw`]); orthogonal to the
+    /// install-status glyph. Leaf and flat rows carry it; group and member
+    /// rows are always `false`.
+    pub deprecated: bool,
 }
 
 /// The modal version-picker overlay, projected for display.
@@ -372,6 +378,9 @@ fn render_leaf(
         None if !r.version.is_empty() => r.version.clone(),
         None => r.latest_tag.clone(),
     };
+    // Deprecation is flagged by a dedicated trailing `⚠` column (rendered in
+    // `draw`), not a Repo-cell prefix — so the Repo cell stays clean and
+    // left-aligned with every other row.
     RenderRow {
         columns: [
             fit(repo_text, W_REPO),
@@ -384,6 +393,7 @@ fn render_leaf(
         status_color: color,
         group: None,
         registry,
+        deprecated: r.deprecated.is_some(),
     }
 }
 
@@ -462,6 +472,8 @@ fn tree_render_rows(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec<R
                     status_color: color,
                     group: Some(GroupRow { mark }),
                     registry: None,
+                    // Group rollups don't carry a deprecation indicator.
+                    deprecated: false,
                 }
             }
             super::tree::DisplayRow::Leaf {
@@ -475,6 +487,11 @@ fn tree_render_rows(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec<R
             } => {
                 let (glyph, status_label, color) = status_view(*leaf_state);
                 let indent = "  ".repeat(*depth);
+                let r = state.rows.get(*row);
+                // Deprecation is flagged by the dedicated trailing `⚠` column
+                // (rendered in `draw`), not a label prefix — keeping the tree
+                // label clean and aligned with the bundle arrow.
+                let leaf_deprecated = r.is_some_and(|row| row.deprecated.is_some());
                 // P3.2: bundle leaves carry an expand/collapse arrow glyph.
                 // F4: use UTF-8 ▸/▾ (same glyphs as group rows) — no ASCII fallback.
                 // Non-bundle leaves are rendered without prefix (unchanged).
@@ -484,7 +501,6 @@ fn tree_render_rows(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec<R
                 } else {
                     format!("{indent}{label}")
                 };
-                let r = state.rows.get(*row);
                 let tag_cell = r
                     .map(|row| match &row.pinned_version {
                         Some(p) => format!("*{p}"),
@@ -504,6 +520,7 @@ fn tree_render_rows(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec<R
                     status_color: color,
                     group: None,
                     registry: None,
+                    deprecated: leaf_deprecated,
                 }
             }
             super::tree::DisplayRow::Member {
@@ -538,6 +555,8 @@ fn tree_render_rows(state: &TuiState, flat: &[super::tree::DisplayRow]) -> Vec<R
                     status_color: color,
                     group: None,
                     registry: None,
+                    // Bundle-member rows don't carry a deprecation indicator.
+                    deprecated: false,
                 }
             }
         })
@@ -852,7 +871,8 @@ pub fn frame(state: &TuiState) -> RenderModel {
         status,
         hint,
         hint_tiers,
-        legend: "✓ installed   ↑ outdated   ✱ modified   ✘ integrity-missing   · not-installed".to_string(),
+        legend: "✓ installed   ↑ outdated   ✱ modified   ✘ integrity-missing   · not-installed   ⚠ deprecated"
+            .to_string(),
         truncation_hint,
         detail_focused: state.mode == Mode::Detail,
         show_help: state.mode == Mode::Help,
@@ -981,6 +1001,12 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
     // A: when more than one registry is in scope, prepend a Registry column to
     // the header and each flat-view row.  Tree-mode rows never carry a registry
     // (they express it via the group node label), so the column is flat-only.
+    //
+    // The Status header reserves its full region — `W_STATUS` plus the gap and
+    // the deprecation marker (`W_DEPRECATED`) that deprecated rows append — so
+    // the underlined header spans the whole Catalog box width (which always
+    // reserves that room via `CATALOG_WIDTH`), instead of stopping short.
+    let status_header_w = W_STATUS + 2 + W_DEPRECATED;
     let header_text = if model.show_registry_column {
         format!(
             "  {:<gw$}  {:<rw$}  {:<kw$}  {:<tw$}  {:<sw$}",
@@ -993,7 +1019,7 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
             rw = W_REPO,
             kw = W_KIND,
             tw = W_TAG,
-            sw = W_STATUS,
+            sw = status_header_w,
         )
     } else {
         format!(
@@ -1005,7 +1031,7 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
             rw = W_REPO,
             kw = W_KIND,
             tw = W_TAG,
-            sw = W_STATUS,
+            sw = status_header_w,
         )
     };
     let header = ListItem::new(Line::from(Span::styled(
@@ -1063,6 +1089,16 @@ pub fn draw(f: &mut Frame, model: &RenderModel) {
                     .add_modifier(Modifier::BOLD),
             ),
         ]);
+        // Deprecation rides in the Status column: a space-separated yellow
+        // `⚠ deprecated` appended after the install-status label (orthogonal to
+        // its color; the full notice lives in the detail pane). CATALOG_WIDTH
+        // reserves the extra width so the marker is never clipped by the border.
+        if r.deprecated {
+            spans.push(Span::styled(
+                " ⚠ deprecated".to_string(),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ));
+        }
         items.push(ListItem::new(Line::from(spans)));
     }
     let list = List::new(items)
@@ -1231,6 +1267,12 @@ fn legend_line(truncation_hint: &str) -> Line<'static> {
         .into_iter()
         .map(|(t, k)| Span::styled(t.to_string(), Style::default().fg(color_for(k))))
         .collect();
+    // Deprecation is orthogonal to install status (no `ColorKey`); append it
+    // as a literal yellow span so the trailing `⚠` indicator is explained.
+    spans.push(Span::styled(
+        "  ⚠ deprecated".to_string(),
+        Style::default().fg(Color::Yellow),
+    ));
     if !truncation_hint.is_empty() {
         spans.push(Span::styled(
             format!("   {truncation_hint}"),
@@ -1402,9 +1444,104 @@ mod tests {
             repository_url: None,
             latest_tag: "latest".to_string(),
             version: "2.1.0".to_string(),
+            deprecated: None,
             pinned_version: None,
             state,
         }
+    }
+
+    #[test]
+    fn render_leaf_flags_deprecated_without_touching_repo_cell() {
+        let mut r = row("r/alpha", ArtifactState::NotInstalled);
+        r.deprecated = Some("use r/alpha-2".to_string());
+        let leaf = render_leaf(&r, "r/alpha", false, false, None);
+        // The flag drives the trailing indicator column (`draw`); the Repo
+        // cell stays clean and left-aligned (no inline glyph).
+        assert!(leaf.deprecated, "a deprecated row must set the deprecated flag");
+        assert!(
+            !leaf.columns[0].contains('⚠'),
+            "the Repo cell must stay clean; got {:?}",
+            leaf.columns[0]
+        );
+        assert!(leaf.columns[0].starts_with("r/alpha"), "repo text is unshifted");
+        // A non-deprecated row sets neither the flag nor any marker.
+        let plain = row("r/beta", ArtifactState::NotInstalled);
+        let leaf2 = render_leaf(&plain, "r/beta", false, false, None);
+        assert!(!leaf2.deprecated, "non-deprecated row must not set the flag");
+        assert!(!leaf2.columns[0].contains('⚠'), "non-deprecated row must not be marked");
+    }
+
+    // Regression: the trailing `⚠` must land INSIDE the Catalog box, not be
+    // clipped by its right border. `CATALOG_WIDTH` reserves a column for it.
+    #[test]
+    fn draw_renders_deprecation_indicator_inside_catalog_box() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut s = TuiState::new();
+        let mut dep = row("r/alpha", ArtifactState::Installed);
+        dep.deprecated = Some("use r/alpha-2".to_string());
+        s.set_rows(vec![dep]);
+        let model = frame(&s);
+
+        // Side-by-side layout: Catalog gets exactly CATALOG_WIDTH columns.
+        let w = CATALOG_WIDTH + DETAIL_MIN_WIDTH + 4;
+        let mut term = Terminal::new(TestBackend::new(w, 12)).unwrap();
+        term.draw(|f| draw(f, &model)).unwrap();
+        let buf = term.backend().buffer();
+        // Reconstruct each screen row to confirm the whole `⚠ deprecated`
+        // marker lands on the catalog row, not just the leading glyph.
+        let cols = buf.area.width as usize;
+        let lines: Vec<String> = buf
+            .content()
+            .chunks(cols)
+            .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+            .collect();
+        let row_line = lines
+            .iter()
+            .find(|l| l.contains("r/alpha"))
+            .expect("the catalog row is rendered");
+        assert!(
+            row_line.contains("⚠ deprecated"),
+            "the full `⚠ deprecated` marker must render unclipped on the row: {row_line:?}"
+        );
+    }
+
+    // Regression: the underlined header must span the full Catalog box width —
+    // the Status header reserves the deprecation-marker region, so the
+    // underline reaches the box's right border instead of stopping short.
+    #[test]
+    fn draw_header_underline_spans_full_catalog_width() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::style::Modifier;
+
+        let mut s = TuiState::new();
+        let mut dep = row("r/alpha", ArtifactState::Installed);
+        dep.deprecated = Some("use r/alpha-2".to_string());
+        s.set_rows(vec![dep]);
+        let model = frame(&s);
+
+        let w = CATALOG_WIDTH + DETAIL_MIN_WIDTH + 4;
+        let mut term = Terminal::new(TestBackend::new(w, 12)).unwrap();
+        term.draw(|f| draw(f, &model)).unwrap();
+        let buf = term.backend().buffer();
+        let cols = buf.area.width as usize;
+        let cells = buf.content();
+        let header_y = (0..buf.area.height as usize)
+            .find(|&y| {
+                let line: String = (0..cols).map(|x| cells[y * cols + x].symbol()).collect();
+                line.contains("Repo") && line.contains("Status")
+            })
+            .expect("the header row is rendered");
+        // Last column inside the Catalog box's right border.
+        let last_inner = CATALOG_WIDTH as usize - 2;
+        assert!(
+            cells[header_y * cols + last_inner]
+                .modifier
+                .contains(Modifier::UNDERLINED),
+            "the header underline must reach the Catalog box border (full table width)"
+        );
     }
 
     #[test]
@@ -1731,12 +1868,16 @@ mod tests {
 
     #[test]
     fn legend_line_appends_truncation_hint_only_when_present() {
-        // No hint ⇒ the legend keeps exactly its six glyph spans.
+        // No hint ⇒ six status glyph spans plus the deprecation span.
         let base = legend_line("");
-        assert_eq!(base.spans.len(), 6, "six status glyphs, no trailing hint");
+        assert_eq!(base.spans.len(), 7, "six status glyphs + deprecation, no trailing hint");
+        assert!(
+            base.spans.iter().any(|s| s.content.contains("⚠ deprecated")),
+            "the legend explains the deprecation indicator"
+        );
         // A non-empty hint adds one trailing span carrying the hint text.
         let with_hint = legend_line("(list truncated)");
-        assert_eq!(with_hint.spans.len(), 7, "glyphs plus the truncation span");
+        assert_eq!(with_hint.spans.len(), 8, "glyphs + deprecation + the truncation span");
         assert!(
             with_hint.spans.last().unwrap().content.contains("(list truncated)"),
             "the trailing span carries the hint text"
@@ -1814,6 +1955,43 @@ mod tests {
             leaves.iter().all(|r| r.columns[0].starts_with("  ")),
             "leaf rows in tree view must be indented in columns[0]; cols: {:?}",
             leaves.iter().map(|r| r.columns[0].as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    // A deprecated leaf sets the deprecated flag in tree view too (parity with
+    // the flat view's render_leaf), driving the trailing `⚠` column — without
+    // injecting a glyph into the (indented, arrow-bearing) label cell.
+    #[test]
+    fn tree_frame_flags_deprecated_leaf() {
+        let mut s = TuiState::new();
+        let mut dep = row("reg/acme/alpha", ArtifactState::NotInstalled);
+        dep.deprecated = Some("use reg/acme/alpha-2".to_string());
+        s.set_rows(vec![dep, row("reg/acme/beta", ArtifactState::NotInstalled)]);
+        s.set_default_registry(Some("reg".to_string()));
+        s.toggle_view_mode();
+        assert_eq!(s.view_mode, crate::tui::state::ViewMode::Tree);
+        let m = frame(&s);
+        let leaves: Vec<&RenderRow> = m.rows.iter().filter(|r| r.group.is_none()).collect();
+        assert!(
+            leaves.iter().any(|r| r.deprecated && r.columns[0].contains("alpha")),
+            "the deprecated leaf must set the flag; rows: {:?}",
+            leaves
+                .iter()
+                .map(|r| (r.columns[0].as_str(), r.deprecated))
+                .collect::<Vec<_>>()
+        );
+        // No leaf injects the glyph into the label cell.
+        assert!(
+            leaves.iter().all(|r| !r.columns[0].contains('⚠')),
+            "no label cell carries the glyph; cols: {:?}",
+            leaves.iter().map(|r| r.columns[0].as_str()).collect::<Vec<_>>()
+        );
+        assert!(
+            leaves
+                .iter()
+                .filter(|r| r.columns[0].contains("beta"))
+                .all(|r| !r.deprecated),
+            "the non-deprecated leaf must not set the flag"
         );
     }
 
@@ -2235,6 +2413,7 @@ mod p2_render_member_node_tests {
             repository_url: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
+            deprecated: None,
             pinned_version: None,
             state: ArtifactState::NotInstalled,
         }
@@ -2253,6 +2432,7 @@ mod p2_render_member_node_tests {
             repository_url: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
+            deprecated: None,
             pinned_version: None,
             state: ArtifactState::Installed,
         }
@@ -2410,6 +2590,7 @@ mod spec_multi_registry_render_tests {
             repository_url: None,
             latest_tag: "latest".to_string(),
             version: "1.0.0".to_string(),
+            deprecated: None,
             pinned_version: None,
             state,
         }

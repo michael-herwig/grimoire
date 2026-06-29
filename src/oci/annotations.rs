@@ -38,6 +38,36 @@ use crate::oci::artifact_kind::KIND_ANNOTATION;
 use crate::oci::manifest::OciManifest;
 use crate::skill::{AgentFrontmatter, RuleFrontmatter, SkillFrontmatter};
 
+/// Annotation key carrying a publisher-authored deprecation notice.
+///
+/// Optional, authored per kind (skill/agent `metadata.deprecated`, rule
+/// top-level `deprecated`, bundle TOML `deprecated`). The value is the
+/// human-readable deprecation **message**; a non-empty value marks the
+/// artifact deprecated (npm-style). Absent or whitespace-only ⇒ not
+/// deprecated. Read back by the catalog (search/TUI highlight) and by
+/// `grim add` (acquisition warning) through [`deprecation_message`].
+pub const DEPRECATED_ANNOTATION: &str = "com.grimoire.deprecated";
+
+/// Normalize an authored deprecation value: trim surrounding whitespace and
+/// treat an empty result as "not deprecated" (`None`). Shared by the emit
+/// side (all four `annotations_for_*`) and the read side
+/// ([`deprecation_message`]) so presence semantics are one source of truth.
+fn normalize_deprecated(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// Read the deprecation message off a manifest's annotation map, or `None`
+/// when the artifact is not deprecated (annotation absent or whitespace).
+///
+/// The single read seam for the [`DEPRECATED_ANNOTATION`]; consumed by the
+/// catalog build and the `grim add` acquisition warning.
+pub fn deprecation_message(annotations: &BTreeMap<String, String>) -> Option<String> {
+    annotations
+        .get(DEPRECATED_ANNOTATION)
+        .and_then(|v| normalize_deprecated(v))
+}
+
 /// An authored `repository` metadata value that is not an HTTPS URL.
 ///
 /// Raised at publish time (`grim build` / `grim release`) so a bad value
@@ -138,6 +168,9 @@ pub fn annotations_for_skill(
     if let Some(summary) = fm.metadata.get("summary") {
         a.insert("com.grimoire.summary".to_string(), summary.clone());
     }
+    if let Some(deprecated) = fm.metadata.get("deprecated").and_then(|v| normalize_deprecated(v)) {
+        a.insert(DEPRECATED_ANNOTATION.to_string(), deprecated);
+    }
     a
 }
 
@@ -173,6 +206,12 @@ pub fn annotations_for_rule(
     if let Some(summary) = string_from_extra(fm, "summary") {
         a.insert("com.grimoire.summary".to_string(), summary);
     }
+    if let Some(deprecated) = string_from_extra(fm, "deprecated")
+        .as_deref()
+        .and_then(normalize_deprecated)
+    {
+        a.insert(DEPRECATED_ANNOTATION.to_string(), deprecated);
+    }
     a
 }
 
@@ -206,6 +245,9 @@ pub fn annotations_for_agent(
     }
     if let Some(summary) = fm.metadata.get("summary") {
         a.insert("com.grimoire.summary".to_string(), summary.clone());
+    }
+    if let Some(deprecated) = fm.metadata.get("deprecated").and_then(|v| normalize_deprecated(v)) {
+        a.insert(DEPRECATED_ANNOTATION.to_string(), deprecated);
     }
     a
 }
@@ -245,6 +287,9 @@ pub fn annotations_for_bundle(
     }
     if let Some(keywords) = &metadata.keywords {
         a.insert("com.grimoire.keywords".to_string(), keywords.clone());
+    }
+    if let Some(deprecated) = metadata.deprecated.as_deref().and_then(normalize_deprecated) {
+        a.insert(DEPRECATED_ANNOTATION.to_string(), deprecated);
     }
     a
 }
@@ -527,6 +572,7 @@ mod tests {
             keywords: Some("python,lint".to_string()),
             description: Some("Skills and rules for Python work".to_string()),
             repository: None,
+            deprecated: None,
         };
         let a = annotations_for_bundle("python-stack", "1.0.0", 3, None, &metadata);
         assert_eq!(a["org.opencontainers.image.title"], "python-stack");
@@ -548,6 +594,66 @@ mod tests {
         );
         assert!(!a.contains_key("com.grimoire.summary"));
         assert!(!a.contains_key("com.grimoire.keywords"));
+    }
+
+    // ── deprecation ──────────────────────────────────────────────────
+
+    #[test]
+    fn skill_deprecated_metadata_becomes_annotation() {
+        let doc = "---\nname: s\ndescription: d\nmetadata:\n  deprecated: use foo/bar instead\n---\n";
+        let fm = SkillFrontmatter::parse_doc(doc, Path::new("SKILL.md")).unwrap();
+        let a = annotations_for_skill(&fm, "1.0.0", None);
+        assert_eq!(a[DEPRECATED_ANNOTATION], "use foo/bar instead");
+    }
+
+    #[test]
+    fn skill_empty_or_absent_deprecated_omits_annotation() {
+        // Whitespace-only is treated as "not deprecated" (presence semantics).
+        let blank = "---\nname: s\ndescription: d\nmetadata:\n  deprecated: '   '\n---\n";
+        let fm = SkillFrontmatter::parse_doc(blank, Path::new("SKILL.md")).unwrap();
+        assert!(!annotations_for_skill(&fm, "1.0.0", None).contains_key(DEPRECATED_ANNOTATION));
+        // Absent key ⇒ no annotation.
+        let plain = SkillFrontmatter::parse_doc("---\nname: s\ndescription: d\n---\n", Path::new("SKILL.md")).unwrap();
+        assert!(!annotations_for_skill(&plain, "1.0.0", None).contains_key(DEPRECATED_ANNOTATION));
+    }
+
+    #[test]
+    fn rule_deprecated_from_extra_becomes_annotation() {
+        let doc = "---\npaths: [\"a\"]\ndeprecated: superseded by rust-style-2\n---\n# R\nbody\n";
+        let parsed = RuleFrontmatter::parse_doc(doc, Path::new("r.md")).unwrap();
+        let a = annotations_for_rule("r", &parsed.frontmatter, &parsed.body, "1.0.0", None);
+        assert_eq!(a[DEPRECATED_ANNOTATION], "superseded by rust-style-2");
+    }
+
+    #[test]
+    fn agent_deprecated_metadata_becomes_annotation() {
+        let doc = "---\nname: a\ndescription: d\nmetadata:\n  deprecated: no longer maintained\n---\nbody\n";
+        let parsed = AgentFrontmatter::parse_doc(doc, Path::new("a.md")).unwrap();
+        let a = annotations_for_agent(&parsed.frontmatter, "1.0.0", None);
+        assert_eq!(a[DEPRECATED_ANNOTATION], "no longer maintained");
+    }
+
+    #[test]
+    fn bundle_deprecated_metadata_becomes_annotation() {
+        let metadata = BundleMetadata {
+            deprecated: Some("migrate to python-stack-2".to_string()),
+            ..BundleMetadata::default()
+        };
+        let a = annotations_for_bundle("python-stack", "1.0.0", 2, None, &metadata);
+        assert_eq!(a[DEPRECATED_ANNOTATION], "migrate to python-stack-2");
+        // Default (no deprecation) omits the key.
+        let plain = annotations_for_bundle("python-stack", "1.0.0", 2, None, &BundleMetadata::default());
+        assert!(!plain.contains_key(DEPRECATED_ANNOTATION));
+    }
+
+    #[test]
+    fn deprecation_message_reads_trims_and_none_on_empty() {
+        let mut ann = BTreeMap::new();
+        assert_eq!(deprecation_message(&ann), None, "absent ⇒ None");
+        ann.insert(DEPRECATED_ANNOTATION.to_string(), "  use foo  ".to_string());
+        assert_eq!(deprecation_message(&ann).as_deref(), Some("use foo"), "trimmed");
+        ann.insert(DEPRECATED_ANNOTATION.to_string(), "   ".to_string());
+        assert_eq!(deprecation_message(&ann), None, "whitespace-only ⇒ None");
     }
 
     #[test]

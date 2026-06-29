@@ -100,6 +100,11 @@ pub struct CatalogEntry {
     /// the prefix guard drops those instead of surfacing garbage).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository_url: Option<String>,
+    /// `com.grimoire.deprecated`, the publisher's deprecation message when
+    /// the representative tag's manifest marks the artifact deprecated.
+    /// `None` when not deprecated. Surfaced as the search / TUI highlight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<String>,
     /// The representative tag the metadata was read from (may be the
     /// moving `latest` pointer).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -572,6 +577,7 @@ impl Catalog {
             summary: None,
             keywords: Vec::new(),
             repository_url: None,
+            deprecated: None,
             latest_tag,
             version,
             fetched_at: fetched_at.clone(),
@@ -612,7 +618,7 @@ impl Catalog {
             Ok(m) => m,
             Err(_) => return bare(Some(tag), version.clone()),
         };
-        let (kind, description, summary, keywords, repository_url) = manifest
+        let (kind, description, summary, keywords, repository_url, deprecated) = manifest
             .map(|m| {
                 let kind = crate::oci::annotations::kind_from_manifest(&m).map(|k| k.to_string());
                 let description = m.annotations.get("org.opencontainers.image.description").cloned();
@@ -635,9 +641,12 @@ impl Catalog {
                     .get("org.opencontainers.image.source")
                     .filter(|s| s.starts_with("https://"))
                     .cloned();
-                (kind, description, summary, keywords, repository_url)
+                // A non-empty `com.grimoire.deprecated` marks the artifact
+                // deprecated (the single read seam normalizes/trims).
+                let deprecated = crate::oci::annotations::deprecation_message(&m.annotations);
+                (kind, description, summary, keywords, repository_url, deprecated)
             })
-            .unwrap_or((None, None, None, Vec::new(), None));
+            .unwrap_or((None, None, None, Vec::new(), None, None));
 
         CatalogEntry {
             registry: registry.to_string(),
@@ -647,6 +656,7 @@ impl Catalog {
             summary,
             keywords,
             repository_url,
+            deprecated,
             latest_tag: Some(tag),
             version,
             fetched_at,
@@ -849,6 +859,7 @@ mod tests {
                 summary: Some("review skill".to_string()),
                 keywords: vec!["review".to_string(), "quality".to_string()],
                 repository_url: Some("https://github.com/acme/code-review".to_string()),
+                deprecated: Some("use acme/code-review-2".to_string()),
                 latest_tag: Some("latest".to_string()),
                 version: Some("1.2.0".to_string()),
                 fetched_at: ts(10),
@@ -868,6 +879,11 @@ mod tests {
         let e = loaded.entries().next().unwrap();
         assert_eq!(e.kind.as_deref(), Some("skill"));
         assert_eq!(e.keywords, vec!["review", "quality"]);
+        assert_eq!(
+            e.deprecated.as_deref(),
+            Some("use acme/code-review-2"),
+            "deprecation message round-trips through disk"
+        );
         // Different registry ⇒ treated as cold cache.
         assert!(Catalog::load(&path, "ghcr.io").unwrap().is_none());
     }
@@ -1082,6 +1098,57 @@ mod tests {
         let json = r#"{"registry":"localhost:5000","repository":"acme/x","fetched_at":"2026-01-01T00:00:00Z"}"#;
         let e: CatalogEntry = serde_json::from_str(json).unwrap();
         assert_eq!(e.repository_url, None);
+        // The same envelope predates `deprecated` too ⇒ defaults to None.
+        assert_eq!(e.deprecated, None);
+    }
+
+    #[tokio::test]
+    async fn build_reads_deprecated_annotation() {
+        // A `com.grimoire.deprecated` annotation on the representative tag's
+        // manifest surfaces as the catalog entry's deprecation message.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let inner = MemoryRegistry::new();
+        let reg = "localhost:5000";
+        let id = Identifier::new_registry("acme/old-skill".to_string(), reg.to_string());
+        let mut manifest = skill_manifest("k", "d");
+        manifest.annotations.insert(
+            "com.grimoire.deprecated".to_string(),
+            "use acme/new-skill instead".to_string(),
+        );
+        let mdigest = inner.push_manifest(&id, &manifest).await.unwrap();
+        inner.put_tag(&id, "latest", &mdigest).await.unwrap();
+        let access: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(CatalogRegistry {
+            inner,
+            repos: vec!["acme/old-skill".to_string()],
+            registry: reg.to_string(),
+            blob_pulled: std::sync::Arc::new(Mutex::new(false)),
+        });
+        let cat = Catalog::load_or_refresh(&path, reg, "", &access, false, true)
+            .await
+            .unwrap();
+        let e = cat.entries().next().expect("one entry");
+        assert_eq!(e.deprecated.as_deref(), Some("use acme/new-skill instead"));
+
+        // A skill with no deprecation annotation stays None.
+        let cat2 = {
+            let inner = MemoryRegistry::new();
+            let id = Identifier::new_registry("acme/fresh".to_string(), reg.to_string());
+            let m = skill_manifest("k", "d");
+            let d = inner.push_manifest(&id, &m).await.unwrap();
+            inner.put_tag(&id, "latest", &d).await.unwrap();
+            let access: std::sync::Arc<dyn OciAccess> = std::sync::Arc::new(CatalogRegistry {
+                inner,
+                repos: vec!["acme/fresh".to_string()],
+                registry: reg.to_string(),
+                blob_pulled: std::sync::Arc::new(Mutex::new(false)),
+            });
+            let dir2 = tempfile::tempdir().unwrap();
+            Catalog::load_or_refresh(&dir2.path().join("c.json"), reg, "", &access, false, true)
+                .await
+                .unwrap()
+        };
+        assert_eq!(cat2.entries().next().unwrap().deprecated, None);
     }
 
     #[tokio::test]
@@ -1485,6 +1552,7 @@ mod tests {
             summary: Some("terse blurb".to_string()),
             keywords: vec!["lint".to_string()],
             repository_url: None,
+            deprecated: None,
             latest_tag: Some("latest".to_string()),
             version: None,
             fetched_at: ts(1),

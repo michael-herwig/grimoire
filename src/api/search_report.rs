@@ -3,18 +3,20 @@
 
 //! `grim search` output.
 //!
-//! Plain format: a 5-column table
+//! Plain format: a five-column table
 //! (Kind | Repo | Summary | Version | Status). The `Summary` cell shows the
 //! short summary, falling back to the (truncated) description; the `Version`
 //! cell shows the highest concrete (non-rolling) tag, falling back to the
-//! representative tag.
+//! representative tag. A deprecated row carries a comma-suffixed `deprecated`
+//! in its `Status` cell (e.g. `installed,deprecated`).
 //!
 //! JSON format: an array of
 //! `{kind, repo, summary, description, version, latest_tag, repository,
-//! status}` objects (the report wraps a `Vec`, serialized to the bare
-//! array — no wrapper object, per subsystem-cli-api.md). The `description`
-//! stays full and untruncated; both `version` and the representative
-//! `latest_tag` are kept; `repository` is the HTTPS source URL or `null`.
+//! deprecated, status}` objects (the report wraps a `Vec`, serialized to the
+//! bare array — no wrapper object, per subsystem-cli-api.md). The
+//! `description` stays full and untruncated; both `version` and the
+//! representative `latest_tag` are kept; `repository` is the HTTPS source URL
+//! or `null`; `deprecated` is the deprecation message or `null`.
 
 use std::io::{self, Write};
 
@@ -36,7 +38,7 @@ pub struct SearchEntry {
     /// for the plain-text column; the full `description` stays in JSON.
     pub summary: Option<String>,
     /// The HTTPS source-repository URL from the catalog read-back guard,
-    /// if any. JSON-only — the plain table stays five columns.
+    /// if any. JSON-only — never shown as its own plain-table column.
     pub repository: Option<String>,
     /// The representative tag the metadata was read from (may be the moving
     /// `latest` pointer). Kept in JSON for fidelity; the plain table shows
@@ -46,6 +48,10 @@ pub struct SearchEntry {
     /// semver. Shown in the plain `Version` column in preference to the
     /// moving `latest_tag`.
     pub version: Option<String>,
+    /// The publisher's deprecation message when the artifact is deprecated;
+    /// `None` otherwise. Surfaced as a comma-suffixed `deprecated` on the plain
+    /// `Status` cell and a dedicated `deprecated` field in JSON.
+    pub deprecated: Option<String>,
     /// How the repository relates to the current scope.
     pub status: StatusBadge,
 }
@@ -53,7 +59,7 @@ pub struct SearchEntry {
 impl Serialize for SearchEntry {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut s = serializer.serialize_struct("SearchEntry", 8)?;
+        let mut s = serializer.serialize_struct("SearchEntry", 9)?;
         s.serialize_field("kind", &self.kind)?;
         s.serialize_field("repo", &self.repo)?;
         s.serialize_field("summary", &self.summary)?;
@@ -61,6 +67,7 @@ impl Serialize for SearchEntry {
         s.serialize_field("version", &self.version)?;
         s.serialize_field("latest_tag", &self.latest_tag)?;
         s.serialize_field("repository", &self.repository)?;
+        s.serialize_field("deprecated", &self.deprecated)?;
         s.serialize_field("status", &self.status.to_string())?;
         s.end()
     }
@@ -110,23 +117,26 @@ impl Printable for SearchReport {
             .entries
             .iter()
             .map(|e| {
-                let blurb = e
-                    .summary
-                    .as_deref()
-                    .or(e.description.as_deref())
-                    .unwrap_or("-")
-                    .to_string();
+                let base = e.summary.as_deref().or(e.description.as_deref()).unwrap_or("-");
+                // Deprecation rides a comma-suffixed Status cell (e.g.
+                // `installed,deprecated`) — greppable, and keeping the Summary
+                // cell unmarked.
+                let status = if e.deprecated.is_some() {
+                    format!("{},deprecated", e.status)
+                } else {
+                    e.status.to_string()
+                };
                 vec![
                     e.kind.clone().unwrap_or_else(|| "-".to_string()),
                     e.repo.clone(),
-                    blurb,
+                    base.to_string(),
                     // Prefer the concrete (non-rolling) version; fall back to
                     // the representative tag only when no semver tag exists.
                     e.version
                         .clone()
                         .or_else(|| e.latest_tag.clone())
                         .unwrap_or_else(|| "-".to_string()),
-                    e.status.to_string(),
+                    status,
                 ]
             })
             .collect();
@@ -169,6 +179,7 @@ mod tests {
             description: Some("desc".to_string()),
             latest_tag: Some("latest".to_string()),
             version: None,
+            deprecated: None,
             status,
         }
     }
@@ -218,6 +229,7 @@ mod tests {
             description: None,
             latest_tag: Some("latest".to_string()),
             version: Some("2.1.0".to_string()),
+            deprecated: None,
             status: StatusBadge::Installed,
         };
         let mut buf = Vec::new();
@@ -239,6 +251,7 @@ mod tests {
             description: Some("d".to_string()),
             latest_tag: Some("stable".to_string()),
             version: None,
+            deprecated: None,
             status: StatusBadge::NotInstalled,
         };
         let mut buf = Vec::new();
@@ -257,6 +270,7 @@ mod tests {
             description: Some("a much longer description that should be hidden".to_string()),
             latest_tag: Some("latest".to_string()),
             version: None,
+            deprecated: None,
             status: StatusBadge::Installed,
         };
         let mut buf = Vec::new();
@@ -276,6 +290,7 @@ mod tests {
             description: Some("the description text".to_string()),
             latest_tag: Some("latest".to_string()),
             version: None,
+            deprecated: None,
             status: StatusBadge::NotInstalled,
         };
         let mut buf = Vec::new();
@@ -297,6 +312,7 @@ mod tests {
             description: None,
             latest_tag: Some("latest".to_string()),
             version: None,
+            deprecated: None,
             status: StatusBadge::Installed,
         };
         let mut buf = Vec::new();
@@ -316,6 +332,7 @@ mod tests {
             description: Some("the full long description".to_string()),
             latest_tag: Some("latest".to_string()),
             version: Some("1.2.0".to_string()),
+            deprecated: None,
             status: StatusBadge::Installed,
         };
         let mut buf = Vec::new();
@@ -348,6 +365,42 @@ mod tests {
         SearchReport::new(vec![e]).print_plain(&mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(!out.contains("github.com"), "plain table unchanged");
+    }
+
+    #[test]
+    fn plain_marks_deprecated_in_status_json_carries_message() {
+        let mut e = entry("localhost:5000/acme/x", StatusBadge::Installed);
+        e.summary = Some("a reviewer".to_string());
+        e.deprecated = Some("use acme/x-2".to_string());
+        // Plain: the Status cell gains a comma-suffixed `deprecated`; the blurb
+        // cell stays unmarked (no `[deprecated]` prefix).
+        let mut buf = Vec::new();
+        SearchReport::new(vec![e.clone()]).print_plain(&mut buf).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            out.contains("installed,deprecated"),
+            "Status cell carries the deprecated suffix: {out}"
+        );
+        assert!(out.contains("a reviewer"), "blurb is still shown: {out}");
+        assert!(!out.contains("[deprecated]"), "the blurb prefix is gone: {out}");
+        // JSON: the deprecation message rides a dedicated field.
+        let mut buf = Vec::new();
+        SearchReport::new(vec![e]).print_json(&mut buf).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v[0]["deprecated"], "use acme/x-2");
+        // A non-deprecated row carries no suffix and a null field.
+        let mut buf = Vec::new();
+        SearchReport::new(vec![entry("localhost:5000/acme/y", StatusBadge::Installed)])
+            .print_json(&mut buf)
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert!(v[0]["deprecated"].is_null(), "key present, null when not deprecated");
+        let mut buf = Vec::new();
+        SearchReport::new(vec![entry("localhost:5000/acme/y", StatusBadge::Installed)])
+            .print_plain(&mut buf)
+            .unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(!out.contains("deprecated"), "non-deprecated row is unmarked");
     }
 
     #[test]

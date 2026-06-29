@@ -50,6 +50,7 @@ Published catalog (a small **version matrix** — most artifacts ship one
 | skill | `localhost:5050/grimoire/skills/code-reviewer` | 1.0.0, 1.1.0, 1.2.0 (1.3.0 via `release-update.sh`) |
 | skill | `localhost:5050/grimoire/skills/commit-helper` | 1.0.0, 2.0.0 |
 | skill | `localhost:5050/grimoire/skills/architecture-guide` | 1.0.0 |
+| skill | `localhost:5050/grimoire/skills/old-reviewer` | 1.0.0 (deprecated — drives the deprecation surface) |
 | rule | `localhost:5050/grimoire/rules/rust-style` | 1.0.0, 1.1.0 |
 | rule | `localhost:5050/grimoire/rules/security-baseline` | 1.0.0 |
 | rule | `localhost:5050/grimoire/rules/architecture-guide` | 1.0.0 |
@@ -136,6 +137,30 @@ subtree. Press `t` again to return to the flat list — marks survive the
 toggle. Add `tree_separators = ["/", "-"]` to `test/manual/project/grimoire.toml`
 under `[options.tui]` to see `code-reviewer` and `commit-helper` split
 further at the hyphen.
+
+### 1b. Deprecated package highlight (issue #15)
+
+`old-reviewer` ships `metadata.deprecated`, published as the
+`com.grimoire.deprecated` annotation. The notice surfaces on all three
+discovery/acquisition paths:
+
+```sh
+grim search old-reviewer                  # plain: Status cell reads "...,deprecated"
+grim search old-reviewer --format json    # JSON: a "deprecated" field carries the message
+grim tui                                   # yellow "⚠ deprecated" after the status label in the Status column; detail pane (enter) shows Deprecated:
+```
+
+Acquiring the reference warns on stderr (the add still succeeds):
+
+```sh
+cd test/manual/project
+grim add localhost:5050/grimoire/skills/old-reviewer:1
+# stderr: "...old-reviewer:1 is deprecated: superseded by code-reviewer — migrate before the next release"
+```
+
+A current package (e.g. `code-reviewer`) carries no marker, a `null`
+`deprecated` JSON field, and warns on neither search nor add — the contrast
+is the point.
 
 ### 2. Lock & install into a client
 

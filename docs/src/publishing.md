@@ -50,7 +50,7 @@ transformed. A rule with no support directory packs to exactly the single
 
 [`grim search`](./commands.md#search) and the [TUI](./commands.md#tui) list
 every match in a table. To make a result legible and findable, an artifact
-carries four pieces of catalog metadata, all optional:
+carries five pieces of catalog metadata, all optional:
 
 | Field | Annotation | Purpose |
 |-------|-----------|---------|
@@ -58,6 +58,7 @@ carries four pieces of catalog metadata, all optional:
 | `keywords` | `com.grimoire.keywords` | Comma-separated terms that search matches. |
 | `description` | `org.opencontainers.image.description` | The full description. |
 | `repository` | `org.opencontainers.image.source` | HTTPS URL of the artifact's source repository ([details](#metadata-repository)). |
+| `deprecated` | `com.grimoire.deprecated` | A deprecation notice; marks the package deprecated and flags it everywhere ([details](#metadata-deprecated)). |
 
 `grim search` shows the `summary` in place of the `description`, truncated to
 fit the terminal; the full description stays in `--format json` and in piped
@@ -161,6 +162,45 @@ behavior and stamps the tagless release reference there instead. The
 [TUI](./commands.md#tui) shows the URL in the detail pane and opens it
 with the `o` key; `grim search --format json` exposes it as the
 `repository` field.
+
+### Deprecating a package {#metadata-deprecated}
+
+`deprecated` retires a package without unpublishing it. Author a short
+notice — ideally naming the replacement — and the package keeps resolving
+and installing, but grim flags it at every point a consumer might reach for
+it. The notice is the message; an empty or whitespace-only value means *not*
+deprecated, so no annotation is emitted.
+
+```yaml
+# code-review/SKILL.md (skill / agent: under the metadata map)
+metadata:
+  deprecated: use acme/code-review-2 instead
+```
+
+```yaml
+# rust-style.md (rule: top-level, like summary)
+deprecated: superseded by rust-style-2
+```
+
+```toml
+# python-stack.toml (bundle: top-level)
+deprecated = "migrate to python-stack-2"
+```
+
+Because the notice rides the `com.grimoire.deprecated` annotation on the
+manifest, every surface reads it back without unpacking the artifact:
+
+- [`grim search`](./commands.md#search) appends a comma-suffixed `deprecated`
+  to the result's `Status` cell (e.g. `installed,deprecated`) and exposes the
+  message as a `deprecated` field in `--format json`.
+- The [TUI](./commands.md#tui) appends a yellow `⚠ deprecated` after the
+  install-status label in the `Status` column (explained in the legend) and
+  shows the full notice in the detail pane.
+- [`grim add`](./commands.md#add) prints the notice on stderr when you
+  acquire a deprecated reference (the add still succeeds).
+
+A re-release with the notice removed clears the deprecation — the annotation
+simply stops being emitted.
 
 ## Validate before you push
 

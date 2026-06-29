@@ -39,7 +39,7 @@ every client.
 | `description` | yes | When a client should delegate to this agent |
 | `model` | no | Passed through verbatim — **no alias translation** between clients |
 | `tools` | no | Comma-separated allowlist, projected per client (string vs. list) |
-| `metadata` | no | Catalog keys (`summary`, `keywords`, `repository`) **plus** vendor keys — agent catalog metadata lives inside `metadata`, like a skill |
+| `metadata` | no | Catalog keys (`summary`, `keywords`, `repository`, `deprecated`) **plus** vendor keys — agent catalog metadata lives inside `metadata`, like a skill |
 
 ## Vendor Overrides
 

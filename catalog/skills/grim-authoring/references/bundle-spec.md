@@ -27,6 +27,7 @@ tables — not in any nested map:
 | `keywords` | One comma-separated string — a TOML array is rejected |
 | `description` | Overrides the automatic `grimoire bundle of N members` |
 | `repository` | `https://` source URL; anything else fails release (exit 65) |
+| `deprecated` | Deprecation notice; non-empty marks the bundle deprecated (flagged in search/TUI, warned on `add`) |
 
 The bundle source parser is **strict** (`deny_unknown_fields`): any key
 outside this set and the three member tables is a hard parse error.

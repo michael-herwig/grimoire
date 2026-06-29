@@ -300,6 +300,9 @@ pub struct BundleMetadata {
     /// HTTPS URL to the source repository → `org.opencontainers.image.source`
     /// (validated `https://` at publish time).
     pub repository: Option<String>,
+    /// Deprecation notice → `com.grimoire.deprecated`. A non-empty message
+    /// marks the bundle deprecated; emitted only when present.
+    pub deprecated: Option<String>,
 }
 
 /// A parsed bundle source: validated members plus catalog metadata.
@@ -354,6 +357,8 @@ struct RawBundleSource {
     description: Option<String>,
     #[serde(default)]
     repository: Option<String>,
+    #[serde(default)]
+    deprecated: Option<String>,
 }
 
 /// Parse + validate a bundle source: members through [`parse_artifact_map`],
@@ -373,6 +378,7 @@ fn parse_bundle_source(s: &str, path: PathBuf) -> Result<BundleSource, ConfigErr
             keywords: raw.keywords,
             description: raw.description,
             repository: raw.repository,
+            deprecated: raw.deprecated,
         },
     })
 }
@@ -854,6 +860,19 @@ rust-style = "ghcr.io/acme/rust-style:2"
             src.metadata.repository.as_deref(),
             Some("https://github.com/acme/python-stack")
         );
+    }
+
+    #[test]
+    fn bundle_source_reads_deprecated_metadata() {
+        let src = BundleSource::from_toml_str(
+            "deprecated = \"migrate to python-stack-2\"\n\n[skills]\ncode-review = \"ghcr.io/acme/code-review:1\"\n",
+        )
+        .expect("parse");
+        assert_eq!(src.metadata.deprecated.as_deref(), Some("migrate to python-stack-2"));
+        // Absent ⇒ None (bundle is not deprecated).
+        let plain =
+            BundleSource::from_toml_str("[skills]\ncode-review = \"ghcr.io/acme/code-review:1\"\n").expect("parse");
+        assert_eq!(plain.metadata.deprecated, None);
     }
 
     #[test]
