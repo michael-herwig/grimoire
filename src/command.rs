@@ -11,6 +11,7 @@
 pub mod add;
 pub mod build;
 pub mod command_error;
+pub mod config;
 pub mod init;
 pub mod install;
 pub mod lock;
@@ -198,6 +199,22 @@ pub fn primary_registry_global_fallback(ctx: &crate::context::Context) -> String
 pub fn login_usage(message: &'static str) -> anyhow::Error {
     anyhow::Error::from(crate::error::Error::from(command_error::CommandError::LoginInput(
         message,
+    )))
+}
+
+/// Build a classifiable usage error (exit 64) for `grim config`: unknown
+/// key, duplicate alias, or other contract violation.
+pub fn config_usage(msg: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::from(crate::error::Error::from(command_error::CommandError::ConfigUsage(
+        msg.into(),
+    )))
+}
+
+/// Build a classifiable data error (exit 65) for `grim config set`: a
+/// syntactically valid but semantically rejected value.
+pub fn config_value(msg: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::from(crate::error::Error::from(command_error::CommandError::ConfigValue(
+        msg.into(),
     )))
 }
 

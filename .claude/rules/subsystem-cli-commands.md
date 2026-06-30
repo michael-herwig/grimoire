@@ -18,6 +18,8 @@ column formats.
 
 | Command | Purpose |
 |---------|---------|
+| `grim config get\|set\|unset\|list <key>` | Read and write `grimoire.toml` settings (`[options]`, `[options.tui]`) and registry fields via dotted keys; `list [--show-origin]` dumps explicitly-set values for the active scope (never merged across scopes). Exit codes: unset `get` → 1, unknown key → 64, bad value → 65. |
+| `grim config registry add\|rm\|use\|show\|list` | Registry lifecycle for `[[registries]]` entries: `add <alias> --url <url> [--default]`, `rm <alias>`, `use <alias>` (at-most-one-default, clears prior), `show <alias>`, `list`. Alias not found or dup on `add` → 64. |
 | `grim install <ref>` | Fetch and install an AI-config artifact (skill/rule set) |
 | `grim list` | List installed artifacts |
 | `grim update [<ref>]` | Pull newer versions |

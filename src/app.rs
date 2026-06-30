@@ -40,6 +40,11 @@ pub async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     // `Printable` has generic methods (not object-safe), so render inside
     // each arm with the concrete report type rather than boxing.
     let code = match command {
+        Command::Config(args) => {
+            let (r, c) = crate::command::config::run(&ctx, &args).await?;
+            render(&r, format)?;
+            c
+        }
         Command::Init(args) => {
             let (r, c) = crate::command::init::run(&ctx, &args).await?;
             render(&r, format)?;

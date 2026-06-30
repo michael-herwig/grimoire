@@ -25,6 +25,7 @@ These apply to every subcommand:
 | Command | Purpose |
 |---------|---------|
 | [`grim init`](#init) | Create a fresh `grimoire.toml`. |
+| [`grim config`](#config) | Read and write `grimoire.toml` settings and registries. |
 | [`grim add`](#add) | Declare a skill/rule/agent and lock it. |
 | [`grim lock`](#lock) | Resolve declared floating tags to pinned digests. |
 | [`grim install`](#install) | Materialize the locked artifacts into your AI client(s). |
@@ -54,6 +55,94 @@ instead of a project-local one.
 ```sh
 grim init --registry ghcr.io/acme
 ```
+
+## grim config {#config}
+
+`grim config` reads and writes `grimoire.toml`, modeled on [`git config`][git-config]. Before it existed, querying a setting or scripting a config change required hand-editing TOML and relying on the next command run to catch typos.
+
+The command covers two areas of the file: **settings** (the `[options]` and `[options.tui]` tables) and **named registries** (the `[[registries]]` array). Declarations — the `[skills]`, `[rules]`, `[agents]`, and `[bundles]` tables — remain under [`grim add`](#add) and [`grim remove`](#remove), which must re-resolve the lockfile on every change.
+
+Scope follows the same rule as every config-aware command: without a flag, `grim config` discovers and edits the project `grimoire.toml` by walking up from the working directory; `--global` targets `$GRIM_HOME/grimoire.toml`; `--config <path>` selects an explicit project file.
+
+Every write re-runs registry validation before touching the file, so the at-most-one-`default` constraint and alias rules always hold. The serializer is shared with [`grim add`](#add) and [`grim remove`](#remove) — **comments and the `#:schema` directive are not preserved on any write**.
+
+### Settings {#config-settings}
+
+Four verbs operate on dotted keys:
+
+```sh
+grim config get   options.clients
+grim config set   options.clients claude,opencode
+grim config unset options.tui.default_view
+grim config list
+```
+
+`get` prints the bare value on a single line with no key name or table header, so `$(grim config get options.clients)` works directly in shell. A valid-but-unset key exits `1` with no stdout — the same contract as [`git config`][git-config]: `grim config get options.clients || echo default`. An unknown key (typo or unsupported leaf) exits `64` without reading the config.
+
+`set` and `unset` print a one-row confirmation table with `Action`, `Key`, `Value`, and `Scope` columns.
+
+`list` shows every explicitly-set key and value for the active scope — keys at their default or absent values are omitted. Each invocation reads from exactly one scope, so origin is implicit in the scope flag used. Scopes are never merged: `grim config --global list` shows only global values, project `list` shows only project values.
+
+The supported dotted keys are:
+
+| Key | Value type | Notes |
+|-----|------------|-------|
+| `options.clients` | comma-separated client names | e.g. `claude,opencode`. Empty string clears the list. |
+| `options.default_registry` | string | Legacy field — prefer `grim config registry use` for new configs. |
+| `options.tui.default_view` | `flat` or `tree` | Other values exit `65`. |
+| `options.tui.group_by_type` | `true` or `false` | `false` is the default; setting it to `false` removes the key, so a subsequent `get` exits 1 (consistent with `list`, which omits default values). |
+| `options.tui.tree_separators` | comma-separated single-character strings | Each character must be non-control and non-whitespace; other values exit `65`. |
+| `registry.<alias>.url` | string | The registry entry must already exist. Cannot be unset (URL is required); use `grim config registry rm <alias>` to remove the whole entry. |
+| `registry.<alias>.default` | `true` or `false` | Setting to `true` clears all other entries' `default` flag, the same as `grim config registry use`. |
+
+Registry dotted keys require the entry to already exist — only `grim config registry add` creates entries. Passing `registry.<alias>` without a trailing field to `unset` removes the whole entry, equivalent to `grim config registry rm <alias>`.
+
+### Registry lifecycle {#config-registry}
+
+`grim config registry` manages the `[[registries]]` array through dedicated lifecycle verbs:
+
+```sh
+grim config registry add  acme --url ghcr.io/acme
+grim config registry add  acme --url ghcr.io/acme --default
+grim config registry use  acme     # mark as default; clears the prior default
+grim config registry show acme     # print one registry's fields
+grim config registry rm   acme
+grim config registry list
+```
+
+`registry add` requires `--url`. Adding an alias that already exists exits `64` — update the URL with `grim config set registry.<alias>.url <new-url>`, or remove and re-add.
+
+`registry use` is the correct way to change the default registry. It sets the target entry's `default` flag and clears the flag on all others in one atomic write. Dotted `grim config set registry.<alias>.default true` routes through the same logic.
+
+`registry list` shows all `[[registries]]` entries in the scope. Entries without an alias (url-only entries hand-authored before aliases were introduced) appear with an empty `Alias` cell and are **not addressable by dotted key** — assign them an alias to manage them with `grim config`.
+
+### JSON output {#config-json}
+
+Add `--format json` to any subcommand for machine-readable output. The shapes are:
+
+| Subcommand | JSON shape |
+|-----------|------------|
+| `get` (value set) | `{"key":"…","value":"…","set":true,"scope":"project"\|"global"}` |
+| `get` (unset, exits 1) | `{"key":"…","value":null,"set":false,"scope":"project"\|"global"}` |
+| `set` / `unset` / `registry add`, `rm`, `use` | `{"action":"…","key":"…","value":string or null,"scope":"…"}` |
+| `list` | array of `{"key":"…","value":"…"}` |
+| `registry list` | array of `{"alias":string or null,"url":"…","default":bool}` |
+| `registry show` | `{"alias":"…","url":"…","default":bool}` |
+
+The `action` field in write confirmations takes one of: `set`, `unset`, `registry-added`, `registry-removed`, `registry-default`. The `scope` field is `project` or `global`.
+
+### Exit codes {#config-exit-codes}
+
+| Situation | Code |
+|-----------|------|
+| Success | `0` |
+| `get` of a valid-but-unset key (no stdout) | `1` |
+| Unknown key name / missing or duplicate alias / bad subcommand args | `64` |
+| Invalid value (bad enum, non-boolean, bad separator character) | `65` |
+| Write or lock I/O failure | `74` |
+| Concurrent write that can't acquire the config lock | `75` |
+| Config file parse failure | `78` |
+| Explicit `--config <path>` not found, or required config absent | `79` |
 
 ## grim add {#add}
 
@@ -487,6 +576,7 @@ the global scope rather than the discovered project:
 [options-tui]: ./configuration.md#options-tui
 
 <!-- external -->
+[git-config]: https://git-scm.com/docs/git-config
 [vscode-compact]: https://code.visualstudio.com/docs/getstarted/userinterface
 [mcp-spec]: https://spec.modelcontextprotocol.io/
 [claude-code]: https://docs.anthropic.com/en/docs/claude-code

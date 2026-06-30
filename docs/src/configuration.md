@@ -1,8 +1,13 @@
 # Configuration
 
 Grimoire keeps configuration in two small files and a handful of environment
-variables. The files are managed by the commands — you rarely edit them by
-hand — but it helps to know their shape.
+variables. Settings (`[options]`, `[options.tui]`) and named registries
+(`[[registries]]`) are managed through [`grim config`][grim-config]; declarations
+(`[skills]`, `[rules]`, `[agents]`, `[bundles]`) stay under [`grim add`][grim-add]
+and [`grim remove`][grim-remove]. You can also hand-edit either file directly,
+but note that **any `grim` write — `grim config`, `grim add`, `grim remove` — uses a
+lossy serializer: comments and the `#:schema` directive are removed** on every
+write.
 
 ## `grimoire.toml`
 
@@ -330,6 +335,9 @@ state file is kept out of version control without touching your root
 
 <!-- internal -->
 [grim-tui]: ./commands.md#tui
+[grim-config]: ./commands.md#config
+[grim-add]: ./commands.md#add
+[grim-remove]: ./commands.md#remove
 
 <!-- external -->
 [ghcr]: https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry

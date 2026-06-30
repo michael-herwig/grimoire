@@ -44,6 +44,7 @@ use crate::cli::exit_code::ExitCode;
 use crate::cli::options::GlobalOptions;
 use crate::command::add::AddArgs;
 use crate::command::build::BuildArgs;
+use crate::command::config::ConfigArgs;
 use crate::command::init::InitArgs;
 use crate::command::install::InstallArgs;
 use crate::command::lock::LockArgs;
@@ -78,6 +79,8 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Read and write `grimoire.toml` settings and registries.
+    Config(ConfigArgs),
     /// Create a fresh `grimoire.toml`.
     Init(InitArgs),
     /// Resolve declared floating tags to pinned digests in `grimoire.lock`.

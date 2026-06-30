@@ -105,6 +105,8 @@ pub fn classify_error(err: &anyhow::Error) -> ExitCode {
                     CommandError::NoLoginRegistry => ExitCode::ConfigError,
                     CommandError::LoginInput(_) => ExitCode::UsageError,
                     CommandError::KindInferenceFailed { .. } => ExitCode::DataError,
+                    CommandError::ConfigUsage(_) => ExitCode::UsageError,
+                    CommandError::ConfigValue(_) => ExitCode::DataError,
                 },
             };
         }

@@ -181,7 +181,7 @@ fn parse_config(s: &str, path: PathBuf) -> Result<ProjectConfig, ConfigError> {
 /// sets `default = true`. At-most-one default is checked after the
 /// per-entry structural checks so a `default = true` entry necessarily
 /// already has a non-empty url — no separate check needed.
-fn validate_registries(registries: &[RegistryConfig], path: &Path) -> Result<(), ConfigError> {
+pub(crate) fn validate_registries(registries: &[RegistryConfig], path: &Path) -> Result<(), ConfigError> {
     let mut seen_aliases = std::collections::BTreeSet::new();
     for rc in registries {
         if rc.url.trim().is_empty() {
@@ -224,6 +224,14 @@ fn validate_registries(registries: &[RegistryConfig], path: &Path) -> Result<(),
                     path.to_path_buf(),
                     ConfigErrorKind::RegistryInvalid {
                         reason: format!("alias '{alias}' must not contain control characters"),
+                    },
+                ));
+            }
+            if alias.contains('"') || alias.contains('\\') {
+                return Err(ConfigError::new(
+                    path.to_path_buf(),
+                    ConfigErrorKind::RegistryInvalid {
+                        reason: format!("alias '{alias}' must not contain '\"' or '\\'"),
                     },
                 ));
             }

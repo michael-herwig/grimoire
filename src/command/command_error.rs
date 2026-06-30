@@ -41,6 +41,16 @@ pub enum CommandError {
     /// `--kind`.
     #[error("could not infer the kind of '{reference}'; pass --kind skill|rule|bundle")]
     KindInferenceFailed { reference: String },
+
+    /// `config` received an unknown dotted key, a duplicate alias, or
+    /// another input that violates the command contract (exit 64).
+    #[error("{0}")]
+    ConfigUsage(String),
+
+    /// `config set` received a value that is syntactically valid but
+    /// semantically rejected (exit 65).
+    #[error("{0}")]
+    ConfigValue(String),
 }
 
 #[cfg(test)]

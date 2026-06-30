@@ -12,6 +12,7 @@
 pub mod add_report;
 pub mod artifact_status;
 pub mod build_report;
+pub mod config_report;
 pub mod init_report;
 pub mod install_report;
 pub mod lock_report;
@@ -30,6 +31,11 @@ pub use add_report::{AddReport, AddStatus};
 pub use artifact_status::{ArtifactStatus, InitStatus, InstallStatus, LockAction, UpdateAction};
 #[allow(unused_imports)]
 pub use build_report::{BuildReport, BuildStatus};
+#[allow(unused_imports)]
+pub use config_report::{
+    ConfigEntry, ConfigGetReport, ConfigListReport, ConfigReport, ConfigWriteReport, Origin, RegistryListReport,
+    RegistryRow, RegistryShowReport, WriteAction,
+};
 #[allow(unused_imports)]
 pub use init_report::InitReport;
 #[allow(unused_imports)]

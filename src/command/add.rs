@@ -330,13 +330,13 @@ pub(crate) fn write_config(
     if has_base_options || has_tui_options {
         out.push_str("[options]\n");
         if let Some(r) = &options.default_registry {
-            let _ = writeln!(out, "default_registry = \"{r}\"");
+            let _ = writeln!(out, "default_registry = {}", toml::Value::String(r.clone()));
         }
         if !options.clients.is_empty() {
             let list = options
                 .clients
                 .iter()
-                .map(|c| format!("\"{c}\""))
+                .map(|c| toml::Value::String(c.clone()).to_string())
                 .collect::<Vec<_>>()
                 .join(", ");
             let _ = writeln!(out, "clients = [{list}]");
@@ -372,9 +372,9 @@ pub(crate) fn write_config(
     for rc in registries {
         out.push_str("[[registries]]\n");
         if let Some(alias) = &rc.alias {
-            let _ = writeln!(out, "alias = \"{alias}\"");
+            let _ = writeln!(out, "alias = {}", toml::Value::String(alias.clone()));
         }
-        let _ = writeln!(out, "url = \"{}\"", rc.url);
+        let _ = writeln!(out, "url = {}", toml::Value::String(rc.url.clone()));
         if rc.default {
             let _ = writeln!(out, "default = true");
         }
@@ -383,22 +383,22 @@ pub(crate) fn write_config(
     if !set.bundles.is_empty() {
         out.push_str("[bundles]\n");
         for (name, id) in &set.bundles {
-            let _ = writeln!(out, "{name} = \"{id}\"");
+            let _ = writeln!(out, "{name} = {}", toml::Value::String(id.to_string()));
         }
         out.push('\n');
     }
     out.push_str("[skills]\n");
     for (name, id) in &set.skills {
-        let _ = writeln!(out, "{name} = \"{id}\"");
+        let _ = writeln!(out, "{name} = {}", toml::Value::String(id.to_string()));
     }
     out.push_str("\n[rules]\n");
     for (name, id) in &set.rules {
-        let _ = writeln!(out, "{name} = \"{id}\"");
+        let _ = writeln!(out, "{name} = {}", toml::Value::String(id.to_string()));
     }
     if !set.agents.is_empty() {
         out.push_str("\n[agents]\n");
         for (name, id) in &set.agents {
-            let _ = writeln!(out, "{name} = \"{id}\"");
+            let _ = writeln!(out, "{name} = {}", toml::Value::String(id.to_string()));
         }
     }
 
