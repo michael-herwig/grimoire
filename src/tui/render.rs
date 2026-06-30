@@ -715,14 +715,27 @@ pub fn frame(state: &TuiState) -> RenderModel {
             .enumerate()
             .filter_map(|(pos, &i)| state.rows.get(i).map(|r| (pos, i, r)))
             .map(|(pos, i, r)| {
-                let (repo_text, registry) = if multi {
-                    // Shorten to registry-relative repository; show registry label.
-                    (r.repository.as_str(), Some(state.registry_label(&r.registry)))
+                let (repo_text, registry): (std::borrow::Cow<str>, Option<String>) = if multi {
+                    // Attribute the bare-host row to its configured registry (the
+                    // same split the tree uses): show that registry's label and
+                    // shorten Repo to the path relative to it. Using `r.registry`
+                    // directly would show the bare host and an un-shortened repo.
+                    let configured: Vec<&str> = state
+                        .registry_order
+                        .iter()
+                        .map(String::as_str)
+                        .chain(state.default_registry.as_deref())
+                        .collect();
+                    let (reg, rel) = super::tree::attribute_registry(&r.registry, &r.repository, &configured);
+                    (std::borrow::Cow::Owned(rel), Some(state.registry_label(&reg)))
                 } else {
                     // Single-registry: existing elision behavior (D-ELIDE).
-                    (strip_default_registry(&r.repo, state.default_registry.as_deref()), None)
+                    (
+                        std::borrow::Cow::Borrowed(strip_default_registry(&r.repo, state.default_registry.as_deref())),
+                        None,
+                    )
                 };
-                render_leaf(r, repo_text, pos == state.selected, state.is_row_marked(i), registry)
+                render_leaf(r, &repo_text, pos == state.selected, state.is_row_marked(i), registry)
             })
             .collect()
     };
@@ -2879,6 +2892,46 @@ mod spec_multi_registry_render_tests {
             Some("ghcr.io/other"),
             "row 1 must carry registry label"
         );
+    }
+
+    // Bare-host namespaced rows (exactly what the catalog produces:
+    // registry = host, namespace folded into the repository) must attribute to
+    // their configured registry in flat multi-registry mode — the Repo cell is
+    // registry-relative (namespace stripped) and the Registry column shows the
+    // configured registry, NOT the bare host. Guards the same duplicate-roots
+    // bug as the tree tests, on the flat-list path.
+    #[test]
+    fn spec_flat_multi_registry_bare_host_row_attributes_to_configured() {
+        let mut s = TuiState::new();
+        s.set_rows(vec![
+            row_with_reg("localhost:5050", "grimoire/skills/a", ArtifactState::NotInstalled),
+            row_with_reg("localhost:5051", "tools/skills/b", ArtifactState::NotInstalled),
+        ]);
+        s.set_registry_order(vec!["localhost:5050/grimoire".into(), "localhost:5051/tools".into()]);
+        assert_eq!(s.view_mode, ViewMode::Flat);
+        let m = frame(&s);
+        assert!(
+            m.show_registry_column,
+            "flat multi-registry must set show_registry_column"
+        );
+        // Repo cell relative to the configured registry (namespace stripped).
+        assert_eq!(
+            m.rows[0].columns[0].trim(),
+            fit("skills/a", W_REPO).trim(),
+            "Repo cell must be relative to localhost:5050/grimoire (namespace 'grimoire' stripped)"
+        );
+        assert_eq!(
+            m.rows[1].columns[0].trim(),
+            fit("skills/b", W_REPO).trim(),
+            "Repo cell must be relative to localhost:5051/tools (namespace 'tools' stripped)"
+        );
+        // Registry column shows the configured registry (full url), not bare host.
+        assert_eq!(
+            m.rows[0].registry.as_deref(),
+            Some("localhost:5050/grimoire"),
+            "Registry column must show the configured registry, not the bare host"
+        );
+        assert_eq!(m.rows[1].registry.as_deref(), Some("localhost:5051/tools"));
     }
 
     // A: single-registry flat view → show_registry_column false, behavior unchanged.

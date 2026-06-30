@@ -461,24 +461,41 @@ pub fn build(rows: &[TuiRow], filtered: &[usize], opts: &TreeBuildOptions) -> Tr
     // exempt that namespace from compression.
     let mut exempt: BTreeSet<(usize, String)> = BTreeSet::new();
 
+    // The configured registries the tree groups by: the multi-registry browse
+    // set (`registry_order`) plus the single-registry `default_registry`. Rows
+    // arrive with a BARE-HOST registry and the namespace folded into the
+    // repository (`registry="localhost:5050"`, `repository="grimoire/skills/x"`)
+    // — that is the `Identifier::parse` split the lock/install-state match on,
+    // so it must NOT change. `attribute_registry` re-splits each row at the
+    // configured registry boundary purely for grouping/display.
+    let configured: Vec<&str> = opts
+        .registry_order
+        .iter()
+        .map(String::as_str)
+        .chain(opts.default_registry.as_deref())
+        .collect();
+
     for &i in filtered {
         let Some(r) = rows.get(i) else {
             continue;
         };
+        // Attribute the row to its configured registry (full host + namespace)
+        // and the path relative to it, by longest-prefix match on the full ref.
+        // A no-op when the row's registry already equals a configured one (the
+        // non-namespaced case and the synthetic full-url test rows).
+        let (registry, repository) = attribute_registry(&r.registry, &r.repository, &configured);
+
         // `registry_elided` is the single source of truth from `segments()`.
         // It is true when the full `default_registry` prefix (including any
         // namespace such as "ghcr.io/acme") was stripped. `build()` must NOT
         // re-derive this with a host-only comparison — that was A1's bug.
-        //
-        // C5 / D-TREE: pass the authoritative `registry` and `repository`
-        // fields directly so namespaced registries never require re-splitting.
         let (mut groups, leaf, registry_elided) =
-            segments(&r.registry, &r.repository, opts.default_registry.as_deref(), &sep_chars);
+            segments(&registry, &repository, opts.default_registry.as_deref(), &sep_chars);
 
         // A kept (non-elided) registry root anchors the alias + health line.
         // Registry roots are always depth 0.
         if !registry_elided {
-            exempt.insert((0, r.registry.clone()));
+            exempt.insert((0, registry.clone()));
         }
 
         // Insert a type-level group between the registry root and the path
@@ -493,7 +510,7 @@ pub fn build(rows: &[TuiRow], filtered: &[usize], opts: &TreeBuildOptions) -> Tr
             let type_key = if registry_elided {
                 r.kind.clone()
             } else {
-                format!("{}/{}", r.registry, r.kind)
+                format!("{registry}/{}", r.kind)
             };
             exempt.insert((type_depth, type_key));
             groups.insert(type_depth, r.kind.clone());
@@ -544,6 +561,35 @@ pub fn build(rows: &[TuiRow], filtered: &[usize], opts: &TreeBuildOptions) -> Tr
     let roots = roots.into_iter().map(|node| compress(node, &exempt, 0)).collect();
 
     Tree { roots }
+}
+
+/// Re-attribute a catalog row to the configured registry it belongs to, for
+/// tree grouping. The catalog stores rows with a bare-host registry and the
+/// namespace folded into the repository (`registry="localhost:5050"`,
+/// `repository="grimoire/skills/x"`) because that is how `Identifier::parse`
+/// splits a ref and how the lock/install-state index it. The tree, however,
+/// groups by the *configured* registry (`localhost:5050/grimoire`).
+///
+/// Find the longest `configured` registry that is a prefix of the row's full
+/// `registry/repository` ref at a `/` boundary; return that registry and the
+/// repository relative to it. When no configured registry matches (or one
+/// equals the whole ref, leaving no repository) the row's own bare-host split
+/// is returned unchanged, so non-namespaced registries and the synthetic
+/// full-url test rows are a no-op.
+///
+/// Shared with the flat-list renderer (`render.rs`) so the Registry column and
+/// the shortened Repo cell attribute identically to the tree.
+pub(super) fn attribute_registry(registry: &str, repository: &str, configured: &[&str]) -> (String, String) {
+    let full = format!("{registry}/{repository}");
+    let best = configured
+        .iter()
+        .filter(|c| full.strip_prefix(**c).is_some_and(|rest| rest.starts_with('/')))
+        .max_by_key(|c| c.len());
+    match best {
+        // `c.len() + 1` skips the boundary '/'; the prefix guarantees it exists.
+        Some(c) => (c.to_string(), full[c.len() + 1..].to_string()),
+        None => (registry.to_string(), repository.to_string()),
+    }
 }
 
 /// Path-compress single-child group chains (issue #19, "longest empty
@@ -1245,6 +1291,108 @@ mod tests {
         );
     }
 
+    // ── Namespaced-registry attribution (TUI duplicate-roots bug) ─────────────
+    //
+    // The catalog stores rows with a BARE-HOST registry and the namespace
+    // folded into the repository (`registry="localhost:5050"`,
+    // `repository="grimoire/skills/x"`) — that is how `Identifier::parse`
+    // splits a ref, and the lock/install-state match on it. But the tree must
+    // group by the *configured* registry (`localhost:5050/grimoire`, from
+    // `registry_order`/`default_registry`). Before the fix the bare-host row
+    // produced a `localhost:5050` root with a nested `grimoire` segment while
+    // `registry_order` separately seeded an empty `localhost:5050/grimoire`
+    // root — duplicate, confused roots. `build()` must re-attribute the row to
+    // the configured registry by longest-prefix match on the full ref.
+
+    // Multi-registry: a bare-host row resolves to its configured namespaced
+    // root (namespace stripped into the relative path), NOT a bare-host root.
+    #[test]
+    fn bare_host_row_attributes_to_configured_namespaced_registry() {
+        let rows = vec![row2(
+            "localhost:5050",
+            "grimoire/skills/code-reviewer",
+            "skill",
+            ArtifactState::Installed,
+        )];
+        let opts = TreeBuildOptions {
+            default_registry: None,
+            group_by_type: false,
+            separators: vec!["/".to_string()],
+            registry_order: vec!["localhost:5050/grimoire".to_string()],
+        };
+        let t = build(&rows, &[0], &opts);
+        assert_eq!(
+            shape(&t),
+            vec![
+                ("localhost:5050/grimoire".to_string(), 0, true),
+                ("skills".to_string(), 1, true),
+                ("code-reviewer".to_string(), 2, false),
+            ],
+            "bare-host row must attribute to the configured namespaced root, not a bare 'localhost:5050' root"
+        );
+    }
+
+    // Two bare-host rows for two namespaced registries → exactly the two
+    // configured roots, no bare-host duplicates (the reported screenshot bug).
+    #[test]
+    fn two_namespaced_registries_no_duplicate_roots() {
+        let rows = vec![
+            row2(
+                "localhost:5050",
+                "grimoire/skills/a",
+                "skill",
+                ArtifactState::NotInstalled,
+            ),
+            row2("localhost:5051", "tools/skills/b", "skill", ArtifactState::NotInstalled),
+        ];
+        let opts = TreeBuildOptions {
+            default_registry: None,
+            group_by_type: false,
+            separators: vec!["/".to_string()],
+            registry_order: vec![
+                "localhost:5050/grimoire".to_string(),
+                "localhost:5051/tools".to_string(),
+            ],
+        };
+        let t = build(&rows, &[0, 1], &opts);
+        assert_eq!(
+            shape(&t),
+            vec![
+                ("localhost:5050/grimoire".to_string(), 0, true),
+                ("skills".to_string(), 1, true),
+                ("a".to_string(), 2, false),
+                ("localhost:5051/tools".to_string(), 0, true),
+                ("skills".to_string(), 1, true),
+                ("b".to_string(), 2, false),
+            ],
+            "two namespaced registries must yield exactly two configured roots, no bare-host duplicates"
+        );
+    }
+
+    // Single namespaced registry: the configured `default_registry` (host +
+    // namespace) elides even though the row's registry is the bare host.
+    #[test]
+    fn single_namespaced_registry_elides_with_bare_host_row() {
+        let rows = vec![row2(
+            "localhost:5050",
+            "grimoire/skills/x",
+            "skill",
+            ArtifactState::Installed,
+        )];
+        let opts = TreeBuildOptions {
+            default_registry: Some("localhost:5050/grimoire".to_string()),
+            group_by_type: false,
+            separators: vec!["/".to_string()],
+            registry_order: Vec::new(),
+        };
+        let t = build(&rows, &[0], &opts);
+        assert_eq!(
+            shape(&t),
+            vec![("skills".to_string(), 0, true), ("x".to_string(), 1, false)],
+            "a namespaced default_registry must elide even when the row carries the bare host"
+        );
+    }
+
     // group_by_type: the type group ('skill') is a category boundary and must
     // not be joined into the namespace chain below it.
     #[test]
@@ -1306,15 +1454,18 @@ mod tests {
         }
     }
 
-    // Regression (review WARN): the exempt set is depth-qualified, so a
-    // namespace node whose cumulative key byte-equals another registry's full
-    // name is NOT mistaken for an exempt registry root. Here registries
-    // "ghcr.io" and "ghcr.io/acme" coexist; under "ghcr.io" the package lives
-    // at acme/tools/foo, so the namespace node "acme" mints key
-    // "ghcr.io/acme" — identical to the second registry's root key but a depth
-    // below it. It must still path-compress with its single child "tools".
+    // Overlapping same-host registries de-overlap to the MOST-SPECIFIC root.
+    // The catalog gives a bare-host row (`registry="ghcr.io"`,
+    // `repository="acme/tools/foo"`); with both "ghcr.io" and "ghcr.io/acme"
+    // configured, `attribute_registry` picks the longest matching prefix
+    // ("ghcr.io/acme"), so the row lands under the deeper root as `tools/foo`.
+    // The broad "ghcr.io" root keeps only rows that do NOT fall under a deeper
+    // configured registry (here none, so it stays an empty D-EMPTY seed). This
+    // is why the old namespace/registry-root key-collision can no longer arise:
+    // a namespace node never mints a key equal to a *configured* registry,
+    // because such a row is attributed to that registry up front.
     #[test]
-    fn join_namespace_key_colliding_with_a_registry_still_compresses() {
+    fn overlapping_same_host_registries_attribute_to_most_specific() {
         let rows = vec![
             row2("ghcr.io", "acme/tools/foo", "skill", ArtifactState::Installed),
             row2("ghcr.io", "acme/tools/bar", "skill", ArtifactState::NotInstalled),
@@ -1329,15 +1480,15 @@ mod tests {
         assert_eq!(
             shape(&t),
             vec![
+                // Broad host root: empty seed (its rows fell to the deeper root).
                 ("ghcr.io".to_string(), 0, true),
-                ("acme/tools".to_string(), 1, true),
+                // Most-specific root owns the rows; `tools` branches into 2.
+                ("ghcr.io/acme".to_string(), 0, true),
+                ("tools".to_string(), 1, true),
                 ("bar".to_string(), 2, false),
                 ("foo".to_string(), 2, false),
-                // The second registry is seeded empty (D-EMPTY) and stays a
-                // distinct depth-0 root — never confused with the namespace.
-                ("ghcr.io/acme".to_string(), 0, true),
             ],
-            "a namespace key colliding with a registry root (one depth below) must still join"
+            "overlapping registries de-overlap to the most-specific configured root"
         );
     }
 
