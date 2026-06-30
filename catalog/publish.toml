@@ -10,13 +10,13 @@
 registry = "grim.ocx.sh"
 
 [skills.grim-usage]
-version = "0.2.1"
+version = "0.3.0"
 
 [skills.ai-config-authoring]
 version = "0.1.0"
 
 [skills.grim-authoring]
-version = "0.1.0"
+version = "0.2.0"
 
 [bundles.grim-essentials]
 version = "0.1.0"

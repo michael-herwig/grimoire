@@ -5,7 +5,7 @@ a directory with a `SKILL.md` index — for `grim build` or `grim release`.
 
 Contents: [Directory Shape](#directory-shape) · [Frontmatter](#frontmatter) ·
 [Catalog Metadata](#catalog-metadata) · [Bundled Directories](#bundled-directories) ·
-[Client-Agnostic Content](#client-agnostic-content) · [Minimal Example](#minimal-example) ·
+[Client-Agnostic Content](#client-agnostic-content) · [Companion References](#companion-references) · [Minimal Example](#minimal-example) ·
 [Validation Pitfalls](#validation-pitfalls)
 
 ## Directory Shape

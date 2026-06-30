@@ -9,7 +9,7 @@ Contents: [The Loop](#the-loop) · [The Two Files](#the-two-files) ·
 [Updating](#updating) · [Inspecting](#inspecting) ·
 [Removing](#removing) · [Bundles](#bundles)
 
-Flags shown here are grim 0.4.x; confirm with `grim <cmd> --help` before
+Flags shown here are grim 0.6.x; confirm with `grim <cmd> --help` before
 relying on one.
 
 ## The Loop
@@ -56,6 +56,10 @@ grim add --kind bundle ghcr.io/acme/python-stack:1
   artifact's OCI `artifactType`, set at release time. If grim cannot
   infer it (a non-Grimoire image), `add` errors and asks for `--kind`.
 - `--name` defaults to the reference's last path segment.
+
+If the reference is deprecated, `add` prints the publisher's deprecation
+notice on stderr and still completes the add — treat it as a prompt to
+look for a successor, not a failure.
 
 `grim lock` re-resolves the floating tags declared in `grimoire.toml`
 and rewrites the lock. You need it only after hand-editing the config —

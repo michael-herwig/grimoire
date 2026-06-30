@@ -15,7 +15,9 @@ reaches a registry:
    instead of the description), `keywords` is one comma-separated string
    (never a YAML/TOML list), `repository` is an `https://` URL. Check
    the per-kind location: skill/agent → `metadata` map; rule → top-level
-   frontmatter; bundle → top-level TOML.
+   frontmatter; bundle → top-level TOML. If this release retires a
+   package, set the `deprecated` notice in the same location (a re-release
+   without it clears the flag).
 2. **`grim build <path>` exits 0** — and read the *warnings* too:
    warn-and-drop vendor keys and migration nudges are silent data loss
    if shipped.
@@ -36,7 +38,14 @@ reaches a registry:
 - **Immutability gate.** An exact-version tag that already exists and
   points at different bytes refuses to move. `--force` overrides —
   use it only to deliberately rewrite history. Re-releasing *identical*
-  bytes is idempotent and always fine.
+  bytes is idempotent and always fine — *unless* you pass `--git` (see
+  below), where only a re-release from the **same** commit stays idempotent.
+- **Git provenance is opt-in (`--git`).** `grim build`/`release`/`publish`
+  accept `--git`, which stamps the source commit, commit date, and
+  `origin` remote onto the manifest as OCI annotations. It is off by
+  default to keep re-release byte-deterministic: with `--git`, a re-release
+  from a *different* commit changes the digest and is refused unless
+  `--force`. Confirm the exact behavior with `grim release --help`.
 - **Bundles: `--pin`** resolves every floating member to a digest at
   release time for a self-contained, reproducible bundle
   ([pinning][pin]).
@@ -57,6 +66,7 @@ Symptom → cause → fix:
 | Bad vendor literal (bool/enum/int/float) | Known `<vendor>.<field>` key with an invalid string | Use the registry's accepted literals — see [vendor-metadata.md](vendor-metadata.md) |
 | Invalid version / missing tag | Release ref has no tag or a malformed version | Release as `repo:X.Y.Z` |
 | Tag exists | Exact-version tag points at different bytes | Bump the version; `--force` only for deliberate rewrites |
+| `--git` on a non-git path | `--git` passed to build/release on an artifact path not inside a git repository, or no `git` on the host | Build/release an artifact that lives inside a git repo (with `git` installed), or drop `--git` (confirm with `grim release --help`) |
 
 Bundle source errors (typo'd key, non-qualified member ref, > 512
 members) surface as config/parse failures rather than 65 — see

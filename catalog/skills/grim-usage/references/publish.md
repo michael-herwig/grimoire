@@ -163,9 +163,13 @@ pinned release to roll members forward.
 ## Catalog Metadata
 
 Four optional fields make an artifact findable in `grim search` and the
-TUI: `summary`, `keywords`, `description`, `repository`. You author them
-in the source file itself, so a release always publishes what the file
-says. Two invariants hold for every kind:
+TUI: `summary`, `keywords`, `description`, `repository`. A fifth field,
+`deprecated` (grim 0.6.x), retires a package *without* unpublishing it —
+a non-empty notice keeps it resolving and installing while grim flags it
+in `grim search`, the TUI, and on `grim add`; an empty or whitespace
+value means not deprecated. You author them all in the source file
+itself, so a release always publishes what the file says. Two invariants
+hold for every kind:
 
 - `keywords` is a single comma-separated **string** (`rust,lint`), never
   a YAML/TOML list — an OCI annotation value is a string.

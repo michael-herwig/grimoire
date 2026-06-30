@@ -2,7 +2,7 @@
 name: grim-authoring
 description: Author, validate, and package grim-publishable artifacts — skill directories, rule files, agent definitions, and bundle TOMLs. Use when creating or editing an artifact for grim build or grim release; when choosing frontmatter or catalog metadata fields; when adding claude, opencode, or copilot vendor keys; or when grim build fails validation with exit code 65.
 license: Apache-2.0
-compatibility: grim>=0.4
+compatibility: grim>=0.6
 metadata:
   summary: Deep authoring guide for grim skill, rule, agent, and bundle artifacts
   keywords: grim,grimoire,authoring,frontmatter,validation,vendor-metadata,skill,rule,agent,bundle,packaging
@@ -42,11 +42,11 @@ agents, which always need `--kind agent` or they silently pack as rules.
 
 ## The Metadata-Location Asymmetry
 
-Where catalog metadata (`summary`, `keywords`, `repository`) is authored
-differs by kind. This is the #1 authoring confusion — misplaced keys are
-not errors, they just silently never reach the catalog:
+Where catalog metadata (`summary`, `keywords`, `repository`, `deprecated`)
+is authored differs by kind. This is the #1 authoring confusion — misplaced
+keys are not errors, they just silently never reach the catalog:
 
-| Kind | `summary` / `keywords` / `repository` live… |
+| Kind | `summary` / `keywords` / `repository` / `deprecated` live… |
 |---|---|
 | Skill | inside the `metadata:` map of `SKILL.md` frontmatter |
 | Agent | inside the `metadata:` map of the agent frontmatter |
@@ -54,11 +54,16 @@ not errors, they just silently never reach the catalog:
 | Bundle | as **top-level TOML keys**, above the member tables |
 
 In every kind, `keywords` is one comma-separated string and `repository`
-must be an `https://` URL (anything else fails the release with 65).
+must be an `https://` URL (anything else fails the release with 65). The
+`deprecated` notice (grim 0.6.x) obeys the same per-kind location; an
+empty or whitespace-only value means *not* deprecated and emits no
+annotation — detail in [Publishing][publishing].
 
 ## Companion: Content Craft
 
-This skill covers grim **packaging and validation** only. For the craft of
+This skill covers grim **packaging and validation** only — including opt-in
+git provenance at build/release time (`--git`); confirm flags with
+`grim release --help`. For the craft of
 the content itself — progressive disclosure, context budgets, description
 triggering, choosing skill vs rule vs agent — read the companion skill
 `ai-config-authoring` at
@@ -101,7 +106,7 @@ trust the tool. Treat this skill as the map, not the territory.
 
 ---
 
-Verified against grim 0.4.x.
+Verified against grim 0.6.1.
 
 [artifacts]: https://michael-herwig.github.io/grimoire/artifacts.html
 [vendor]: https://michael-herwig.github.io/grimoire/vendor-metadata.html

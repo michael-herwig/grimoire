@@ -166,9 +166,13 @@ counterpart for offline.
 
 ## Search, TUI, and MCP {#search-tui-and-mcp}
 
-`grim search [query]` matches a case-insensitive substring against each
-catalog entry's repository, summary, description, and keywords; an empty
-query lists the whole catalog. When `[[registries]]` are configured, all
+`grim search [query]` splits the query on whitespace and ANDs the terms —
+each term substring-matches (case-insensitive) any of an entry's kind,
+repository, summary, description, or keywords. A bare kind keyword
+(`skill`/`rule`/`bundle`, singular or plural) filters by kind instead of
+matching as text; an empty query lists the whole catalog. Confirm the
+match fields and kind-filter keywords with `grim search --help`. When
+`[[registries]]` are configured, all
 of them are browsed and flattened into one table. The catalog is cached
 under `$GRIM_HOME` — pass `--refresh` to rebuild it from the registry,
 `--registry` to collapse the browse to exactly that one registry. Plain
@@ -180,6 +184,12 @@ output and `--format json` keep the full description, and JSON adds a
 grim search review
 grim search --refresh --registry ghcr.io/acme --format json
 ```
+
+A package the publisher has marked deprecated is flagged in both
+`grim search` output (a `deprecated` marker on the entry, and a
+`deprecated` field under `--format json`, which the `grim_search` MCP
+tool inherits) and the TUI (a yellow `⚠` on the entry, with the notice
+in the detail pane), so you can avoid pinning it.
 
 `grim tui` browses your declared registries' catalogs interactively: kind-grouped list,
 live install state, multi-select with batch install/update/delete, and a
@@ -208,8 +218,10 @@ and can call two read tools:
 | `grim_search` | Same JSON as `grim search --format json`, over the configured registries (no registry override). Args: `query?`, `refresh?` |
 | `grim_status` | Same JSON as `grim status --format json` for the fixed scope |
 
-The server is read-only by default; `--allow-writes` reserves the gate
-for mutating tools in a future release. The scope (`--global` or
+The server is read-only by default; `--allow-writes` enables the mutating
+tools (`add` / `install` / `update` / `uninstall`) against the server's
+fixed scope — leave it off for a browse-only server. Confirm the current
+tool set with `grim mcp --help`. The scope (`--global` or
 `--config <path>`) is fixed at startup — tool calls cannot redirect it.
 Diagnostics go to stderr; stdout is the JSON-RPC channel. Register it
 in a project `.mcp.json`:

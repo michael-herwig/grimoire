@@ -2,7 +2,7 @@
 name: grim-usage
 description: Drive the grim CLI — the OCI package manager for AI skills, rules, agents, and bundles. Use when installing, updating, searching, or publishing AI-config artifacts with grim; when composing grim init, add, lock, install, update, status, search, tui, mcp, build, release, publish, login, or logout commands; when configuring multiple registries or qualified alias/repo references; or when resolving registries, project vs global scope, client targets, or offline mode.
 license: Apache-2.0
-compatibility: grim>=0.4
+compatibility: grim>=0.6
 metadata:
   summary: How to use the grim CLI end to end
   keywords: grim,grimoire,cli,oci,registry,install,update,publish,skills,rules,agents,bundles,mcp,multi-registry
@@ -21,7 +21,7 @@ Code, OpenCode, and GitHub Copilot.
 
 Before composing any non-trivial grim command:
 
-1. Run `grim --version`. This guide is written against grim 0.4.x; on a
+1. Run `grim --version`. This guide is written against grim 0.6.x; on a
    different minor, treat every flag mentioned here as a hypothesis.
 2. Run `grim <command> --help` before using flags you have not verified
    this session — it is the authoritative, always-current flag list.
@@ -49,6 +49,16 @@ full reference is `--help` plus the docs site linked below.
 | `grim publish` | Batch-release packages from a `publish.toml` manifest | [publish](references/publish.md) |
 | `grim login` / `logout` | Manage registry credentials | [publish](references/publish.md) |
 | `grim schema` | Emit the JSON Schema for `grimoire.toml` / `publish.toml` | [publish](references/publish.md) |
+
+> **Deprecation (0.6.x):** a publisher can retire a package without
+> unpublishing it; `add`, `status`, `search`, and `tui` then flag it as
+> deprecated (an `add` of a deprecated reference still succeeds). This is
+> runtime output, not a flag — see [Publishing][publishing]; `grim <cmd>
+> --help` does not list it.
+>
+> **Git provenance (0.6.x):** `build`, `release`, and `publish` can embed
+> the publishing commit, date, and origin as OCI annotations via opt-in
+> `--git`; confirm with `grim release --help`.
 
 ## Reference Syntax
 
@@ -95,4 +105,4 @@ multi-registry browse behavior in
 
 ---
 
-Verified against grim 0.4.x.
+Verified against grim 0.6.1.

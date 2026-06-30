@@ -7,12 +7,12 @@ need to refresh it against a newer grim release.
 
 1. Run `grim --version` and `grim <cmd> --help` for every command this
    package narrates (init, add, lock, install, update, status, remove,
-   uninstall, search, tui, mcp, build, release, login, logout). Diff the
-   help output against what the reference files claim.
+   uninstall, search, schema, tui, mcp, build, release, publish, login,
+   logout). Diff the help output against what the reference files claim.
 2. Re-read the docs pages each reference file distills (links below) and
    diff against the file's claims — especially lifecycle semantics
-   (pruning, effective declarations, integrity gates) and precedence
-   chains (registry, clients).
+   (pruning, effective declarations, integrity gates, deprecation
+   warnings) and precedence chains (registry, clients).
 3. Re-check the exit-code table in
    [troubleshooting.md](troubleshooting.md) against the docs' command
    reference — codes are a stable contract but new codes can appear.

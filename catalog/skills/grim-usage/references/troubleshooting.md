@@ -53,6 +53,12 @@ Common causes, roughly in order of frequency:
   string; exact-version tag already exists at a different digest
   (re-release with `--force` only if you mean to rewrite it).
 - **Integrity mismatch** on installed content (see below).
+- **Git provenance unavailable.** Building or releasing with `--git`
+  (opt-in commit provenance) from a path that is not a git repository,
+  or with `git` missing from `PATH`, is a data error — the flag
+  hard-fails when it cannot read provenance. Note too that `--git` makes
+  a re-release from a different commit change the digest, refused without
+  `--force`. New in 0.6.x; confirm with `grim release --help`.
 
 Fix the named input and re-run `grim build` until it exits 0 before
 trying `grim release` again.
