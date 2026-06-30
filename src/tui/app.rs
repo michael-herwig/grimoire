@@ -610,10 +610,10 @@ fn schedule_row_checks_forced(
     checker.mark_scheduled(now);
 }
 
-/// Build the [`RowCheck`] for one eligible row: pair its floating identifier
-/// (registry/repo + the representative/`latest` tag) with the digest the
-/// scope's lock pinned it to. `None` when the row carries no lock entry
-/// (then "newer tag" has no baseline) or its repo is malformed.
+/// Build the [`RowCheck`] for one eligible row: pair its tagless
+/// `registry/repository` identifier with the digest the scope's lock pinned it
+/// to. `None` when the row carries no lock entry (then "newer tag" has no
+/// baseline) or its repo is malformed.
 fn build_row_check(lock: &GrimoireLock, row: &TuiRow) -> Option<RowCheck> {
     // A2 / D-BACKGROUND: use the authoritative `registry` + `repository` fields
     // directly so namespaced registries like "ghcr.io/acme" are matched exactly,
@@ -626,14 +626,12 @@ fn build_row_check(lock: &GrimoireLock, row: &TuiRow) -> Option<RowCheck> {
     let locked = lock
         .iter_artifacts()
         .find(|a| a.pinned.registry() == registry && a.pinned.repository() == repository)?;
-    // Resolve the same floating tag the badge derivation pins against: the
-    // representative tag, else the conventional `latest`.
-    let tag = if row.latest_tag.is_empty() {
-        "latest".to_string()
-    } else {
-        row.latest_tag.clone()
-    };
-    let id = Identifier::new_registry(repository, registry).clone_with_tag(tag);
+    // Issue #21: carry the tagless `registry/repository` identifier, not the
+    // cached catalog tag. The background check re-discovers the registry's
+    // current latest tag fresh (see `update_check::resolve_latest_digest`), so a
+    // newer release surfaces even when the cached catalog row is stale or the
+    // registry carries only immutable semver tags (no moving `latest`).
+    let id = Identifier::new_registry(repository, registry);
     Some(RowCheck {
         repo: row.repo.clone(),
         id,

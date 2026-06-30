@@ -28,7 +28,8 @@ use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinSet;
 
 use super::state::{ArtifactState, TuiRow};
-use crate::catalog::registry_catalog::Catalog;
+use crate::catalog::registry_catalog::{Catalog, pick_latest_tag};
+use crate::oci::access::error::AccessError;
 use crate::oci::access::{OciAccess, Operation};
 use crate::oci::{Digest, Identifier};
 
@@ -95,7 +96,10 @@ pub enum CheckMsg {
 pub struct RowCheck {
     /// The row's `registry/repository` reference — the result key.
     pub repo: String,
-    /// The floating identifier (registry/repo + tag) to resolve fresh.
+    /// The `registry/repository` identifier to re-check. Any tag on it is
+    /// ignored: the check lists the repo's tags fresh and picks the current
+    /// representative tag itself (issue #21), so a stale cached catalog tag
+    /// cannot hide a newer release.
     pub id: Identifier,
     /// The digest the active scope's lock pinned this artifact to.
     pub locked_digest: Digest,
@@ -124,6 +128,33 @@ pub fn eligible_for_recheck(row: &TuiRow) -> bool {
 /// transient miss.
 pub fn outdated_from_resolve(locked: &Digest, resolved: Option<&Digest>) -> bool {
     matches!(resolved, Some(d) if d != locked)
+}
+
+/// Discover the registry's current representative-tag digest for `base` (a
+/// `registry/repository` identifier; any tag already on it is ignored),
+/// independent of any cached catalog tag.
+///
+/// Issue #21 ("update not shown"): the cached catalog row's `latest_tag` is
+/// captured at build time and served from a cache with a freshness window. On
+/// a registry that carries only immutable semver tags (no moving `latest`),
+/// resolving that captured tag can never reveal a newer release — the new
+/// version lands as a brand-new higher tag the stale catalog has not seen. So
+/// the background check re-discovers the latest tag *fresh*: list the repo's
+/// tags, pick the same representative tag the catalog build would
+/// ([`pick_latest_tag`] — prefer `latest`, else the highest semver), and
+/// resolve it. `Ok(None)` when the repo has no tags or no resolvable
+/// representative; absence is never treated as a newer pin (the icon never
+/// lies on a transient miss). This costs one extra round-trip (`list_tags`)
+/// per eligible row over resolving a fixed tag — paid only for
+/// installed/outdated rows, not the whole catalog.
+async fn resolve_latest_digest(access: &dyn OciAccess, base: &Identifier) -> Result<Option<Digest>, AccessError> {
+    let Some(tags) = access.list_tags(base).await? else {
+        return Ok(None);
+    };
+    let Some(tag) = pick_latest_tag(&tags) else {
+        return Ok(None);
+    };
+    access.resolve_digest(&base.clone_with_tag(tag), Operation::Query).await
 }
 
 /// Owns the background-check machinery: the results sender, the concurrency
@@ -277,11 +308,13 @@ impl UpdateChecker {
     /// Spawn one bounded per-row check for each item in `checks`, skipping
     /// any whose `(repo, generation)` already has a check in flight. Each task
     /// acquires a [`Semaphore`] permit first (so at most
-    /// [`ROW_CHECK_CONCURRENCY`] run at once), resolves the floating tag with
-    /// [`Operation::Query`] (a read-only-fresh lookup that never writes a tag
-    /// pointer), reports the pure [`outdated_from_resolve`] decision stamped
-    /// with the current [`Self::generation`], and clears its own in-flight slot
-    /// once the send attempt resolves.
+    /// [`ROW_CHECK_CONCURRENCY`] run at once), re-discovers the registry's
+    /// current latest-tag digest fresh via [`resolve_latest_digest`] (a
+    /// read-only-fresh `list_tags` + [`Operation::Query`] resolve that never
+    /// writes a tag pointer — issue #21), reports the pure
+    /// [`outdated_from_resolve`] decision stamped with the current
+    /// [`Self::generation`], and clears its own in-flight slot once the send
+    /// attempt resolves.
     ///
     /// Dedup is keyed by `(repo, generation)`, not by `repo` alone: a forced
     /// re-arm bumps the generation *before* re-scheduling, so a task still in
@@ -330,7 +363,7 @@ impl UpdateChecker {
                     Ok(p) => p,
                     Err(_) => return,
                 };
-                let msg = match access.resolve_digest(&check.id, Operation::Query).await {
+                let msg = match resolve_latest_digest(&*access, &check.id).await {
                     Ok(resolved) => {
                         if outdated_from_resolve(&check.locked_digest, resolved.as_ref()) {
                             CheckMsg::RowOutdated {
@@ -548,7 +581,11 @@ mod tests {
             Ok(None)
         }
         async fn list_tags(&self, _id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
-            Ok(None)
+            // The fresh-tag-discovery check (issue #21) lists tags before it
+            // resolves; expose a single representative tag so the gated
+            // `resolve_digest` below is still reached (these tests exercise the
+            // dedup / generation / in-flight machinery, not tag selection).
+            Ok(Some(vec!["latest".to_string()]))
         }
         async fn list_catalog(&self, _registry: &str) -> Result<Vec<String>, AccessError> {
             Ok(Vec::new())
@@ -790,5 +827,91 @@ mod tests {
             let guard = checker.in_flight.lock().unwrap_or_else(|p| p.into_inner());
             assert!(guard.is_empty(), "every (repo, generation) slot freed on completion");
         }
+    }
+
+    // ── issue #21: fresh tag discovery (not the cached catalog tag) ───────
+
+    /// A registry whose repository carries only immutable semver tags (no
+    /// moving `latest`): `1.0.0` resolves to the old digest, `2.0.0` to the
+    /// newer one. A tagless / `latest` lookup falls through to the old digest
+    /// so it models a registry that does NOT publish a moving pointer. Mirrors
+    /// a real semver-only registry where a new release lands as a brand-new
+    /// higher tag the cached catalog has not yet seen.
+    struct VersionedAccess {
+        old: Digest,
+        new: Digest,
+    }
+
+    impl VersionedAccess {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                old: Algorithm::Sha256.hash(b"v1"),
+                new: Algorithm::Sha256.hash(b"v2"),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl OciAccess for VersionedAccess {
+        async fn resolve_digest(&self, id: &Identifier, _op: Operation) -> Result<Option<Digest>, AccessError> {
+            // Only the new highest tag resolves to the new digest; the old tag
+            // (and any tagless/`latest` probe) resolves to the locked baseline.
+            let d = match id.tag() {
+                Some("2.0.0") => self.new.clone(),
+                _ => self.old.clone(),
+            };
+            Ok(Some(d))
+        }
+        async fn fetch_manifest(&self, _id: &PinnedIdentifier) -> Result<Option<OciManifest>, AccessError> {
+            Ok(None)
+        }
+        async fn fetch_blob(&self, _r: &Identifier, _d: &Digest) -> Result<Option<Vec<u8>>, AccessError> {
+            Ok(None)
+        }
+        async fn list_tags(&self, _id: &Identifier) -> Result<Option<Vec<String>>, AccessError> {
+            // The registry now carries a higher tag than the cached catalog saw.
+            Ok(Some(vec!["1.0.0".to_string(), "2.0.0".to_string()]))
+        }
+        async fn list_catalog(&self, _registry: &str) -> Result<Vec<String>, AccessError> {
+            Ok(Vec::new())
+        }
+        async fn push_blob(&self, _r: &Identifier, b: &[u8]) -> Result<Digest, AccessError> {
+            Ok(Algorithm::Sha256.hash(b))
+        }
+        async fn push_manifest(&self, _r: &Identifier, _m: &OciManifest) -> Result<Digest, AccessError> {
+            Ok(Algorithm::Sha256.hash(b"m"))
+        }
+        async fn put_tag(&self, _r: &Identifier, _t: &str, _d: &Digest) -> Result<(), AccessError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn outdated_detected_via_fresh_tag_discovery_not_cached_tag() {
+        // Regression for issue #21 ("update not shown"). The installed row was
+        // pinned at 1.0.0; the registry now also carries 2.0.0. The cached
+        // catalog row still names the OLD highest tag (1.0.0) — and on a
+        // registry without a moving `latest`, resolving that fixed tag can
+        // never reveal the new release. The background per-row check must
+        // therefore DISCOVER the registry's current latest tag fresh
+        // (list_tags + pick_latest_tag) and compare ITS digest to the lock
+        // pin, so the row flips to outdated at launch with no manual refresh.
+        let access = VersionedAccess::new();
+        let dyn_access: Arc<dyn OciAccess> = access.clone();
+        let (mut checker, mut rx) = UpdateChecker::new(dyn_access, "localhost:5000".to_string());
+
+        // The check carries the STALE catalog tag (1.0.0) and the locked
+        // (old) digest — exactly what `build_row_check` produced before the fix.
+        let check = RowCheck {
+            repo: "localhost:5000/acme/code-review".to_string(),
+            id: Identifier::new_registry("acme/code-review", "localhost:5000").clone_with_tag("1.0.0"),
+            locked_digest: Algorithm::Sha256.hash(b"v1"),
+        };
+        checker.spawn_row_checks(vec![check]);
+        let msg = rx.recv().await.expect("one result");
+        assert!(
+            matches!(msg, CheckMsg::RowOutdated { .. }),
+            "a newer registry release must flip the row to outdated via fresh tag discovery, got {msg:?}"
+        );
     }
 }
