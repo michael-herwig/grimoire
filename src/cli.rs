@@ -6,3 +6,4 @@
 pub mod exit_code;
 pub mod options;
 pub mod printer;
+pub mod progress;

@@ -11,13 +11,17 @@
 
 use clap::Args;
 
+use std::io::IsTerminal;
+
 use crate::api::artifact_status::InstallStatus;
 use crate::api::install_report::{InstallEntry, InstallReport};
 use crate::cli::exit_code::ExitCode;
+use crate::cli::progress::StderrBar;
 use crate::command::command_error::CommandError;
 use crate::context::Context;
-use crate::install::installer::{ArtifactInstall, InstallOutcome, install_all};
+use crate::install::installer::{ArtifactInstall, InstallOutcome, install_all_with_progress};
 use crate::install::materializer::DefaultMaterializer;
+use crate::install::progress::{InstallProgress, SilentProgress};
 use crate::install::target::InstallTarget;
 use crate::lock::file_lock::ConfigFileLock;
 use crate::lock::lock_io;
@@ -73,7 +77,18 @@ pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallRe
     let mut state = super::grim(scope_resolution::load_state(&scope).map_err(|e| state_io(&scope.state_path, e)))?;
     let materializer = DefaultMaterializer;
 
-    let outcomes = install_all(
+    // Show a progress bar only on an interactive stderr; piped / redirected
+    // runs (CI, `| jq`, tests) install silently so captured streams stay
+    // free of control codes. The bar writes to stderr, never stdout, so the
+    // structured report (and `--format json`) is untouched either way.
+    let silent = SilentProgress;
+    let bar = std::io::stderr().is_terminal().then(StderrBar::default);
+    let progress: &dyn InstallProgress = match bar.as_ref() {
+        Some(b) => b,
+        None => &silent,
+    };
+
+    let outcomes = install_all_with_progress(
         &lock,
         &access,
         &materializer,
@@ -81,6 +96,7 @@ pub async fn run(ctx: &Context, args: &InstallArgs) -> anyhow::Result<(InstallRe
         &mut state,
         &scope.roots,
         args.force,
+        progress,
     )
     .await;
 

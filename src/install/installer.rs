@@ -28,6 +28,7 @@ use super::install_error::{InstallError, InstallErrorKind};
 use super::install_state::{InstallRecord, InstallState};
 use super::materializer::ArtifactMaterializer;
 use super::path_anchor::{AnchorError, AnchorRoots};
+use super::progress::{InstallProgress, SilentProgress};
 use super::target::InstallTarget;
 
 /// What happened to one artifact during an install pass.
@@ -80,10 +81,33 @@ pub async fn install_all<M: ArtifactMaterializer>(
     roots: &AnchorRoots,
     force: bool,
 ) -> Vec<ArtifactInstall> {
+    install_all_with_progress(lock, access, materializer, target, state, roots, force, &SilentProgress).await
+}
+
+/// Install every locked artifact, driving `progress` once per artifact.
+///
+/// Identical to [`install_all`] but reports each step to an
+/// [`InstallProgress`] sink — `grim install` renders a stderr bar, while
+/// the silent wrapper is used by the TUI, `update`, and tests. The sink is
+/// notified before each artifact installs regardless of its outcome, so the
+/// bar advances even when an individual artifact errors.
+#[allow(clippy::too_many_arguments)]
+pub async fn install_all_with_progress<M: ArtifactMaterializer>(
+    lock: &GrimoireLock,
+    access: &Arc<dyn OciAccess>,
+    materializer: &M,
+    target: &InstallTarget,
+    state: &mut InstallState,
+    roots: &AnchorRoots,
+    force: bool,
+    progress: &dyn InstallProgress,
+) -> Vec<ArtifactInstall> {
     let work: Vec<(&LockedArtifact, ArtifactKind)> = lock.iter_artifacts().map(|a| (a, a.kind)).collect();
 
+    progress.start(work.len());
     let mut results = Vec::with_capacity(work.len());
-    for (artifact, kind) in work {
+    for (index, (artifact, kind)) in work.into_iter().enumerate() {
+        progress.advance(index + 1, &format!("{kind} {}", artifact.name));
         let reference = ArtifactRef {
             kind,
             name: artifact.name.clone(),
@@ -103,6 +127,7 @@ pub async fn install_all<M: ArtifactMaterializer>(
             result,
         });
     }
+    progress.finish();
     results
 }
 
@@ -1435,6 +1460,58 @@ mod tests {
             "BLOCK-1: copilot file must contain B content (AlreadyInstalled is legitimate); \
              on current HEAD copilot was not re-materialized so the file still has vA content, \
              meaning the prior AlreadyInstalled was a false short-circuit"
+        );
+    }
+
+    /// A progress sink that records the calls it receives, in order.
+    #[derive(Default)]
+    struct RecordingProgress {
+        events: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl crate::install::progress::InstallProgress for RecordingProgress {
+        fn start(&self, total: usize) {
+            self.events.lock().unwrap().push(format!("start:{total}"));
+        }
+        fn advance(&self, position: usize, label: &str) {
+            self.events.lock().unwrap().push(format!("advance:{position}:{label}"));
+        }
+        fn finish(&self) {
+            self.events.lock().unwrap().push("finish".to_string());
+        }
+    }
+
+    /// The progress sink is driven once per locked artifact, in lock order,
+    /// bracketed by `start`/`finish` — independent of per-artifact outcome
+    /// (the second rule errors here; its `advance` still fires).
+    #[tokio::test]
+    async fn progress_sink_notified_once_per_artifact_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let blob = rule_tar("a", b"# a\n");
+        let lock = lock_of(vec![
+            locked_rule("a", &blob),
+            locked_rule("b", &rule_tar("b", b"# b\n")),
+        ]);
+        let access = arc(BlobMock { blob: blob.clone() });
+        let target = InstallTarget::new(dir.path(), crate::config::scope::ConfigScope::Project, vec![]);
+        let mut state = InstallState::load(&dir.path().join("state.json")).unwrap();
+        let m = DefaultMaterializer;
+        let roots = roots(dir.path());
+        let recorder = RecordingProgress::default();
+
+        let r = install_all_with_progress(&lock, &access, &m, &target, &mut state, &roots, false, &recorder).await;
+        assert_eq!(r.len(), 2);
+        // Exercise the error path this test narrates: the single-blob mock
+        // serves `a.md` for both, so "b" materializes no `b.md` and errors —
+        // yet its `advance` still fired (advance precedes install_one).
+        assert!(r[0].result.is_ok(), "first rule installs cleanly");
+        assert!(r[1].result.is_err(), "second rule errors, but its advance still fired");
+
+        let events = recorder.events.lock().unwrap().clone();
+        assert_eq!(
+            events,
+            vec!["start:2", "advance:1:rule a", "advance:2:rule b", "finish"],
+            "sink must be driven start → advance(1..=n) → finish in lock order"
         );
     }
 
