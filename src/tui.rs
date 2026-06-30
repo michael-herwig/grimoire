@@ -31,6 +31,7 @@ pub mod bundle_members;
 pub mod detail;
 pub mod event;
 pub mod init_dialog;
+pub mod install_progress;
 pub mod render;
 pub mod state;
 pub mod terminal_guard;

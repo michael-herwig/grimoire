@@ -1368,7 +1368,10 @@ fn draw_help(f: &mut Frame, scroll: u16) {
 /// [`centered_rect`], the height is an absolute row count (clamped to `area`)
 /// rather than a percentage, so a content-sized overlay neither clips nor
 /// over-grows on tall terminals.
-fn centered_area_rows(area: Rect, width_pct: u16, height_rows: u16) -> Rect {
+/// A `width_pct`-percent-wide, `height_rows`-tall rectangle centered in
+/// `area`. Computes the split via ratatui `Layout` (u32 internally), so it
+/// never overflows on very wide terminals.
+pub fn centered_area_rows(area: Rect, width_pct: u16, height_rows: u16) -> Rect {
     let height = height_rows.min(area.height);
     let top = area.height.saturating_sub(height) / 2;
     let vert = Layout::default()

@@ -39,6 +39,7 @@ use crate::install::install_state::{ClientOutput, InstallState, active_outputs};
 use crate::install::installer::{InstallOutcome, install_all};
 use crate::install::materializer::DefaultMaterializer;
 use crate::install::path_anchor::AnchorRoots;
+use crate::install::progress::{InstallProgress, SilentProgress};
 use crate::install::target::{InstallTarget, detect_clients};
 use crate::lock::file_lock::ConfigFileLock;
 use crate::lock::grimoire_lock::GrimoireLock;
@@ -47,6 +48,7 @@ use crate::lock::locked_artifact::LockedArtifact;
 use crate::oci::access::OciAccess;
 use crate::oci::{ArtifactKind, Identifier};
 use crate::store::paths::GrimPaths;
+use crate::tui::install_progress::InstallModal;
 
 use super::event::{BatchOp, TuiAction, TuiInput, handle};
 use super::render::{draw, frame};
@@ -313,7 +315,17 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                 arm_background_checks(&ctx, &state, &mut checker);
             }
             TuiAction::Batch { op, rows } => {
-                run_batch(&ctx, &mut state, &rows, op).await;
+                // A modal gauge animates over the marked rows during the
+                // otherwise frozen inline batch: `run_batch_with_progress`
+                // drives start/advance/finish at the per-row grain (n/total +
+                // current repo), so the counter reflects every action — not a
+                // single-artifact install that always reads 1/1. The verb
+                // follows the operation (Installing/Updating/Uninstalling).
+                // start() fires inside run_batch AFTER its offline check, so an
+                // offline install/update paints nothing (no flash) while a
+                // delete — which runs offline — still shows its progress.
+                let modal = InstallModal::new(&mut terminal, batch_title(op));
+                run_batch_with_progress(&ctx, &mut state, &rows, op, &modal).await;
                 // An install/update may have just pinned a version older
                 // than the registry's floating tag (the user picked an old
                 // version in the picker) — re-check exactly those rows now
@@ -329,6 +341,12 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                 if ctx.offline && op != BatchOp::Uninstall {
                     state.set_status("offline — cannot install/update");
                 } else {
+                    // A single member is one action — show an indeterminate
+                    // "working… <repo>" frame over the frozen inline op rather
+                    // than a misleading 1/1 counter. The verb follows the
+                    // operation (Installing/Updating/Uninstalling).
+                    let modal = InstallModal::new(&mut terminal, batch_title(op));
+                    modal.working(&repo);
                     let label = match op {
                         BatchOp::Install | BatchOp::Update => {
                             let is_update = op == BatchOp::Update;
@@ -340,7 +358,7 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                             // registry so a namespaced registry (e.g.
                             // `ghcr.io/acme`) is not mis-split on the first `/`.
                             let parent_registry = member_parent_registry(&ctx, &repo);
-                            match perform_member(
+                            let res = perform_member(
                                 &ctx,
                                 repo.clone(),
                                 kind,
@@ -349,8 +367,8 @@ pub async fn run(mut ctx: TuiContext) -> anyhow::Result<()> {
                                 name.clone(),
                                 &parent_registry,
                             )
-                            .await
-                            {
+                            .await;
+                            match res {
                                 Ok(l) => Some(l),
                                 Err(e) => {
                                     state.set_status(format!("member action failed: {e:#}"));
@@ -1549,7 +1567,18 @@ fn order_tags(tags: Vec<String>) -> Vec<String> {
 /// materialize path the commands use; uninstall reuses the shared
 /// [`crate::install::uninstall`] seam — no forked logic either way. Each
 /// row's state is refreshed; the status line aggregates `n ok, m failed`.
+/// Silent batch (no progress sink) — the default for tests.
 async fn run_batch(ctx: &TuiContext, state: &mut TuiState, rows: &[usize], op: BatchOp) {
+    run_batch_with_progress(ctx, state, rows, op, &SilentProgress).await;
+}
+
+async fn run_batch_with_progress(
+    ctx: &TuiContext,
+    state: &mut TuiState,
+    rows: &[usize],
+    op: BatchOp,
+    progress: &dyn InstallProgress,
+) {
     // Install/update need the network; uninstall is purely local.
     if ctx.offline && op != BatchOp::Uninstall {
         state.set_status("offline — cannot install/update");
@@ -1564,10 +1593,19 @@ async fn run_batch(ctx: &TuiContext, state: &mut TuiState, rows: &[usize], op: B
     let (mut ok, mut failed) = (0usize, 0usize);
     let mut last_err: Option<String> = None;
 
+    // Drive the progress sink at the batch (per-row) grain so the modal shows
+    // `n/total` over every acted-on row with the current repo as its label.
+    // Each row's own `install_all` is a single artifact (or a bundle's
+    // members), so per-artifact progress would always read 1/1 — the meaningful
+    // count is the rows. Uninstall is local, but the same loop drives it so a
+    // delete shows progress too. The inner `perform`/`perform_uninstall` are
+    // silent (no nested sink that would reset the counter).
+    progress.start(total);
     for (n, &i) in rows.iter().enumerate() {
         let Some(row) = state.rows.get(i).cloned() else {
             continue;
         };
+        progress.advance(n + 1, &row.repo);
         state.set_status(format!("{verb} {}/{total}: {}…", n + 1, row.repo));
         let outcome = match op {
             BatchOp::Install => perform(ctx, &row, false, None).await.map(|_| ()),
@@ -1582,6 +1620,7 @@ async fn run_batch(ctx: &TuiContext, state: &mut TuiState, rows: &[usize], op: B
             }
         }
     }
+    progress.finish();
 
     // A bundle op also (un)installs the bundle's members, which appear as
     // separate rows — recompute every row's state against the new lock +
@@ -1720,6 +1759,15 @@ fn perform_uninstall(ctx: &TuiContext, row: &TuiRow) -> anyhow::Result<()> {
 }
 
 /// Human label for an install outcome (status-line only).
+/// The progress-modal title verb for a batch/member operation.
+fn batch_title(op: BatchOp) -> &'static str {
+    match op {
+        BatchOp::Install => "Installing",
+        BatchOp::Update => "Updating",
+        BatchOp::Uninstall => "Uninstalling",
+    }
+}
+
 fn outcome_label(o: &InstallOutcome) -> &'static str {
     match o {
         InstallOutcome::Installed => "installed",
@@ -1738,6 +1786,11 @@ fn outcome_label(o: &InstallOutcome) -> &'static str {
 /// declaration hash always matches the config — a TUI install is never an
 /// undeclared lock entry), and then only the acted-on artifact is
 /// materialized.
+///
+/// The TUI renders progress at the batch (per-row) grain on the modal
+/// itself (see [`run_batch_with_progress`]), so this single-artifact
+/// materialize stays silent — a nested per-artifact sink would reset the
+/// batch counter to 1/1.
 async fn perform(
     ctx: &TuiContext,
     row: &TuiRow,
@@ -2222,6 +2275,9 @@ pub(crate) fn resolve_member_tag(repo: &str, rows: &[TuiRow]) -> String {
 /// `repo` is the validated `registry/repository` reference from
 /// `DisplayRow::Member.member_repo`. Returns an `Err` (status breadcrumb,
 /// no install) when `repo` fails `split_repo` (C-12 defense-in-depth).
+///
+/// Silent: the caller renders a single-action modal frame; this seam does
+/// not drive a per-artifact progress sink.
 async fn perform_member(
     ctx: &TuiContext,
     repo: String,
@@ -3688,6 +3744,62 @@ mod tests {
             state.rows[1].state,
             ArtifactState::NotInstalled,
             "member row must be recomputed after a bundle delete"
+        );
+    }
+
+    /// A progress sink that records the calls it receives, in order.
+    #[derive(Default)]
+    struct RecordingProgress {
+        events: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl InstallProgress for RecordingProgress {
+        fn start(&self, total: usize) {
+            self.events.lock().unwrap().push(format!("start:{total}"));
+        }
+        fn advance(&self, position: usize, label: &str) {
+            self.events.lock().unwrap().push(format!("advance:{position}:{label}"));
+        }
+        fn finish(&self) {
+            self.events.lock().unwrap().push("finish".to_string());
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_progress_counts_rows_not_per_artifact() {
+        // Regression: the TUI drove the progress sink inside each row's
+        // single-artifact `install_all`, so a multi-row batch always read
+        // 1/1. The sink must be driven at the row grain instead: start(N),
+        // then advance(1..=N) labelled with the current repo, then finish —
+        // independent of how many artifacts each row materializes (the bundle
+        // row pulls in a member via its own, now silent, install).
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path();
+        std::fs::write(workspace.join("grimoire.toml"), "[skills]\n\n[rules]\n").unwrap();
+        let ctx = test_ctx(workspace, registry_with_bundle().await);
+
+        let skill_row = installed_row("localhost:5050/grimoire/skills/demo");
+        let mut bundle_row = installed_row("localhost:5050/grimoire/bundles/starter-pack");
+        bundle_row.kind = "bundle".to_string();
+
+        let mut state = TuiState::new();
+        state.set_rows(vec![skill_row, bundle_row]);
+
+        // `set_rows` kind-sorts the rows (bundle before skill), so the row
+        // order is [bundle, skill]; drive every visible row.
+        let recorder = RecordingProgress::default();
+        run_batch_with_progress(&ctx, &mut state, &[0, 1], BatchOp::Install, &recorder).await;
+
+        let events = recorder.events.lock().unwrap().clone();
+        assert_eq!(
+            events,
+            vec![
+                "start:2".to_string(),
+                "advance:1:localhost:5050/grimoire/bundles/starter-pack".to_string(),
+                "advance:2:localhost:5050/grimoire/skills/demo".to_string(),
+                "finish".to_string(),
+            ],
+            "batch progress must count rows (start:2, advance 1→2 by repo), not reset to 1/1 per artifact"
         );
     }
 
