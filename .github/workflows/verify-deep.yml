@@ -20,7 +20,7 @@ jobs:
           - { os: macos-latest, name: macOS, target: aarch64-apple-darwin }
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           # `external/docker_credential` is the [patch.crates-io] source.
@@ -30,7 +30,7 @@ jobs:
         with:
           target: ${{ matrix.job.target }}
       - name: Install nextest
-        uses: taiki-e/install-action@58e862542551f667fa44c8a2a4a1d64ad477c96a # v2.75.17
+        uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419 # v2.82.7
         with:
           tool: cargo-nextest
       - name: Test
@@ -55,7 +55,7 @@ jobs:
           - { name: Windows ARM64, target: aarch64-pc-windows-msvc }
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           # `external/docker_credential` is the [patch.crates-io] source.
@@ -86,7 +86,7 @@ jobs:
           - { os: windows-latest, name: Windows, target: x86_64-pc-windows-msvc, ext: ".exe" }
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Download Binary
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -98,9 +98,9 @@ jobs:
           mv "test/bin/grim-${{ matrix.job.target }}${{ matrix.job.ext }}" "test/bin/grim${{ matrix.job.ext }}"
           chmod +x test/bin/grim${{ matrix.job.ext }}
       - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
       - name: Setup Task
-        uses: go-task/setup-task@3be4020d41929789a01026e0e427a4321ce0ad44 # v2.0.0
+        uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
       - name: Run Acceptance Tests
         shell: bash
         run: task test -- --junit-xml=results/junit.xml
@@ -125,7 +125,7 @@ jobs:
           pattern: deep-*
           path: artifacts
       - name: Publish Test Results
-        uses: EnricoMi/publish-unit-test-result-action@c950f6fb443cb5af20a377fd0dfaa78838901040 # v2.23.0
+        uses: EnricoMi/publish-unit-test-result-action@d0a4676d0e0b938bc201470d88276b7c74c712b3 # v2.24.0
         with:
           files: "artifacts/**/junit.xml"
           check_name: "Deep Test Results"
