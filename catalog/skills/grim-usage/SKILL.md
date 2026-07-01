@@ -1,6 +1,6 @@
 ---
 name: grim-usage
-description: Drive the grim CLI — the OCI package manager for AI skills, rules, agents, and bundles. Use when installing, updating, searching, or publishing AI-config artifacts with grim; when composing grim init, add, lock, install, update, status, search, tui, mcp, build, release, publish, login, or logout commands; when configuring multiple registries or qualified alias/repo references; or when resolving registries, project vs global scope, client targets, or offline mode.
+description: Drive the grim CLI — the OCI package manager for AI skills, rules, agents, and bundles. Use when installing, updating, searching, or publishing AI-config artifacts with grim; when composing grim init, config, add, lock, install, update, status, search, tui, mcp, build, release, publish, login, or logout commands; when configuring settings, multiple registries, or qualified alias/repo references; or when resolving registries, project vs global scope, client targets, or offline mode.
 license: Apache-2.0
 compatibility: grim>=0.6
 metadata:
@@ -36,6 +36,7 @@ full reference is `--help` plus the docs site linked below.
 | Command | Purpose | Details |
 |---|---|---|
 | `grim init` | Create a fresh `grimoire.toml` | [consume](references/consume.md) |
+| `grim config` | Read/write `grimoire.toml` settings and registries | [registries](references/registries.md) |
 | `grim add` | Declare an artifact and pin it in the lock | [consume](references/consume.md) |
 | `grim lock` | Resolve floating tags to digests | [consume](references/consume.md) |
 | `grim install` | Materialize the lock into AI clients | [consume](references/consume.md) |
@@ -105,4 +106,4 @@ multi-registry browse behavior in
 
 ---
 
-Verified against grim 0.6.1.
+Verified against grim 0.6.2.

@@ -5,11 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.2] - 2026-07-01
 
 ### Added
 
-- Read and write `grimoire.toml` settings and `[[registries]]` from the CLI via `grim config get|set|unset|list` and `grim config registry add|rm|use|show|list` *(config)*
+- Add grim config command for settings and registries *(config)*
+- Accept multiple --registry values *(cli)*
+
+### Fixed
+
+- Group namespaced-registry rows under their configured root *(tui)*
 
 ## [0.6.1] - 2026-06-30
 
@@ -25,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Detect updates via fresh tag discovery, not the cached catalog tag *(tui)*
+
+### Release
+
+- V0.6.1
 
 ## [0.6.0] - 2026-06-21
 
@@ -264,6 +273,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Make release-update.sh executable; add rolling-release regression tests
 - Contact loopback registries over plain HTTP on any port
+[0.6.2]: https://github.com/michael-herwig/grimoire/compare/v0.6.1..v0.6.2
 [0.6.1]: https://github.com/michael-herwig/grimoire/compare/v0.6.0..v0.6.1
 [0.6.0]: https://github.com/michael-herwig/grimoire/compare/v0.5.0..v0.6.0
 [0.5.0]: https://github.com/michael-herwig/grimoire/compare/v0.4.3..v0.5.0

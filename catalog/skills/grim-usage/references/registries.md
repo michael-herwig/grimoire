@@ -6,6 +6,7 @@ lands in, how offline mode behaves, or how to search a catalog.
 
 Contents: [Registry Resolution](#registry-resolution) ·
 [Multiple Registries](#multiple-registries) ·
+[Managing Config](#managing-config) ·
 [Qualified References](#qualified-references) ·
 [Scopes](#scopes) · [Client Targets](#client-targets) ·
 [Offline Mode](#offline-mode) · [Search, TUI, and MCP](#search-tui-and-mcp)
@@ -93,6 +94,49 @@ A config with no `[[registries]]` behaves exactly as before — the
 built-in fallback chain still applies (see [Registry Resolution](#registry-resolution)).
 Confirm with `grim --help` and `grim search --help`.
 
+## Managing Config {#managing-config}
+
+`grim config` (0.6.2+) reads and writes `grimoire.toml`, modeled on `git
+config`, so you rarely hand-edit the file. It covers **settings**
+(`[options]`, `[options.tui]`) and **named registries** (`[[registries]]`) —
+but **not declarations** (`[skills]` / `[rules]` / `[agents]` / `[bundles]`),
+which stay under `grim add` / `grim remove` because those must re-resolve the
+lock on every change.
+
+- **Settings** use dotted keys — `grim config get|set|unset <key>` and
+  `grim config list`:
+
+  ```sh
+  grim config set   options.clients claude,opencode
+  grim config set   options.tui.default_view tree
+  grim config get   options.clients          # bare value on one line; exit 1 if unset
+  grim config list                           # every explicitly-set key in this scope
+  ```
+
+- **Registries** use lifecycle verbs under `grim config registry`:
+
+  ```sh
+  grim config registry add acme --url ghcr.io/acme   # create an entry (--url required)
+  grim config registry use acme                       # set default, clearing all others atomically
+  grim config registry list                           # all entries in this scope
+  grim config registry rm  acme
+  ```
+
+  `registry use` is the correct way to change the default registry.
+
+Scope follows the usual rule — project by default, `--global` for the global
+config, `--config <path>` for an explicit file; each invocation reads or
+writes exactly one scope (never merged). `get` prints the bare value so it
+scripts cleanly (`$(grim config get options.clients)`), exiting `1` when the
+key is valid but unset. Add `--format json` to any subcommand for
+machine-readable output.
+
+**Every grim write is lossy**: comments and the `#:schema` directive are
+stripped from `grimoire.toml` on any `grim config` / `grim add` / `grim
+remove`. The full dotted-key list, JSON shapes, and exit codes live in the
+[command reference][config-cmd] — never memorize them; confirm with `grim
+config --help`.
+
 ## Qualified References {#qualified-references}
 
 A `[[registries]]` alias enables the `alias/repo[:tag]` qualified form:
@@ -144,7 +188,9 @@ layout. `grim install` and `grim update` choose targets by precedence:
    never silently targets zero clients or prefers one
 
 The detected set is recomputed each run, never written back to config.
-Pin `[options].clients` when you want deterministic targets in CI.
+Pin `[options].clients` when you want deterministic targets in CI — set it
+with `grim config set options.clients claude,opencode` (see [Managing
+Config](#managing-config)).
 
 ## Offline Mode
 
@@ -199,7 +245,9 @@ live install state, multi-select with batch install/update/delete, and a
 detail pane per entry. Press `t` to toggle between the flat list and a
 grouped collapsible tree view; the tree's opening mode and path-splitting
 characters are configurable via `[options.tui]` in `grimoire.toml`
-(`default_view`, `group_by_type`, `tree_separators`). When `[[registries]]`
+(`default_view`, `group_by_type`, `tree_separators` — set them with `grim
+config set options.tui.<key>`, see [Managing Config](#managing-config)).
+When `[[registries]]`
 are configured, the TUI browses all of them, one collapsible root per
 registry; with exactly one it elides that root. A `--registry` flag collapses
 the browse to exactly the registries it names (repeatable /
@@ -256,6 +304,7 @@ Confirm current flags with `grim mcp --help`.
 [online]: https://michael-herwig.github.io/grimoire/concepts.html#online-by-default-offline-on-demand
 [envvars]: https://michael-herwig.github.io/grimoire/configuration.html#environment-variables
 [registry-compat]: https://michael-herwig.github.io/grimoire/configuration.html#registry-compatibility
+[config-cmd]: https://michael-herwig.github.io/grimoire/commands.html#config
 [search]: https://michael-herwig.github.io/grimoire/commands.html#search
 [tui]: https://michael-herwig.github.io/grimoire/commands.html#tui
 [mcp]: https://michael-herwig.github.io/grimoire/commands.html#mcp
