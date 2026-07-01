@@ -40,7 +40,7 @@ concurrency:
 
 env:
   # Pin ocx so the package commands behave exactly as validated locally.
-  OCX_VERSION: "0.3.4"
+  OCX_VERSION: "0.3.10"
   # Make the implicit registry explicit (package test uses a registry-less id).
   OCX_DEFAULT_REGISTRY: ocx.sh
 
@@ -57,7 +57,7 @@ jobs:
           lfs: true
 
       - name: Install OCX
-        uses: ocx-sh/setup-ocx@0a39e58f272e7b4e2e46cfa89cdbad2a3578d2cc # v1.1.0
+        uses: ocx-sh/setup-ocx@8cd2f38eed07c9b79aaed22e61f9ba6b36e967a3 # v1.2.2
         with:
           version: ${{ env.OCX_VERSION }}
           project: "" # binary-only; grimoire has no ocx.toml project to activate
