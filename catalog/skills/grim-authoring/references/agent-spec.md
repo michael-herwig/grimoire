@@ -112,9 +112,9 @@ You are a code reviewer. Examine the diff...
 - [Agent vendor registries][registries] — every projectable key per vendor.
 - [Catalog metadata for agents][pub-agent] — `metadata` map placement.
 
-[agents-doc]: https://michael-herwig.github.io/grimoire/agents.html
-[artifacts-agents]: https://michael-herwig.github.io/grimoire/artifacts.html#agents
-[precedence]: https://michael-herwig.github.io/grimoire/agents.html#override-precedence
-[emit-matrix]: https://michael-herwig.github.io/grimoire/agents.html#emit-matrix
-[registries]: https://michael-herwig.github.io/grimoire/vendor-metadata.html#claude-agent-registry
-[pub-agent]: https://michael-herwig.github.io/grimoire/publishing.html#metadata-agent
+[agents-doc]: https://grimoire.rs/agents.html
+[artifacts-agents]: https://grimoire.rs/artifacts.html#agents
+[precedence]: https://grimoire.rs/agents.html#override-precedence
+[emit-matrix]: https://grimoire.rs/agents.html#emit-matrix
+[registries]: https://grimoire.rs/vendor-metadata.html#claude-agent-registry
+[pub-agent]: https://grimoire.rs/publishing.html#metadata-agent

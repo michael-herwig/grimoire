@@ -4,7 +4,7 @@ version = "0.6.2"
 edition = "2024"
 license = "Apache-2.0"
 description = "An OCI-backed package manager for AI skills and rules"
-repository = "https://github.com/michael-herwig/grimoire"
+repository = "https://github.com/grimoire-rs/grimoire"
 default-run = "grim"
 
 [[bin]]

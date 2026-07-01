@@ -91,7 +91,7 @@ From `test_ai_config.py` (1840 lines) — the *ideas*, never the file: dead-glob
 
 ## 2. → `grim-usage` / `grim-authoring` distillation map
 
-Docs site base: `https://michael-herwig.github.io/grimoire/` (mdBook; pages =
+Docs site base: `https://grimoire.rs/` (mdBook; pages =
 `docs/src/*.md` → `*.html`). Anchors marked *(auto)* are mdBook-slugified
 headings; all others are explicit `{#…}` ids in the source and stable.
 

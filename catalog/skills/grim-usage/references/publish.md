@@ -234,9 +234,9 @@ With no positional registry, `login`/`logout` resolve `--registry`, then
 - [Authentication][auth] — credential resolution, storage tiers, CI.
 - [Command reference: build, release, login, logout][commands].
 
-[publishing]: https://michael-herwig.github.io/grimoire/publishing.html
-[metadata]: https://michael-herwig.github.io/grimoire/publishing.html#metadata
-[batch-publish]: https://michael-herwig.github.io/grimoire/publishing.html#batch-publish
-[editor-schema]: https://michael-herwig.github.io/grimoire/configuration.html#editor-schema
-[auth]: https://michael-herwig.github.io/grimoire/authentication.html
-[commands]: https://michael-herwig.github.io/grimoire/commands.html#build
+[publishing]: https://grimoire.rs/publishing.html
+[metadata]: https://grimoire.rs/publishing.html#metadata
+[batch-publish]: https://grimoire.rs/publishing.html#batch-publish
+[editor-schema]: https://grimoire.rs/configuration.html#editor-schema
+[auth]: https://grimoire.rs/authentication.html
+[commands]: https://grimoire.rs/commands.html#build

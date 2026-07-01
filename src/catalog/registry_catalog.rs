@@ -58,8 +58,7 @@ pub const CATALOG_GATED_REGISTRIES: &str = "GitLab SaaS, GHCR, Docker Hub";
 /// Docs anchor for the registry-compatibility table (which registries support
 /// `_catalog` browse vs. explicit-reference operations). Single source of truth
 /// for the link emitted by `grim search` and the TUI.
-pub const REGISTRY_COMPAT_DOCS_URL: &str =
-    "https://michael-herwig.github.io/grimoire/configuration.html#registry-compatibility";
+pub const REGISTRY_COMPAT_DOCS_URL: &str = "https://grimoire.rs/configuration.html#registry-compatibility";
 
 /// On-disk catalog envelope version.
 ///

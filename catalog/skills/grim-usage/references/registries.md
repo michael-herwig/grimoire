@@ -299,14 +299,14 @@ Confirm current flags with `grim mcp --help`.
   schema, precedence rules, data layout under `GRIM_HOME`.
 - [Command reference: search][search], [tui][tui], and [mcp][mcp].
 
-[scopes]: https://michael-herwig.github.io/grimoire/concepts.html#scopes
-[clients]: https://michael-herwig.github.io/grimoire/concepts.html#clients
-[online]: https://michael-herwig.github.io/grimoire/concepts.html#online-by-default-offline-on-demand
-[envvars]: https://michael-herwig.github.io/grimoire/configuration.html#environment-variables
-[registry-compat]: https://michael-herwig.github.io/grimoire/configuration.html#registry-compatibility
-[config-cmd]: https://michael-herwig.github.io/grimoire/commands.html#config
-[search]: https://michael-herwig.github.io/grimoire/commands.html#search
-[tui]: https://michael-herwig.github.io/grimoire/commands.html#tui
-[mcp]: https://michael-herwig.github.io/grimoire/commands.html#mcp
+[scopes]: https://grimoire.rs/concepts.html#scopes
+[clients]: https://grimoire.rs/concepts.html#clients
+[online]: https://grimoire.rs/concepts.html#online-by-default-offline-on-demand
+[envvars]: https://grimoire.rs/configuration.html#environment-variables
+[registry-compat]: https://grimoire.rs/configuration.html#registry-compatibility
+[config-cmd]: https://grimoire.rs/commands.html#config
+[search]: https://grimoire.rs/commands.html#search
+[tui]: https://grimoire.rs/commands.html#tui
+[mcp]: https://grimoire.rs/commands.html#mcp
 [mcp-spec]: https://spec.modelcontextprotocol.io/
 [claude-code]: https://docs.anthropic.com/en/docs/claude-code

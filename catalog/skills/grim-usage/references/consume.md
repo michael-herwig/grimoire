@@ -159,8 +159,8 @@ the members no other declaration still holds.
 - [Configuration][config-toml] — `grimoire.toml` and `grimoire.lock`
   shape, scopes on disk.
 
-[quickstart]: https://michael-herwig.github.io/grimoire/quickstart.html
-[commands]: https://michael-herwig.github.io/grimoire/commands.html
-[lock]: https://michael-herwig.github.io/grimoire/concepts.html#the-lock
-[bundles]: https://michael-herwig.github.io/grimoire/concepts.html#bundles
-[config-toml]: https://michael-herwig.github.io/grimoire/configuration.html
+[quickstart]: https://grimoire.rs/quickstart.html
+[commands]: https://grimoire.rs/commands.html
+[lock]: https://grimoire.rs/concepts.html#the-lock
+[bundles]: https://grimoire.rs/concepts.html#bundles
+[config-toml]: https://grimoire.rs/configuration.html

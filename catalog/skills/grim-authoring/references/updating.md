@@ -39,9 +39,9 @@ On every grim **minor** release:
 
 ## Canonical Links
 
-[artifacts]: https://michael-herwig.github.io/grimoire/artifacts.html
-[vendor]: https://michael-herwig.github.io/grimoire/vendor-metadata.html
-[publishing]: https://michael-herwig.github.io/grimoire/publishing.html
-[agents]: https://michael-herwig.github.io/grimoire/agents.html
-[src-skill]: https://github.com/michael-herwig/grimoire/tree/main/src/skill
-[src-install]: https://github.com/michael-herwig/grimoire/tree/main/src/install
+[artifacts]: https://grimoire.rs/artifacts.html
+[vendor]: https://grimoire.rs/vendor-metadata.html
+[publishing]: https://grimoire.rs/publishing.html
+[agents]: https://grimoire.rs/agents.html
+[src-skill]: https://github.com/grimoire-rs/grimoire/tree/main/src/skill
+[src-install]: https://github.com/grimoire-rs/grimoire/tree/main/src/install

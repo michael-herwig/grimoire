@@ -6,7 +6,7 @@ compatibility: grim>=0.6
 metadata:
   summary: How to use the grim CLI end to end
   keywords: grim,grimoire,cli,oci,registry,install,update,publish,skills,rules,agents,bundles,mcp,multi-registry
-  repository: https://github.com/michael-herwig/grimoire
+  repository: https://github.com/grimoire-rs/grimoire
 ---
 
 # Grim Usage
@@ -98,11 +98,11 @@ multi-registry browse behavior in
 - [Publishing][publishing] — the author-to-release workflow.
 - [Authentication][auth] — credential store, login/logout, CI recipes.
 
-[commands]: https://michael-herwig.github.io/grimoire/commands.html
-[concepts]: https://michael-herwig.github.io/grimoire/concepts.html
-[config]: https://michael-herwig.github.io/grimoire/configuration.html
-[publishing]: https://michael-herwig.github.io/grimoire/publishing.html
-[auth]: https://michael-herwig.github.io/grimoire/authentication.html
+[commands]: https://grimoire.rs/commands.html
+[concepts]: https://grimoire.rs/concepts.html
+[config]: https://grimoire.rs/configuration.html
+[publishing]: https://grimoire.rs/publishing.html
+[auth]: https://grimoire.rs/authentication.html
 
 ---
 

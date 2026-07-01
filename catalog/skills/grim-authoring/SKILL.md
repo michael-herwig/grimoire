@@ -6,7 +6,7 @@ compatibility: grim>=0.6
 metadata:
   summary: Deep authoring guide for grim skill, rule, agent, and bundle artifacts
   keywords: grim,grimoire,authoring,frontmatter,validation,vendor-metadata,skill,rule,agent,bundle,packaging
-  repository: https://github.com/michael-herwig/grimoire
+  repository: https://github.com/grimoire-rs/grimoire
 ---
 
 # Grim Artifact Authoring
@@ -108,7 +108,7 @@ trust the tool. Treat this skill as the map, not the territory.
 
 Verified against grim 0.6.1.
 
-[artifacts]: https://michael-herwig.github.io/grimoire/artifacts.html
-[vendor]: https://michael-herwig.github.io/grimoire/vendor-metadata.html
-[publishing]: https://michael-herwig.github.io/grimoire/publishing.html
-[agents]: https://michael-herwig.github.io/grimoire/agents.html
+[artifacts]: https://grimoire.rs/artifacts.html
+[vendor]: https://grimoire.rs/vendor-metadata.html
+[publishing]: https://grimoire.rs/publishing.html
+[agents]: https://grimoire.rs/agents.html

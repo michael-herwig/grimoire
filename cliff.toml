@@ -35,15 +35,15 @@ footer = """
     {% if release.version -%}
         {% if release.previous.version -%}
             [{{ release.version | trim_start_matches(pat="v") }}]: \
-                https://github.com/michael-herwig/grimoire\
+                https://github.com/grimoire-rs/grimoire\
                     /compare/{{ release.previous.version }}..{{ release.version }}
         {% else -%}
             [{{ release.version | trim_start_matches(pat="v") }}]: \
-                https://github.com/michael-herwig/grimoire/tree/{{ release.version }}
+                https://github.com/grimoire-rs/grimoire/tree/{{ release.version }}
         {% endif -%}
     {% else -%}
         {% if release.previous.version -%}
-            [unreleased]: https://github.com/michael-herwig/grimoire\
+            [unreleased]: https://github.com/grimoire-rs/grimoire\
                 /compare/{{ release.previous.version }}..HEAD
         {% endif -%}
     {% endif -%}

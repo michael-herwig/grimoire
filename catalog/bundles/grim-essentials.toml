@@ -9,7 +9,7 @@
 summary = "Grimoire first-party starter pack"
 keywords = "grimoire,grim,skills,authoring,ai-config,oci,starter"
 description = "First-party skills: using the grim CLI, vendor-neutral AI-config authoring craft, and grim artifact authoring"
-repository = "https://github.com/michael-herwig/grimoire"
+repository = "https://github.com/grimoire-rs/grimoire"
 
 [skills]
 grim-usage = "grim.ocx.sh/skills/grim-usage:0"

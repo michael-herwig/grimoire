@@ -106,6 +106,6 @@ rust-style = "ghcr.io/acme/rust-style:2"
 - [Publishing bundles][pub-bundles] — build/release walk-through.
 - [Floating or pinned members][pin] — `--pin` semantics.
 
-[bundles-ref]: https://michael-herwig.github.io/grimoire/artifacts.html#bundles
-[pub-bundles]: https://michael-herwig.github.io/grimoire/publishing.html#bundles
-[pin]: https://michael-herwig.github.io/grimoire/publishing.html#pin
+[bundles-ref]: https://grimoire.rs/artifacts.html#bundles
+[pub-bundles]: https://grimoire.rs/publishing.html#bundles
+[pin]: https://grimoire.rs/publishing.html#pin

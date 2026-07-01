@@ -6,14 +6,14 @@
 # downloaded archive's SHA-256 before installing; this stable URL is just a
 # front door so the install command does not have to name a version.
 #
-#   curl --proto '=https' --tlsv1.2 -LsSf https://michael-herwig.github.io/grimoire/install.sh | sh
+#   curl --proto '=https' --tlsv1.2 -LsSf https://grimoire.rs/install.sh | sh
 #
 # Honors the same environment as the cargo-dist installer, e.g.
 # GRIMOIRE_INSTALL_DIR to choose the install location. Any arguments to this
 # script are forwarded to the cargo-dist installer (e.g. --no-modify-path).
 set -eu
 
-INSTALLER_URL="https://github.com/michael-herwig/grimoire/releases/latest/download/grimoire-installer.sh"
+INSTALLER_URL="https://github.com/grimoire-rs/grimoire/releases/latest/download/grimoire-installer.sh"
 
 tmp="$(mktemp)" || {
     echo "grim install: cannot create a temporary file" >&2
