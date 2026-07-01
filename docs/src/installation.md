@@ -16,13 +16,13 @@ Install ocx once — its installer wires up your shell so ocx-managed binaries
 land on `PATH`:
 
 ```sh
-curl -fsSL https://ocx.sh/install.sh | sh
+curl -fsSL https://setup.ocx.sh/sh | sh
 ```
 
 On Windows, install ocx with [PowerShell][powershell] 7.4 or newer:
 
 ```powershell
-irm https://ocx.sh/install.ps1 | iex
+irm https://setup.ocx.sh/pwsh | iex
 ```
 
 Then install `grim` and make it the current version:
