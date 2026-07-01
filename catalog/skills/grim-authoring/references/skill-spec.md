@@ -139,13 +139,13 @@ All hard errors exit 65 (DataError) at `grim build` / `grim release`.
 - [Vendor extensions][vendor-ext] — how `claude.*` keys project.
 - [agentskills specification][agentskills] — the upstream open standard.
 
-[skills-ref]: https://michael-herwig.github.io/grimoire/artifacts.html#skills
-[names]: https://michael-herwig.github.io/grimoire/artifacts.html#names
-[skill-full]: https://michael-herwig.github.io/grimoire/artifacts.html#skill-example-full
-[pub-metadata]: https://michael-herwig.github.io/grimoire/publishing.html#metadata-skill
-[annotations]: https://michael-herwig.github.io/grimoire/artifacts.html#annotations
-[vendor-ext]: https://michael-herwig.github.io/grimoire/artifacts.html#vendor-extensions
-[empty-registries]: https://michael-herwig.github.io/grimoire/vendor-metadata.html#empty-registries
-[projection]: https://michael-herwig.github.io/grimoire/vendor-metadata.html#projection-semantics
-[migration]: https://michael-herwig.github.io/grimoire/vendor-metadata.html#migration
+[skills-ref]: https://grimoire.rs/artifacts.html#skills
+[names]: https://grimoire.rs/artifacts.html#names
+[skill-full]: https://grimoire.rs/artifacts.html#skill-example-full
+[pub-metadata]: https://grimoire.rs/publishing.html#metadata-skill
+[annotations]: https://grimoire.rs/artifacts.html#annotations
+[vendor-ext]: https://grimoire.rs/artifacts.html#vendor-extensions
+[empty-registries]: https://grimoire.rs/vendor-metadata.html#empty-registries
+[projection]: https://grimoire.rs/vendor-metadata.html#projection-semantics
+[migration]: https://grimoire.rs/vendor-metadata.html#migration
 [agentskills]: https://agentskills.io/specification

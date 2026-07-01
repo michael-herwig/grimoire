@@ -122,6 +122,6 @@ Exit 80 is the registry rejecting your credential. Things to know:
 - [Configuration][config] — config/lock shape behind the 78-class
   errors.
 
-[commands]: https://michael-herwig.github.io/grimoire/commands.html
-[auth]: https://michael-herwig.github.io/grimoire/authentication.html
-[config]: https://michael-herwig.github.io/grimoire/configuration.html
+[commands]: https://grimoire.rs/commands.html
+[auth]: https://grimoire.rs/authentication.html
+[config]: https://grimoire.rs/configuration.html

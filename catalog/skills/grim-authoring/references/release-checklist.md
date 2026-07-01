@@ -80,8 +80,8 @@ members) surface as config/parse failures rather than 65 — see
 - [Dry runs and overwrites][dry-run] — preview and immutability.
 - [Cascade tags][cascade] — what a release actually moves.
 
-[validate]: https://michael-herwig.github.io/grimoire/publishing.html#validate-before-you-push
-[dry-run]: https://michael-herwig.github.io/grimoire/publishing.html#dry-runs-and-overwrites
-[cascade]: https://michael-herwig.github.io/grimoire/publishing.html#cascade-tags
-[pin]: https://michael-herwig.github.io/grimoire/publishing.html#pin
-[publish-val]: https://michael-herwig.github.io/grimoire/vendor-metadata.html#publish-validation
+[validate]: https://grimoire.rs/publishing.html#validate-before-you-push
+[dry-run]: https://grimoire.rs/publishing.html#dry-runs-and-overwrites
+[cascade]: https://grimoire.rs/publishing.html#cascade-tags
+[pin]: https://grimoire.rs/publishing.html#pin
+[publish-val]: https://grimoire.rs/vendor-metadata.html#publish-validation

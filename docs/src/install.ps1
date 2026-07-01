@@ -5,8 +5,8 @@
 # the downloaded archive's SHA-256 before installing; this stable URL is just
 # a front door so the install command does not have to name a version.
 #
-#   irm https://michael-herwig.github.io/grimoire/install.ps1 | iex
+#   irm https://grimoire.rs/install.ps1 | iex
 #
 $ErrorActionPreference = 'Stop'
-$installer = 'https://github.com/michael-herwig/grimoire/releases/latest/download/grimoire-installer.ps1'
+$installer = 'https://github.com/grimoire-rs/grimoire/releases/latest/download/grimoire-installer.ps1'
 Invoke-Expression (Invoke-RestMethod -Uri $installer)

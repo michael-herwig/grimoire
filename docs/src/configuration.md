@@ -15,7 +15,7 @@ The declaration file. An `[options]` table holds defaults, and `[skills]` /
 `[rules]` / `[agents]` map each binding name to a reference:
 
 ```toml
-#:schema https://michael-herwig.github.io/grimoire/schemas/grimoire-config.schema.json
+#:schema https://grimoire.rs/schemas/grimoire-config.schema.json
 [[registries]]
 url = "ghcr.io/acme"
 default = true
@@ -108,7 +108,7 @@ Each entry has one required field and two optional fields:
 | `default` | no | Marks this entry as the primary registry short identifiers expand against. At most one entry may set it; when none do, the first entry is primary. |
 
 ```toml
-#:schema https://michael-herwig.github.io/grimoire/schemas/grimoire-config.schema.json
+#:schema https://grimoire.rs/schemas/grimoire-config.schema.json
 [[registries]]
 alias = "acme"
 url = "ghcr.io/acme"
@@ -263,15 +263,15 @@ are generated from grim's own parser, so they accept exactly what grim accepts.
 
 | File | Schema URL |
 |------|------------|
-| `grimoire.toml` | `https://michael-herwig.github.io/grimoire/schemas/grimoire-config.schema.json` |
-| `publish.toml` | `https://michael-herwig.github.io/grimoire/schemas/grim-publish.schema.json` |
+| `grimoire.toml` | `https://grimoire.rs/schemas/grimoire-config.schema.json` |
+| `publish.toml` | `https://grimoire.rs/schemas/grim-publish.schema.json` |
 
 [Taplo](https://taplo.tamasfe.dev/) and the
 [Even Better TOML](https://marketplace.visualstudio.com/items?itemName=tamasfe.even-better-toml)
 VS Code extension bind a file to its schema through a first-line directive:
 
 ```toml
-#:schema https://michael-herwig.github.io/grimoire/schemas/grimoire-config.schema.json
+#:schema https://grimoire.rs/schemas/grimoire-config.schema.json
 ```
 
 To regenerate or inspect a schema locally, use [`grim schema`](./commands.md#schema):

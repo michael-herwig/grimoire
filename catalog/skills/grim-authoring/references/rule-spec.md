@@ -123,9 +123,9 @@ Prefer `&str` over `String` parameters...
 - [Rules with a support directory][support-dir] — packing semantics.
 - [Rule-level vendor keys][rule-keys] — per-client transform detail.
 
-[rules-ref]: https://michael-herwig.github.io/grimoire/artifacts.html#rules
-[pub-rule]: https://michael-herwig.github.io/grimoire/publishing.html#metadata-rule
-[support-dir]: https://michael-herwig.github.io/grimoire/publishing.html#rule-support-dir
-[rule-keys]: https://michael-herwig.github.io/grimoire/vendor-metadata.html#rule-keys
-[rule-vendor-ex]: https://michael-herwig.github.io/grimoire/vendor-metadata.html#rule-authoring-example
-[common-unique]: https://michael-herwig.github.io/grimoire/vendor-metadata.html#common-vs-unique
+[rules-ref]: https://grimoire.rs/artifacts.html#rules
+[pub-rule]: https://grimoire.rs/publishing.html#metadata-rule
+[support-dir]: https://grimoire.rs/publishing.html#rule-support-dir
+[rule-keys]: https://grimoire.rs/vendor-metadata.html#rule-keys
+[rule-vendor-ex]: https://grimoire.rs/vendor-metadata.html#rule-authoring-example
+[common-unique]: https://grimoire.rs/vendor-metadata.html#common-vs-unique

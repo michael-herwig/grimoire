@@ -18,5 +18,5 @@ keeping agent configuration versioned, shareable, and reproducible.
 
 ## Links
 
-- [Grimoire documentation](https://michael-herwig.github.io/grimoire/)
-- [Grimoire on GitHub](https://github.com/michael-herwig/grimoire)
+- [Grimoire documentation](https://grimoire.rs/)
+- [Grimoire on GitHub](https://github.com/grimoire-rs/grimoire)

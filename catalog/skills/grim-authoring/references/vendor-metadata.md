@@ -98,13 +98,13 @@ to silence the nudge and gain type conversion ([migration][migration]).
 - [Projection semantics][projection] — the full outcome table.
 - [Publish-time validation][publish-val] — when the gate runs.
 
-[why]: https://michael-herwig.github.io/grimoire/vendor-metadata.html#why-metadata
-[projection]: https://michael-herwig.github.io/grimoire/vendor-metadata.html#projection-semantics
-[claude-reg]: https://michael-herwig.github.io/grimoire/vendor-metadata.html#claude-registry
-[claude-agent-reg]: https://michael-herwig.github.io/grimoire/vendor-metadata.html#claude-agent-registry
-[opencode-agent-reg]: https://michael-herwig.github.io/grimoire/vendor-metadata.html#opencode-agent-registry
-[copilot-agent-reg]: https://michael-herwig.github.io/grimoire/vendor-metadata.html#copilot-agent-registry
-[rule-keys]: https://michael-herwig.github.io/grimoire/vendor-metadata.html#rule-keys
-[empty-reg]: https://michael-herwig.github.io/grimoire/vendor-metadata.html#empty-registries
-[publish-val]: https://michael-herwig.github.io/grimoire/vendor-metadata.html#publish-validation
-[migration]: https://michael-herwig.github.io/grimoire/vendor-metadata.html#migration
+[why]: https://grimoire.rs/vendor-metadata.html#why-metadata
+[projection]: https://grimoire.rs/vendor-metadata.html#projection-semantics
+[claude-reg]: https://grimoire.rs/vendor-metadata.html#claude-registry
+[claude-agent-reg]: https://grimoire.rs/vendor-metadata.html#claude-agent-registry
+[opencode-agent-reg]: https://grimoire.rs/vendor-metadata.html#opencode-agent-registry
+[copilot-agent-reg]: https://grimoire.rs/vendor-metadata.html#copilot-agent-registry
+[rule-keys]: https://grimoire.rs/vendor-metadata.html#rule-keys
+[empty-reg]: https://grimoire.rs/vendor-metadata.html#empty-registries
+[publish-val]: https://grimoire.rs/vendor-metadata.html#publish-validation
+[migration]: https://grimoire.rs/vendor-metadata.html#migration

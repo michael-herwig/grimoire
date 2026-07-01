@@ -21,7 +21,7 @@ use crate::cli::exit_code::ExitCode;
 
 /// Base URL the published schemas are hosted at (the GitHub Pages docs
 /// site). Joined with each kind's filename to form the `$id`.
-const SCHEMA_BASE_URL: &str = "https://michael-herwig.github.io/grimoire/schemas";
+const SCHEMA_BASE_URL: &str = "https://grimoire.rs/schemas";
 
 /// The JSON Schema draft the generated documents declare via `$schema`.
 const SCHEMA_DRAFT: &str = "https://json-schema.org/draft/2020-12/schema";
@@ -134,10 +134,7 @@ mod tests {
     #[test]
     fn config_schema_carries_id_title_draft_and_strict_object() {
         let v = parsed(SchemaKind::Config);
-        assert_eq!(
-            v["$id"],
-            "https://michael-herwig.github.io/grimoire/schemas/grimoire-config.schema.json"
-        );
+        assert_eq!(v["$id"], "https://grimoire.rs/schemas/grimoire-config.schema.json");
         assert_eq!(v["$schema"], SCHEMA_DRAFT);
         assert_eq!(v["title"], "grimoire.toml — Grimoire declaration file");
         // `deny_unknown_fields` on RawConfig ⇒ additionalProperties:false, so
@@ -148,10 +145,7 @@ mod tests {
     #[test]
     fn publish_schema_carries_id_title_and_requires_registry() {
         let v = parsed(SchemaKind::Publish);
-        assert_eq!(
-            v["$id"],
-            "https://michael-herwig.github.io/grimoire/schemas/grim-publish.schema.json"
-        );
+        assert_eq!(v["$id"], "https://grimoire.rs/schemas/grim-publish.schema.json");
         assert_eq!(v["$schema"], SCHEMA_DRAFT);
         assert_eq!(v["title"], "publish.toml — Grimoire publish manifest");
         assert_eq!(v["additionalProperties"], serde_json::Value::Bool(false));

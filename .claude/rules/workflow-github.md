@@ -26,7 +26,7 @@ Prefer `mcp__github__*` MCP tools for typed access. `gh` CLI = fallback when MCP
 
 ---
 
-## Issue Types (org-level, `michael-herwig`)
+## Issue Types (org-level, `grimoire-rs`)
 
 Every issue MUST have type. Types replace old `bug` / `enhancement` / `chore` labels entirely. Types do NOT apply to PRs — use labels on PRs for cross-cutting concerns.
 
@@ -41,13 +41,13 @@ Every issue MUST have type. Types replace old `bug` / `enhancement` / `chore` la
 
 **When ambiguous**: perf-motivated refactor = **Performance**, not Task. Bug fix that add new flag still **Bug**. New doc site feature (beyond docs content) = **Feature**.
 
-Discover types via `mcp__github__list_issue_types` (or `env -u GITHUB_TOKEN gh api /orgs/michael-herwig/issue-types`).
+Discover types via `mcp__github__list_issue_types` (or `env -u GITHUB_TOKEN gh api /orgs/grimoire-rs/issue-types`).
 
 **Setting type on issue.** Prefer `mcp__github__issue_write` (supports `type:` natively). If fall back to `gh`, note `gh issue create/edit` no `--type` flag — use GraphQL `updateIssue` mutation with type's node id. Fetch ids once, then update:
 
 ```sh
 # 1. fetch org type ids (one-shot)
-gh api graphql -f query='query { organization(login:"michael-herwig") { issueTypes(first:20) { nodes { id name } } } }'
+gh api graphql -f query='query { organization(login:"grimoire-rs") { issueTypes(first:20) { nodes { id name } } } }'
 
 # 2. fetch issue node id
 gh issue view <N> --json id

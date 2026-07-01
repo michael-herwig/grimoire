@@ -86,4 +86,4 @@ plain pushes to main.
   against the sources in `references/updating.md` before trusting.
 
 [agentskills.io specification]: https://agentskills.io/specification
-[docs site]: https://michael-herwig.github.io/grimoire/
+[docs site]: https://grimoire.rs/

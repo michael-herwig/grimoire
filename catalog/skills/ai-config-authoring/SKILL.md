@@ -5,7 +5,7 @@ license: Apache-2.0
 metadata:
   summary: Vendor-neutral craft guide for authoring AI agent config
   keywords: authoring,skills,rules,agents,progressive-disclosure,context,descriptions,best-practices
-  repository: https://github.com/michael-herwig/grimoire
+  repository: https://github.com/grimoire-rs/grimoire
 ---
 
 # AI Config Authoring
@@ -98,7 +98,7 @@ grim add grim.ocx.sh/skills/grim-authoring:0 && grim install
 - [OpenCode skills documentation][oc] — OpenCode's skill discovery paths
   and activation model.
 
-[grimoire]: https://github.com/michael-herwig/grimoire
+[grimoire]: https://github.com/grimoire-rs/grimoire
 [spec]: https://agentskills.io/specification
 [bp]: https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices
 [ctx]: https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents

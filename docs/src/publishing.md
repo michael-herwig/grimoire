@@ -363,7 +363,7 @@ kind tables. Each table entry is a sub-table keyed by name with a required
 `version` field:
 
 ```toml
-#:schema https://michael-herwig.github.io/grimoire/schemas/grim-publish.schema.json
+#:schema https://grimoire.rs/schemas/grim-publish.schema.json
 registry = "grim.ocx.sh"          # required; overridden by --registry
 
 [skills.grim-usage]
@@ -395,7 +395,7 @@ immediately rather than silently using a default.
 The first line above is a [Taplo](https://taplo.tamasfe.dev/) /
 [Even Better TOML](https://marketplace.visualstudio.com/items?itemName=tamasfe.even-better-toml)
 `#:schema` directive that binds the manifest to its published [JSON
-Schema](https://michael-herwig.github.io/grimoire/schemas/grim-publish.schema.json),
+Schema](https://grimoire.rs/schemas/grim-publish.schema.json),
 so a supporting editor autocompletes keys and flags a typo before you ever run
 `grim publish`. The schema is generated from grim's own manifest parser — see
 [Editor schema support](./configuration.md#editor-schema) for both schema URLs
@@ -434,7 +434,7 @@ Resolution precedence per entry (highest first):
 3. default → `{kind.subdir()}/{name}` (unchanged backward-compatible behavior)
 
 ```toml
-#:schema https://michael-herwig.github.io/grimoire/schemas/grim-publish.schema.json
+#:schema https://grimoire.rs/schemas/grim-publish.schema.json
 registry = "registry.gitlab.com"
 repository_prefix = "durzn-technology/hearth/skill"
 

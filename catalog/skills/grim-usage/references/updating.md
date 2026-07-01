@@ -46,8 +46,8 @@ a reference file has accreted one, delete it and link instead.
 - [Publishing][publishing] — publish.md
 - [Authentication][auth] — publish.md, troubleshooting.md
 
-[commands]: https://michael-herwig.github.io/grimoire/commands.html
-[concepts]: https://michael-herwig.github.io/grimoire/concepts.html
-[config]: https://michael-herwig.github.io/grimoire/configuration.html
-[publishing]: https://michael-herwig.github.io/grimoire/publishing.html
-[auth]: https://michael-herwig.github.io/grimoire/authentication.html
+[commands]: https://grimoire.rs/commands.html
+[concepts]: https://grimoire.rs/concepts.html
+[config]: https://grimoire.rs/configuration.html
+[publishing]: https://grimoire.rs/publishing.html
+[auth]: https://grimoire.rs/authentication.html

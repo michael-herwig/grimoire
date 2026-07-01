@@ -30,7 +30,7 @@ Grab a pre-built binary for macOS, Linux, or Windows (aarch64 or x86_64) from
 the [latest release][releases], or build from source:
 
 ```sh
-cargo install --git https://github.com/michael-herwig/grimoire grimoire
+cargo install --git https://github.com/grimoire-rs/grimoire grimoire
 ```
 
 ## Quick Start
@@ -61,11 +61,11 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide.
 Grimoire is licensed under the [Apache License, Version 2.0][license].
 
 <!-- badges -->
-[ci]: https://github.com/michael-herwig/grimoire/actions/workflows/verify-basic.yml
-[ci-badge]: https://github.com/michael-herwig/grimoire/actions/workflows/verify-basic.yml/badge.svg
-[releases]: https://github.com/michael-herwig/grimoire/releases
-[release-badge]: https://img.shields.io/github/v/release/michael-herwig/grimoire
-[docs]: https://michael-herwig.github.io/grimoire/
+[ci]: https://github.com/grimoire-rs/grimoire/actions/workflows/verify-basic.yml
+[ci-badge]: https://github.com/grimoire-rs/grimoire/actions/workflows/verify-basic.yml/badge.svg
+[releases]: https://github.com/grimoire-rs/grimoire/releases
+[release-badge]: https://img.shields.io/github/v/release/grimoire-rs/grimoire
+[docs]: https://grimoire.rs/
 [docs-badge]: https://img.shields.io/badge/docs-grimoire-blue
 [license]: LICENSE
 [license-badge]: https://img.shields.io/badge/license-Apache--2.0-blue.svg

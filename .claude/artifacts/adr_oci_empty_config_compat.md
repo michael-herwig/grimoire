@@ -24,7 +24,7 @@ manifest** — including the config descriptor `mediaType` and the top-level
 non-Docker) types are rejected. The initial fix attempt switched the config
 descriptor to the OCI empty type (`application/vnd.oci.empty.v1+json`) while
 keeping the custom `artifactType`. Real-GitLab testing
-(`registry.gitlab.com/michael-herwig/grimoire-registry-test`, 2026-06-19)
+(`registry.gitlab.com/grimoire-rs/grimoire-registry-test`, 2026-06-19)
 revealed that GitLab rejects the custom `artifactType` too:
 
 ```
@@ -160,7 +160,7 @@ deterministic `{}`.
 **Positive:**
 - `grim release`, `grim add`, and `grim publish --repository-prefix` succeed
   against GitLab Container Registry SaaS without any server-side configuration
-  — confirmed against `registry.gitlab.com/michael-herwig/grimoire-registry-test`
+  — confirmed against `registry.gitlab.com/grimoire-rs/grimoire-registry-test`
   on 2026-06-19.
 - Wire format uses the spec-blessed OCI empty config descriptor (OCI
   image-spec "Guidance for an Empty Descriptor"). Precision: the empty config
@@ -207,7 +207,7 @@ deterministic `{}`.
   (proves kind inference works end-to-end and idempotent re-releases produce
   stable digests).
 - GitLab compatibility: confirmed against
-  `registry.gitlab.com/michael-herwig/grimoire-registry-test` on 2026-06-19.
+  `registry.gitlab.com/grimoire-rs/grimoire-registry-test` on 2026-06-19.
   `grim release` (with cascade tags), `grim add` (kind inferred from
   `com.grimoire.kind`), and `grim publish --repository-prefix` all succeed.
   Both the custom config media type and the custom `artifactType` are rejected
