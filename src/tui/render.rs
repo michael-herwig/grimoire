@@ -726,7 +726,7 @@ pub fn frame(state: &TuiState) -> RenderModel {
                         .map(String::as_str)
                         .chain(state.default_registry.as_deref())
                         .collect();
-                    let (reg, rel) = super::tree::attribute_registry(&r.registry, &r.repository, &configured);
+                    let (reg, rel) = super::tree::display_split(r, &configured);
                     (std::borrow::Cow::Owned(rel), Some(state.registry_label(&reg)))
                 } else {
                     // Single-registry: existing elision behavior (D-ELIDE).
@@ -1465,6 +1465,7 @@ mod tests {
             deprecated: None,
             pinned_version: None,
             state,
+            source: None,
         }
     }
 
@@ -2436,6 +2437,7 @@ mod p2_render_member_node_tests {
             deprecated: None,
             pinned_version: None,
             state: ArtifactState::NotInstalled,
+            source: None,
         }
     }
 
@@ -2457,6 +2459,7 @@ mod p2_render_member_node_tests {
             deprecated: None,
             pinned_version: None,
             state: ArtifactState::Installed,
+            source: None,
         }
     }
 
@@ -2617,6 +2620,7 @@ mod spec_multi_registry_render_tests {
             deprecated: None,
             pinned_version: None,
             state,
+            source: None,
         }
     }
 

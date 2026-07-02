@@ -617,6 +617,7 @@ mod tests {
             deprecated: None,
             pinned_version: None,
             state: ArtifactState::NotInstalled,
+            source: None,
         }
     }
 
@@ -1085,6 +1086,7 @@ mod p2_event_member_node_tests {
             deprecated: None,
             pinned_version: None,
             state: ArtifactState::NotInstalled,
+            source: None,
         }
     }
 
@@ -1106,6 +1108,7 @@ mod p2_event_member_node_tests {
             deprecated: None,
             pinned_version: None,
             state: ArtifactState::NotInstalled,
+            source: None,
         }
     }
 
@@ -1692,6 +1695,7 @@ mod tree_event_tests {
                 deprecated: None,
                 pinned_version: None,
                 state: ArtifactState::NotInstalled,
+                source: None,
             },
             TuiRow {
                 kind: "skill".to_string(),
@@ -1709,6 +1713,7 @@ mod tree_event_tests {
                 deprecated: None,
                 pinned_version: None,
                 state: ArtifactState::NotInstalled,
+                source: None,
             },
         ]);
         s.set_default_registry(Some("reg".to_string()));
@@ -1834,6 +1839,7 @@ mod tree_event_tests {
             deprecated: None,
             pinned_version: None,
             state: crate::tui::state::ArtifactState::NotInstalled,
+            source: None,
         };
         let mut s = TuiState::new();
         s.set_rows(vec![row("acme/nested/tool"), row("acme/sibling")]);

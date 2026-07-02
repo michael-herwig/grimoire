@@ -483,7 +483,9 @@ pub fn build(rows: &[TuiRow], filtered: &[usize], opts: &TreeBuildOptions) -> Tr
         // and the path relative to it, by longest-prefix match on the full ref.
         // A no-op when the row's registry already equals a configured one (the
         // non-namespaced case and the synthetic full-url test rows).
-        let (registry, repository) = attribute_registry(&r.registry, &r.repository, &configured);
+        // Index-sourced rows root at their source locator instead — see
+        // `display_split`.
+        let (registry, repository) = display_split(r, &configured);
 
         // `registry_elided` is the single source of truth from `segments()`.
         // It is true when the full `default_registry` prefix (including any
@@ -577,6 +579,23 @@ pub fn build(rows: &[TuiRow], filtered: &[usize], opts: &TreeBuildOptions) -> Tr
 /// is returned unchanged, so non-namespaced registries and the synthetic
 /// full-url test rows are a no-op.
 ///
+/// The display-oriented `(root, path)` split for one row: an index-sourced
+/// row roots at its **source locator** (`row.source`) with the full OCI ref
+/// as the path — an index locator is not an OCI prefix, so
+/// [`attribute_registry`] could never match it and would fabricate a
+/// bare-host registry root, splitting a namespaced ref like
+/// `ghcr.io/grimoire-rs` into two stacked nodes. Any other row re-attributes
+/// to the longest configured registry prefix as before.
+///
+/// Shared with the flat-list renderer (`render.rs`) so the Registry column
+/// and the shortened Repo cell attribute identically to the tree.
+pub(super) fn display_split(row: &TuiRow, configured: &[&str]) -> (String, String) {
+    match &row.source {
+        Some(source) => (source.clone(), format!("{}/{}", row.registry, row.repository)),
+        None => attribute_registry(&row.registry, &row.repository, configured),
+    }
+}
+
 /// Shared with the flat-list renderer (`render.rs`) so the Registry column and
 /// the shortened Repo cell attribute identically to the tree.
 pub(super) fn attribute_registry(registry: &str, repository: &str, configured: &[&str]) -> (String, String) {
@@ -925,6 +944,7 @@ mod tests {
             deprecated: None,
             pinned_version: None,
             state,
+            source: None,
         }
     }
 
@@ -954,6 +974,7 @@ mod tests {
             deprecated: None,
             pinned_version: None,
             state,
+            source: None,
         }
     }
 
@@ -963,6 +984,16 @@ mod tests {
             group_by_type: false,
             separators: vec!["/".to_string()],
             registry_order: Vec::new(),
+        }
+    }
+
+    /// Build a `TuiRow` that came from a package-index source: `source`
+    /// carries the index locator, `registry`/`repository` the OCI split of
+    /// the pointer's `ref` (bare host + path, as `index_source` stores it).
+    fn index_row(source: &str, registry: &str, repository: &str, kind: &str) -> TuiRow {
+        TuiRow {
+            source: Some(source.to_string()),
+            ..row2(registry, repository, kind, ArtifactState::NotInstalled)
         }
     }
 
@@ -979,6 +1010,112 @@ mod tests {
                 DisplayRow::Member { label, depth, .. } => (label, depth, false),
             })
             .collect()
+    }
+
+    // ── Index-sourced rows group under their source root ─────────────────────
+
+    // Regression (TODO item: "ghcr.io/grimoire-rs is splitted into ghcr.io
+    // and grimoire-rs"): an index-sourced row must group under its SOURCE
+    // root — the index locator is not an OCI prefix, so longest-prefix
+    // attribution can never match it, and anchoring an exempt registry root
+    // at the bare OCI host splits a namespaced ref into host + namespace.
+
+    #[test]
+    fn index_rows_group_under_their_source_root() {
+        let rows = vec![index_row(
+            "https://index.example",
+            "ghcr.io",
+            "grimoire-rs/skills/grim-usage",
+            "skill",
+        )];
+        let opts = TreeBuildOptions {
+            default_registry: None,
+            group_by_type: false,
+            separators: vec!["/".to_string()],
+            registry_order: vec!["https://index.example".to_string()],
+        };
+        let t = build(&rows, &[0], &opts);
+        let s = shape(&t);
+        assert_eq!(
+            s,
+            vec![
+                ("https://index.example".to_string(), 0, true),
+                ("ghcr.io/grimoire-rs/skills".to_string(), 1, true),
+                ("grim-usage".to_string(), 2, false),
+            ],
+            "index row must root at the source; the OCI host/namespace chain compresses"
+        );
+    }
+
+    #[test]
+    fn index_rows_elide_source_and_fold_host_namespace_in_single_source_session() {
+        // The default unconfigured session: one index source, elided. The
+        // OCI host + namespace fold into ONE node ("ghcr.io/grimoire-rs"),
+        // never two stacked registry-style nodes.
+        let rows = vec![
+            index_row(
+                "https://index.example",
+                "ghcr.io",
+                "grimoire-rs/skills/grim-usage",
+                "skill",
+            ),
+            index_row(
+                "https://index.example",
+                "ghcr.io",
+                "grimoire-rs/bundles/grim-essentials",
+                "bundle",
+            ),
+        ];
+        let opts = opts_default(Some("https://index.example"));
+        let t = build(&rows, &[0, 1], &opts);
+        let s = shape(&t);
+        assert_eq!(
+            s,
+            vec![
+                ("ghcr.io/grimoire-rs".to_string(), 0, true),
+                ("bundles".to_string(), 1, true),
+                ("grim-essentials".to_string(), 2, false),
+                ("skills".to_string(), 1, true),
+                ("grim-usage".to_string(), 2, false),
+            ],
+            "single-source session elides the source and folds host/namespace into one node"
+        );
+    }
+
+    #[test]
+    fn index_and_registry_rows_attribute_independently() {
+        // A mixed set: the OCI row attributes to its configured registry by
+        // longest prefix; the index row roots at its source locator. F13
+        // precedence order (registry_order) governs the root order.
+        let rows = vec![
+            index_row(
+                "https://index.example",
+                "ghcr.io",
+                "grimoire-rs/skills/grim-usage",
+                "skill",
+            ),
+            row2("ghcr.io", "acme/tools/code-review", "skill", ArtifactState::Installed),
+        ];
+        let opts = TreeBuildOptions {
+            default_registry: None,
+            group_by_type: false,
+            separators: vec!["/".to_string()],
+            registry_order: vec!["https://index.example".to_string(), "ghcr.io/acme".to_string()],
+        };
+        let t = build(&rows, &[0, 1], &opts);
+        let s = shape(&t);
+        assert_eq!(
+            s,
+            vec![
+                ("https://index.example".to_string(), 0, true),
+                ("ghcr.io/grimoire-rs/skills".to_string(), 1, true),
+                ("grim-usage".to_string(), 2, false),
+                ("ghcr.io/acme".to_string(), 0, true),
+                ("tools".to_string(), 1, true),
+                ("code-review".to_string(), 2, false),
+            ],
+            "index and OCI rows must not share a fabricated bare-host root"
+        );
     }
 
     // ── Step 3.1: tree::build / segments ─────────────────────────────────────
@@ -2113,6 +2250,7 @@ mod p2_member_node_tests {
             deprecated: None,
             pinned_version: None,
             state,
+            source: None,
         }
     }
 
@@ -2572,6 +2710,7 @@ mod spec_multi_registry_tree_tests {
             deprecated: None,
             pinned_version: None,
             state,
+            source: None,
         }
     }
 

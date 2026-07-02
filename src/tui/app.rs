@@ -1081,6 +1081,12 @@ fn kind_or_dash(kind: &Option<String>) -> String {
 /// consumes a `CatalogGroup` (from the multi-registry seam) instead of a
 /// single-registry [`Catalog`].
 fn project_group_rows(group: &catalog_service::CatalogGroup, ctx: &BadgeContext) -> Vec<TuiRow> {
+    // Index-sourced rows carry their source locator so the tree / flat list
+    // group them under the source root: an index locator classifies (git /
+    // http forms), an OCI registry url does not.
+    let source = crate::config::registry_resolve::classify_index(&group.registry)
+        .is_some()
+        .then(|| group.registry.clone());
     group
         .rows
         .iter()
@@ -1107,6 +1113,7 @@ fn project_group_rows(group: &catalog_service::CatalogGroup, ctx: &BadgeContext)
                 version: e.version.clone().or_else(|| e.latest_tag.clone()).unwrap_or_default(),
                 pinned_version: None,
                 state: row_state,
+                source: source.clone(),
             }
         })
         .collect()
@@ -1160,6 +1167,9 @@ fn rows_from_catalog(catalog: &Catalog, ctx: &BadgeContext) -> Vec<TuiRow> {
                 version: e.version.clone().or_else(|| e.latest_tag.clone()).unwrap_or_default(),
                 pinned_version: None,
                 state: row_state,
+                // The background refresh walks a single OCI registry
+                // (`_catalog`); index sources never flow through this path.
+                source: None,
             }
         })
         .collect()
@@ -2109,10 +2119,19 @@ fn registry_order(ctx: &TuiContext) -> Vec<String> {
 }
 
 /// The registry whose root prefix is elided from tree labels — `Some` only
-/// when exactly one registry is in scope (D-ELIDE); `None` otherwise so each
-/// root names its own registry and namespaced roots stay distinguishable.
+/// when exactly one browse source is in scope (D-ELIDE); `None` otherwise so
+/// each root names its own registry and namespaced roots stay
+/// distinguishable.
+///
+/// The elided value is the source's own locator (`registries[0].url`), not
+/// `ctx.primary_registry`: for an index-only set the primary is `""` (index
+/// locators cannot expand short ids), which would never match the rows'
+/// source root and the single-source session would keep a redundant root.
 fn elision_registry(ctx: &TuiContext) -> Option<String> {
-    (ctx.registries.len() == 1).then(|| ctx.primary_registry.clone())
+    match ctx.registries.as_slice() {
+        [only] => Some(only.url.clone()),
+        _ => None,
+    }
 }
 
 /// Split a bundle member `repo` into its authoritative `(registry,
@@ -2321,6 +2340,7 @@ async fn perform_member(
         deprecated: None,
         pinned_version: None,
         state: crate::tui::state::ArtifactState::NotInstalled,
+        source: None,
     };
     // Use the member's own binding name (its lock/install key) for the
     // declaration, not the repo basename — they differ when the bundle aliases
@@ -2627,6 +2647,7 @@ mod tests {
             deprecated: None,
             pinned_version: None,
             state: ArtifactState::Installed,
+            source: None,
         }
     }
 
@@ -2834,6 +2855,7 @@ mod tests {
             deprecated: None,
             pinned_version: None,
             state: ArtifactState::Installed,
+            source: None,
         };
         let rows = vec![row];
 
@@ -4047,6 +4069,7 @@ mod tests {
             deprecated: None,
             pinned_version: None,
             state: ArtifactState::Installed,
+            source: None,
         }
     }
 
@@ -4184,6 +4207,7 @@ mod tests {
                 deprecated: None,
                 pinned_version: None,
                 state: ArtifactState::Installed,
+                source: None,
             },
         ]);
         state.scope_label = "project".to_string();
@@ -4272,6 +4296,7 @@ mod tests {
             deprecated: None,
             pinned_version: None,
             state: ArtifactState::NotInstalled,
+            source: None,
         }];
 
         // resolve_member_tag must return the catalog row's tag, not "latest".
@@ -4335,6 +4360,7 @@ mod p2_app_member_node_tests {
             deprecated: None,
             pinned_version: pinned_version.map(|s| s.to_string()),
             state: ArtifactState::NotInstalled,
+            source: None,
         }
     }
 

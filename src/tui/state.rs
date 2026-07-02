@@ -155,6 +155,14 @@ pub struct TuiRow {
     pub pinned_version: Option<String>,
     /// The install status of this repository in the active scope.
     pub state: ArtifactState,
+    /// The browse-source locator this row came from, set **only** for
+    /// package-index sources (`[[registries]] index = …` or the built-in
+    /// index fallback). Display-only: the tree and the flat Registry column
+    /// group the row under this source root instead of fabricating a
+    /// registry root from the OCI host — the index locator is not an OCI
+    /// prefix, so longest-prefix attribution can never match it. `None`
+    /// for OCI registry sources; never used for lock/install matching.
+    pub source: Option<String>,
 }
 
 impl TuiRow {
@@ -1331,6 +1339,7 @@ mod tests {
             deprecated: None,
             pinned_version: None,
             state,
+            source: None,
         }
     }
 
@@ -1938,6 +1947,7 @@ mod tests {
             deprecated: None,
             pinned_version: None,
             state,
+            source: None,
         }
     }
 
@@ -2784,6 +2794,7 @@ mod tests {
             deprecated: None,
             pinned_version: None,
             state: ArtifactState::Installed,
+            source: None,
         };
         s.set_rows(vec![bundle_row]);
         s.set_default_registry(Some("reg".to_string()));
@@ -3035,6 +3046,7 @@ mod p2_state_member_node_tests {
             deprecated: None,
             pinned_version: None,
             state: ArtifactState::NotInstalled,
+            source: None,
         }
     }
 

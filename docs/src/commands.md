@@ -305,7 +305,11 @@ pick a version, `o` to open the selected entry's repository URL in the
 browser, `g` to switch scope, and `space` to mark rows.
 
 **Tree view** — pressing `t` switches the catalog between flat list mode and
-a collapsible tree grouped by registry host and repository path. In tree mode:
+a collapsible tree grouped by browse source and repository path. Rows from an
+OCI registry group under that registry (host plus configured namespace); rows
+from a [package index](./package-index.md) group under the index source, with
+the full OCI reference folded below it (an unbranched host/namespace chain
+like `ghcr.io/grimoire-rs` renders as one joined node). In tree mode:
 
 | Key | Action |
 |-----|--------|

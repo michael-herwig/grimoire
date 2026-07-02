@@ -454,6 +454,7 @@ mod tests {
             deprecated: None,
             pinned_version: None,
             state,
+            source: None,
         }
     }
 
