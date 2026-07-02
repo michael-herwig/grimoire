@@ -17,9 +17,11 @@ import hook_utils
 
 _GIT_COMMIT_RE = re.compile(r"\bgit\s+commit\b")
 
-# Matches conventional commit types used in this project (see CLAUDE.md)
+# Matches conventional commit types used in this project (see CLAUDE.md).
+# `release` covers the release-ceremony commit (`release: vX.Y.Z`) that
+# `task release:prepare` prescribes (workflow-release.md).
 _CONVENTIONAL_RE = re.compile(
-    r"^(feat|fix|refactor|ci|chore|docs|test|perf|build|style)(\(.+\))?(!)?\s*: .+"
+    r"^(feat|fix|refactor|ci|chore|docs|test|perf|build|style|release)(\(.+\))?(!)?\s*: .+"
 )
 
 # Extract the message from: git commit -m "message" or git commit -m 'message'
@@ -99,7 +101,7 @@ def main() -> None:
                 f"BLOCKED: Commit message does not follow conventional commits format.\n\n"
                 f"Got: \"{message}\"\n\n"
                 f"Expected: <type>(<optional scope>): <description>\n"
-                f"Types: feat, fix, refactor, ci, chore, docs, test, perf, build, style\n"
+                f"Types: feat, fix, refactor, ci, chore, docs, test, perf, build, style, release\n"
                 f"Examples:\n"
                 f"  feat: add package search command\n"
                 f"  fix(oci): handle missing manifest gracefully\n"
