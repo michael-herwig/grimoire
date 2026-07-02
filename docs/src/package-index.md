@@ -110,7 +110,7 @@ scripts/                           # (optional) build/validation tooling
 | `repository` | string | no | Source repository URL. Consumers keep it only with an `https://` prefix. |
 | `owner.github` | string | yes* | GitHub login owning the namespace — for pointers under `index/github.com/` (and other GitHub-forge hosts). MUST match the namespace directory (case-insensitive). |
 | `owner.login` | string | yes* | The generic owner key for any non-GitHub host (the pointer's `index/<host>/` segment carries the forge context). MUST match the namespace directory (case-insensitive). |
-| `owner.id` | integer | yes | The account's numeric ID on the pointer's host — the GitHub account ID, or the GitLab *namespace* ID (uniform for users and nested groups). Immutable — logins can be deleted and re-registered by someone else; the ID cannot. Validation compares it against the live API. |
+| `owner.id` | integer | yes | The account's numeric ID on the pointer's host — the GitHub account ID; on GitLab the *group* ID for group namespaces or the *user* ID for user namespaces (user namespace IDs are visible only to their owner, so the public user ID is the one an index validator can verify). Immutable — logins can be deleted and re-registered by someone else; the ID cannot. Validation compares it against the live API. |
 
 \* exactly one of `owner.github` / `owner.login`, matching the pointer's
 host. grim's read side ignores `owner` entirely — the fields exist for

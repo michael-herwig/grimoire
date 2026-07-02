@@ -251,8 +251,8 @@ fn authorize(ctx: &ForgeContext, request: reqwest::RequestBuilder) -> reqwest::R
 }
 
 /// Look up the namespace's numeric owner id on the forge: the immutable
-/// account id on GitHub, the namespace id (uniform for users and nested
-/// groups) on GitLab.
+/// account id on GitHub; the group id for group namespaces or the user id
+/// for user namespaces on GitLab.
 ///
 /// # Errors
 ///
@@ -267,26 +267,75 @@ pub async fn lookup_owner_id(ctx: &ForgeContext, namespace: &str) -> Result<u64,
         .api_url
         .as_deref()
         .ok_or_else(|| wrap("plain git host has no owner API — set `[announce] owner_id`".into()))?;
-    let url = match ctx.kind {
-        ForgeKind::GitHub => format!("{api}/users/{}", encode_segment(namespace)),
-        ForgeKind::GitLab => format!("{api}/namespaces/{}", encode_segment(namespace)),
+    match ctx.kind {
+        ForgeKind::GitHub => {
+            let url = format!("{api}/users/{}", encode_segment(namespace));
+            let response = authorize(ctx, client().map_err(|e| wrap(e.into()))?.get(url))
+                .send()
+                .await
+                .and_then(reqwest::Response::error_for_status)
+                .map_err(|e| wrap(e.into()))?;
+            let body: serde_json::Value = response.json().await.map_err(|e| wrap(e.into()))?;
+            body.get("id")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| wrap("response carries no numeric id".into()))
+        }
+        ForgeKind::GitLab => gitlab_owner_id(ctx, api, namespace).await.map_err(wrap),
         // Plain never carries an api_url, so the check above already
         // returned — kept as an error rather than a panic macro.
-        ForgeKind::Plain => {
-            return Err(wrap(
-                "plain git host has no owner API — set `[announce] owner_id`".into(),
-            ));
+        ForgeKind::Plain => Err(wrap(
+            "plain git host has no owner API — set `[announce] owner_id`".into(),
+        )),
+    }
+}
+
+/// GitLab owner-id resolution: the group id for group namespaces, the
+/// user id for user namespaces.
+///
+/// `/namespaces` is membership-scoped — an index validator's project bot
+/// token cannot see a foreign user namespace at all — so user namespaces
+/// (kind `user` on a visible lookup, or a 404) resolve through the public
+/// `/users?username=` endpoint instead: the user id is the only owner id
+/// every index-side token can verify.
+async fn gitlab_owner_id(
+    ctx: &ForgeContext,
+    api: &str,
+    namespace: &str,
+) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+    let client = client()?;
+    let namespace_url = format!("{api}/namespaces/{}", encode_segment(namespace));
+    let response = authorize(ctx, client.get(namespace_url)).send().await?;
+    let status = response.status();
+    if status.is_success() {
+        let body: serde_json::Value = response.json().await?;
+        if body.get("kind").and_then(serde_json::Value::as_str) != Some("user") {
+            return body
+                .get("id")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| "response carries no numeric id".into());
         }
-    };
-    let response = authorize(ctx, client().map_err(|e| wrap(e.into()))?.get(url))
+    } else if status != reqwest::StatusCode::NOT_FOUND {
+        return Err(format!("HTTP status {status} from the namespace lookup").into());
+    }
+    let users_url = format!("{api}/users?username={}", encode_segment(namespace));
+    let response = authorize(ctx, client.get(users_url))
         .send()
         .await
-        .and_then(reqwest::Response::error_for_status)
-        .map_err(|e| wrap(e.into()))?;
-    let body: serde_json::Value = response.json().await.map_err(|e| wrap(e.into()))?;
-    body.get("id")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| wrap("response carries no numeric id".into()))
+        .and_then(reqwest::Response::error_for_status)?;
+    let body: serde_json::Value = response.json().await?;
+    let wanted = namespace.to_lowercase();
+    let mut hits = body.as_array().into_iter().flatten().filter(|user| {
+        user.get("username")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|name| name.to_lowercase() == wanted)
+    });
+    match (hits.next(), hits.next()) {
+        (Some(user), None) => user
+            .get("id")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| "response carries no numeric id".into()),
+        _ => Err(format!("namespace '{namespace}' not found — set `[announce] owner_id`").into()),
+    }
 }
 
 /// The authenticated GitHub login (`GET /user`), as a namespace default.

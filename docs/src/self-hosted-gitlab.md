@@ -90,7 +90,10 @@ with GitLab identities:
    they are a member of (inherited membership counts) at
    `GRIM_INDEX_MIN_ACCESS_LEVEL` or above.
 3. `owner.login` matches the namespace and `owner.id` matches the
-   GitLab **namespace id** (live API lookup).
+   GitLab **group id** (group namespaces) or **user id** (user
+   namespaces) — live API lookup. User namespaces resolve through the
+   public `/users` endpoint, so a plain project access token suffices
+   for them.
 4. Schema valid; `ref` lists at least one tag on its registry.
 
 On success the job requests merge-when-pipeline-succeeds; anything else
@@ -142,8 +145,8 @@ membership check auto-merges its MRs — no validator allowlist needed.
 `TRUSTED_BOTS` dict in the index fork's `scripts/validate_mr.py`.)
 
 grim resolves the owner id via the API automatically; pin it with
-`owner_id = <namespace id>` (from
-`GET /api/v4/namespaces/<url-encoded-path>`) for hermetic runs.
+`owner_id = <group id>` (group namespaces) or `owner_id = <user id>`
+(user namespaces) for hermetic runs.
 
 Cross-forge announcing — e.g. a GitLab pipeline announcing to the
 **public** GitHub index — inherits nothing from the CI environment (the

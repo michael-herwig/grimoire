@@ -109,9 +109,10 @@ pub struct AnnounceSpec {
     pub namespace: Option<String>,
 
     /// The namespace's numeric owner id on the index host (GitHub account
-    /// id, GitLab namespace id). Default: resolved live from the forge
-    /// API; required for a plain git host or a GitLab host without a
-    /// token. Set it explicitly for hermetic/offline runs.
+    /// id; GitLab group id for group namespaces, user id for user
+    /// namespaces). Default: resolved live from the forge API; required
+    /// for a plain git host or a GitLab host without a token. Set it
+    /// explicitly for hermetic/offline runs.
     pub owner_id: Option<u64>,
 }
 

@@ -122,12 +122,19 @@ def _manifest(
 
 
 class _ForgeApi:
-    """Minimal fake forge API (GitHub + GitLab routes), recording requests."""
+    """Minimal fake forge API (GitHub + GitLab routes), recording requests.
 
-    def __init__(self, conflict: bool = False) -> None:
+    `namespaces` shapes the GitLab `/namespaces/<path>` reply: "group"
+    (default), "user" (a visible user namespace whose namespace id differs
+    from the user id), or "missing" (404 — how a foreign user namespace
+    looks to a project bot token, since the endpoint is membership-scoped).
+    """
+
+    def __init__(self, conflict: bool = False, namespaces: str = "group") -> None:
         api = self
         self.requests: list[tuple[str, str]] = []
         self.conflict = conflict
+        self.namespaces = namespaces
 
         class Handler(BaseHTTPRequestHandler):
             def _reply(self, code: int, body: object) -> None:
@@ -140,8 +147,15 @@ class _ForgeApi:
 
             def do_GET(self) -> None:  # noqa: N802 (http.server API)
                 api.requests.append(("GET", self.path))
-                if "/namespaces/" in self.path:
-                    self._reply(200, {"kind": "group", "id": 44, "full_path": "acme"})
+                if "/users?" in self.path:
+                    self._reply(200, [{"id": 44, "username": "acme"}])
+                elif "/namespaces/" in self.path:
+                    if api.namespaces == "user":
+                        self._reply(200, {"kind": "user", "id": 999, "full_path": "acme"})
+                    elif api.namespaces == "missing":
+                        self._reply(404, {})
+                    else:
+                        self._reply(200, {"kind": "group", "id": 44, "full_path": "acme"})
                 elif "/merge_requests?" in self.path:
                     self._reply(200, [{"web_url": MR_URL}])
                 elif "/pulls?" in self.path:
@@ -176,8 +190,8 @@ class _ForgeApi:
 def forge_api():
     apis: list[_ForgeApi] = []
 
-    def make(conflict: bool = False) -> _ForgeApi:
-        api = _ForgeApi(conflict)
+    def make(conflict: bool = False, namespaces: str = "group") -> _ForgeApi:
+        api = _ForgeApi(conflict, namespaces)
         apis.append(api)
         return api
 
@@ -430,6 +444,51 @@ def test_publish_announce_owner_id_resolves_via_gitlab_api(
     branch = _announce_branch(bare)
     blob = _git(bare, "show", f"{branch}:index/{INDEX_HOST}/acme/{name}/metadata.json")
     assert json.loads(blob)["owner"] == {"login": "acme", "id": 44}
+
+
+def test_publish_announce_owner_id_user_namespace_uses_user_id(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path, forge_api
+) -> None:
+    """User namespaces resolve owner.id through the public /users lookup:
+    /namespaces is membership-scoped (a project bot token 404s on foreign
+    user namespaces), and owner.id carries the publicly verifiable user id."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-userns"
+    _make_skill_source(project_dir, name, "User namespace.")
+    api = forge_api(namespaces="missing")
+    _manifest(project_dir, ns, name, INDEX_URL, owner_id=None, forge="gitlab", api_url=api.url)
+
+    runner = grim_at(project_dir)
+    bare = _index_remote(tmp_path, runner)
+    runner.env["GRIM_ANNOUNCE_TOKEN"] = TOKEN
+    result = runner.run("publish", "--announce", check=False)
+    assert result.returncode == 0, result.stderr
+    assert any(m == "GET" and p.startswith("/users?username=acme") for m, p in api.requests), api.requests
+    branch = _announce_branch(bare)
+    blob = _git(bare, "show", f"{branch}:index/{INDEX_HOST}/acme/{name}/metadata.json")
+    assert json.loads(blob)["owner"] == {"login": "acme", "id": 44}
+
+
+def test_publish_announce_owner_id_visible_user_namespace_uses_user_id(
+    grim_at, project_dir: Path, registry: str, tmp_path: Path, forge_api
+) -> None:
+    """Even when /namespaces succeeds for a user namespace (the publisher's
+    own token sees it), owner.id is the user id — never the namespace id,
+    which an index validator's bot token cannot verify."""
+    ns = f"grim-test/{uuid.uuid4().hex[:12]}"
+    name = "ann-userns2"
+    _make_skill_source(project_dir, name, "Visible user namespace.")
+    api = forge_api(namespaces="user")
+    _manifest(project_dir, ns, name, INDEX_URL, owner_id=None, forge="gitlab", api_url=api.url)
+
+    runner = grim_at(project_dir)
+    bare = _index_remote(tmp_path, runner)
+    runner.env["GRIM_ANNOUNCE_TOKEN"] = TOKEN
+    result = runner.run("publish", "--announce", check=False)
+    assert result.returncode == 0, result.stderr
+    branch = _announce_branch(bare)
+    blob = _git(bare, "show", f"{branch}:index/{INDEX_HOST}/acme/{name}/metadata.json")
+    assert json.loads(blob)["owner"] == {"login": "acme", "id": 44}, blob
 
 
 # ── CI environment auto-detection (host-match gated) ───────────────────────
