@@ -26,8 +26,23 @@ keeping agent configuration versioned, shareable, and reproducible.
 
 ## Install
 
-Grab a pre-built binary for macOS, Linux, or Windows (aarch64 or x86_64) from
-the [latest release][releases], or build from source:
+One-line installer (macOS / Linux) — detects your platform, verifies the
+SHA-256 checksum, and drops `grim` onto your `PATH`:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://setup.grimoire.rs/sh | sh
+```
+
+On Windows (PowerShell 7.4+):
+
+```powershell
+irm https://setup.grimoire.rs/ps1 | iex
+```
+
+In GitHub Actions, use [`grimoire-rs/setup-grimoire@v1`][setup-grimoire].
+Pre-built binaries for macOS, Linux, and Windows (aarch64 / x86_64) are on
+the [latest release][releases]; other methods (ocx, source build) are in the
+[installation docs][docs-install]. Or build from source:
 
 ```sh
 cargo install --git https://github.com/grimoire-rs/grimoire grimoire
@@ -67,5 +82,7 @@ Grimoire is licensed under the [Apache License, Version 2.0][license].
 [release-badge]: https://img.shields.io/github/v/release/grimoire-rs/grimoire
 [docs]: https://grimoire.rs/
 [docs-badge]: https://img.shields.io/badge/docs-grimoire-blue
+[docs-install]: https://grimoire.rs/installation.html
+[setup-grimoire]: https://github.com/grimoire-rs/setup-grimoire
 [license]: LICENSE
 [license-badge]: https://img.shields.io/badge/license-Apache--2.0-blue.svg
