@@ -10,6 +10,7 @@
 - [Authentication](./authentication.md)
 - [The Package Index](./package-index.md)
 - [Publishing Skills and Rules](./publishing.md)
+- [Publishing from CI](./ci.md)
 - [Agent Artifacts](./agents.md)
 - [Artifact Reference](./artifacts.md)
 - [Vendor-Specific Metadata](./vendor-metadata.md)

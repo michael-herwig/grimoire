@@ -179,6 +179,10 @@ namespace = "your-login"                              # default: your gh login
 Point `[announce] repository` at any index repository — including a
 private company index on GitLab — to announce there instead.
 
+Announcing straight from a pipeline (GitHub Actions or GitLab CI, with
+the token wiring each forge needs) is covered in
+[Publishing from CI](./ci.md).
+
 ## Hosting Your Own Index {#self-hosting}
 
 Any of the following is a complete, working index:

@@ -76,6 +76,31 @@ directory. The archives it downloads are exactly the [pre-built
 binaries][binaries] listed below — reach for those when you want to pick the
 platform by hand or check the checksums yourself.
 
+## GitLab CI/CD {#gitlab-ci}
+
+On GitLab, the [`setup` component][gl-components] installs `grim`
+(checksum-verified, static musl build) on Linux docker/kubernetes runners
+for `x86_64` and `aarch64`. It provides a hidden `.grim-setup` job — extend
+it and `grim` is on `PATH`:
+
+```yaml
+include:
+  - component: gitlab.com/grimoire-rs/components/setup@1.0.0
+    # inputs:
+    #   version: v0.7.0   # default: latest
+
+my-job:
+  extends: .grim-setup
+  image: alpine:3.22
+  script:
+    - grim --version
+```
+
+`include: component:` only resolves components on the same GitLab instance
+— on self-managed GitLab, [mirror the components project][gl-mirror] first.
+The publishing side (a complete `grim publish` job as a component) is
+covered in [Publishing from CI][ci-gitlab].
+
 ## Pre-built binaries {#pre-built-binaries}
 
 Every release publishes archives for macOS, Linux, and Windows on both
@@ -133,6 +158,8 @@ If the command prints a version string, you are ready for the
 <!-- external -->
 [cargo-dist]: https://github.com/axodotdev/cargo-dist
 [cyclonedx]: https://cyclonedx.org
+[gl-components]: https://gitlab.com/grimoire-rs/components
+[gl-mirror]: https://docs.gitlab.com/user/project/repository/mirror/
 [ocx]: https://ocx.sh
 [ocx-grim]: https://ocx.sh/docs/catalog/grim
 [powershell]: https://learn.microsoft.com/powershell/scripting/install/installing-powershell
@@ -142,4 +169,5 @@ If the command prints a version string, you are ready for the
 
 <!-- internal -->
 [binaries]: #pre-built-binaries
+[ci-gitlab]: ./ci.md#gitlab
 [quickstart]: ./quickstart.md
