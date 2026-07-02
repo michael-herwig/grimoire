@@ -193,7 +193,6 @@ them.
 | `registry:2` (local) | yes | yes |
 | [Zot][zot] | yes | yes |
 | [Harbor][harbor] | yes | yes |
-| `grim.ocx.sh` | yes | yes |
 | [GitHub Container Registry (GHCR)][ghcr] | no | yes |
 | [Docker Hub][dockerhub] | no | yes |
 | [GitLab Container Registry (SaaS)][gitlab-registry] | no | yes |
@@ -313,7 +312,8 @@ precedences depending on context:
 **Browse-set** (what `grim search`, the TUI, and `grim mcp` browse): `--registry`
 flag → project `[[registries]]` → global `[[registries]]` → single default
 (`GRIM_DEFAULT_REGISTRY` → project `[options].default_registry` → global
-`[options].default_registry` → built-in `grim.ocx.sh`). The single-default tier
+`[options].default_registry` → built-in `https://index.grimoire.rs`, the
+public [package index](./package-index.md)). The single-default tier
 applies only when no `[[registries]]` array is declared anywhere. Only the
 `--registry` flag collapses browse — to exactly the registries it names
 (repeatable / comma-separated); `GRIM_DEFAULT_REGISTRY` does
@@ -322,7 +322,8 @@ not restrict the browse set when `[[registries]]` is configured.
 **Short-id resolution** (expanding a bare `name:tag` to a full registry URL):
 `--registry` flag → `GRIM_DEFAULT_REGISTRY` → project `[options].default_registry`
 (or the primary entry of project `[[registries]]`) → global config → built-in
-`grim.ocx.sh`.
+`ghcr.io/grimoire-rs`. Index sources never expand short ids — with an
+index-only browse set the push-side fallback applies.
 
 The `--offline` toggle has no config-file counterpart — the flag or its `GRIM_OFFLINE` variable applies.
 

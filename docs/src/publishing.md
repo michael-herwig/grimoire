@@ -364,7 +364,7 @@ kind tables. Each table entry is a sub-table keyed by name with a required
 
 ```toml
 #:schema https://grimoire.rs/schemas/grim-publish.schema.json
-registry = "grim.ocx.sh"          # required; overridden by --registry
+registry = "ghcr.io"              # required; overridden by --registry
 
 [skills.grim-usage]
 version = "0.1.1"                  # required, strict X.Y.Z
@@ -381,7 +381,7 @@ version = "0.1.0"
 pin = true                         # optional, bundle entries only; default false
 ```
 
-The `registry` value is a plain host (e.g. `grim.ocx.sh`, `ghcr.io`), not a
+The `registry` value is a plain host (e.g. `ghcr.io`, `localhost:5000`), not a
 full reference. All entries in the manifest publish to the same registry.
 
 Entry names must start with a character in `[a-z0-9]` and contain only
@@ -460,7 +460,7 @@ segments, an embedded `:`, uppercase, and a path longer than 255 characters
 are all rejected at manifest validation time with exit 65 (data error). An
 invalid prefix or repository aborts the whole manifest before any push.
 
-A manifest with neither field is unchanged: `grim.ocx.sh/skills/grim-usage`
+A manifest with neither field is unchanged: `ghcr.io/skills/grim-usage`
 style paths are the default and remain fully backward compatible.
 
 ### Conventional source layout {#batch-publish-layout}

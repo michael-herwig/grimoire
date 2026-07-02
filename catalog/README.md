@@ -1,7 +1,9 @@
 # Catalog — First-Party Grimoire Packages
 
 Grim-publishable AI-config packages, dogfooding grim's own packaging:
-authored here, validated by `grim build` in CI, published to `grim.ocx.sh`.
+authored here, validated by `grim build` in CI, published to
+`ghcr.io/grimoire-rs` and announced to the public package index
+(`https://index.grimoire.rs`) via `grim publish --announce`.
 
 ## Layout
 
@@ -45,41 +47,44 @@ tags up and corrupt `--bumped-version`).
 - **minor** — new sections or reference files
 - **major** — restructure or renamed reference files
 
-Registry refs are kind-segmented: `grim.ocx.sh/skills/<name>:<version>`,
-`grim.ocx.sh/bundles/<name>:<version>`. Semver releases cascade (`1.2.3`
-also moves `1.2`, `1`, `latest`). Bundle members reference the floating
-major tag (`:0` while on the 0.x line) and bundles publish without
-`--pin`, so skill patches
+Registry refs are kind-segmented: `ghcr.io/grimoire-rs/skills/<name>:<version>`,
+`ghcr.io/grimoire-rs/bundles/<name>:<version>` (per-entry `repository`
+overrides in `publish.toml` set the `skills/`/`bundles/` segment — see
+[Batch publishing with a manifest][batch-publish]). Semver releases
+cascade (`1.2.3` also moves `1.2`, `1`, `latest`). Bundle members
+reference the floating major tag (`:0` while on the 0.x line) and bundles
+publish without `--pin`, so skill patches
 reach bundle consumers via plain `grim update`.
 
 ## Local loop
 
 ```sh
 task catalog:verify                       # grim build every package (builds grim if stale)
-grim login grim.ocx.sh -u <user>          # once, interactive
+grim login ghcr.io -u <user>              # once, interactive
 task catalog:release -- --dry-run         # preview full publish plan, zero writes
 task catalog:release                      # publish everything per publish.toml
 task catalog:release -- --only grim-usage # publish one package by hand
 task catalog:release -- --tag canary      # ad-hoc movable tag, manifest untouched
+task catalog:release -- --announce        # publish, then announce to the package index
 ```
 
 Semver always comes from `publish.toml` — there is no version argument, so
 the repo records exactly what was published. `--tag` rejects semver values.
 
-CI publishes two ways, both via `publish-catalog.yml` (environment
-`grim.ocx.sh`): the manually dispatched `Publish Catalog` workflow, and a
-cargo-dist post-announce job on every grim release — idempotent when
-catalog versions are unchanged (same digest re-push is a no-op), loud
-failure when content changed without a `publish.toml` bump. Skills publish
-before bundles so bundle members always resolve. Never auto-publish on
-plain pushes to main.
+CI publishes two ways, both via the `publish-catalog.yml` workflow (pushes
+to GHCR, then announces to the public package index): the manually
+dispatched `Publish Catalog` workflow, and a cargo-dist post-announce job
+on every grim release — idempotent when catalog versions are unchanged
+(same digest re-push is a no-op), loud failure when content changed
+without a `publish.toml` bump. Skills publish before bundles so bundle
+members always resolve. Never auto-publish on plain pushes to main.
 
 ## Keeping content honest
 
 - `task catalog:verify` runs in CI on every PR — the real parser is the
   schema gate.
-- When `docs/src/{artifacts,publishing,vendor-metadata,commands}.md` or
-  `src/command/**` or `src/mcp/**` change, review `catalog/skills/grim-usage`
+- When `docs/src/{artifacts,publishing,vendor-metadata,commands,package-index}.md`
+  or `src/command/**` or `src/mcp/**` change, review `catalog/skills/grim-usage`
   and `catalog/skills/grim-authoring` for drift (each package's
   `references/updating.md` describes the re-research procedure).
 - Hard numbers (vendor limits, activation rates) drift fastest — re-verify
@@ -87,3 +92,4 @@ plain pushes to main.
 
 [agentskills.io specification]: https://agentskills.io/specification
 [docs site]: https://grimoire.rs/
+[batch-publish]: https://grimoire.rs/publishing.html#batch-publish

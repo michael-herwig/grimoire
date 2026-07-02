@@ -68,8 +68,11 @@ follows the newest `1.x` release) or `registry/repository@sha256:…` (an
 immutable digest). A bare reference defaults to `:latest`. A short
 reference with no registry resolves against the default registry —
 `--registry` flag, then `GRIM_DEFAULT_REGISTRY`, then config, then the
-built-in default `grim.ocx.sh`; full
-precedence in [references/registries.md](references/registries.md).
+built-in fallback registry `ghcr.io/grimoire-rs`; full
+precedence in [references/registries.md](references/registries.md). Browsing
+with nothing configured (`grim search`, `grim tui`, `grim mcp`) falls back
+to the public package index at `https://index.grimoire.rs` instead — see
+[references/registries.md](references/registries.md#multiple-registries).
 
 When a config declares `[[registries]]` with aliases, a **qualified
 reference** `alias/repo[:tag]` expands the alias to its configured URL —

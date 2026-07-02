@@ -2614,11 +2614,11 @@ mod spec_multi_registry_tree_tests {
 
     // C5 worked example (F19 / D-ELIDE): single-registry elision is identical to today
     //
-    // segments("grim.ocx.sh", "foo/bar", Some("grim.ocx.sh"), &['/'])
+    // segments("registry.example", "foo/bar", Some("registry.example"), &['/'])
     //   → groups = ["foo"], leaf = "bar", elided = true
     #[test]
     fn spec_segments_single_registry_elided_matches_legacy_behavior() {
-        let (groups, leaf, elided) = segments("grim.ocx.sh", "foo/bar", Some("grim.ocx.sh"), &['/']);
+        let (groups, leaf, elided) = segments("registry.example", "foo/bar", Some("registry.example"), &['/']);
         assert!(elided, "registry must be elided when default_registry matches");
         assert_eq!(leaf, "bar", "leaf must be the final segment of repository");
         assert_eq!(
@@ -2692,21 +2692,21 @@ mod spec_multi_registry_tree_tests {
         );
     }
 
-    // D-ELIDE: single-registry → registry root is elided (no "grim.ocx.sh" root node)
+    // D-ELIDE: single-registry → registry root is elided (no "registry.example" root node)
     #[test]
     fn spec_build_single_registry_elided_has_no_registry_root_node() {
         let rows = vec![row_with_reg(
-            "grim.ocx.sh",
+            "registry.example",
             "acme/tool",
             "skill",
             ArtifactState::NotInstalled,
         )];
         let filtered = vec![0];
-        let tree = build(&rows, &filtered, &opts_elide("grim.ocx.sh"));
+        let tree = build(&rows, &filtered, &opts_elide("registry.example"));
         let registry_root = tree
             .roots
             .iter()
-            .find(|n| matches!(n, Node::Group(g) if g.key == "grim.ocx.sh"));
+            .find(|n| matches!(n, Node::Group(g) if g.key == "registry.example"));
         assert!(
             registry_root.is_none(),
             "single-registry session: tree must have no registry root node (elided)"

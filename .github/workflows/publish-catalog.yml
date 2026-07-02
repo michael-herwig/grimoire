@@ -1,7 +1,9 @@
 name: Publish Catalog
 
-# Publish first-party catalog packages (catalog/) to grim.ocx.sh with the
-# released grim binary — dogfooding `grim publish` end to end.
+# Publish first-party catalog packages (catalog/) to GHCR with the released
+# grim binary — dogfooding `grim publish` end to end — and announce them to
+# the public package index (grimoire-rs/index) via `--announce`, the same
+# contributor path anyone else uses.
 #
 # Two triggers:
 # - workflow_dispatch: humans publish on demand (version bumps via PR).
@@ -12,6 +14,12 @@ name: Publish Catalog
 #
 # Versions come from catalog/publish.toml; grim publish releases
 # skills/rules/agents before bundles so bundle members always resolve.
+#
+# Announce needs a cross-repo credential: GITHUB_TOKEN is repo-scoped, so
+# the PR against grimoire-rs/index uses the INDEX_ANNOUNCE_TOKEN secret
+# (fine-grained PAT: contents + pull-requests write on grimoire-rs/index).
+# When the secret is absent the announce step is skipped with a notice —
+# publishing itself still succeeds.
 #
 # Cost: one Linux job, ~2-3 min (released binary download, no Rust build).
 
@@ -39,6 +47,7 @@ on:
 
 permissions:
   contents: read
+  packages: write
 
 concurrency:
   # Serialize publishes — never cancel a half-finished registry push.
@@ -46,12 +55,11 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  REGISTRY: grim.ocx.sh
+  REGISTRY: ghcr.io
 
 jobs:
   publish:
     runs-on: ubuntu-latest
-    environment: grim.ocx.sh
     steps:
       # Per-job credential store; never the runner's shared docker config.
       # Set via GITHUB_ENV: the `runner` context is not available in
@@ -105,8 +113,8 @@ jobs:
       - name: grim login
         env:
           # env intermediary — never ${{ }} secrets in the script body.
-          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
-          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           echo "$REGISTRY_TOKEN" | grim login "$REGISTRY" -u "$REGISTRY_USER" \
@@ -133,6 +141,24 @@ jobs:
             args+=(--force)
           fi
           task catalog:release -- "${args[@]}"
+
+      - name: Announce to index
+        if: ${{ !inputs.dry_run }}
+        env:
+          # Cross-repo PAT (grimoire-rs/index: contents + pull-requests
+          # write). gh consumes GH_TOKEN; `gh auth setup-git` wires the
+          # same token into git pushes for the announce clone.
+          GH_TOKEN: ${{ secrets.INDEX_ANNOUNCE_TOKEN }}
+          SKIP_BUILD: "true"
+          GRIM_COMMAND: grim
+        run: |
+          set -euo pipefail
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "::notice::INDEX_ANNOUNCE_TOKEN not set — skipping index announce"
+            exit 0
+          fi
+          gh auth setup-git
+          task catalog:release -- --announce
 
       - name: grim logout
         if: always()

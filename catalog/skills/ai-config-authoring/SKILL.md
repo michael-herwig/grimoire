@@ -81,7 +81,7 @@ together in the `grim-essentials` bundle. If that file is missing,
 install it by identifier:
 
 ```sh
-grim add grim.ocx.sh/skills/grim-authoring:0 && grim install
+grim add ghcr.io/grimoire-rs/skills/grim-authoring:0 && grim install
 # fresh project (no grimoire.toml yet): run `grim init` first
 ```
 

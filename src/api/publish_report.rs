@@ -158,7 +158,7 @@ mod tests {
     #[test]
     fn plain_single_table() {
         let r = PublishReport::new(vec![PublishEntry {
-            reference: "grim.ocx.sh/acme/code-review:1.0.0".to_string(),
+            reference: "registry.example/acme/code-review:1.0.0".to_string(),
             kind: ArtifactKind::Skill,
             // Full 64-hex digest; plain output should truncate to first 12 chars.
             digest: Some("sha256:a1b2c3d4e5f6aabbccddeeff001122334455667788990011223344556677889900".to_string()),
@@ -204,7 +204,7 @@ mod tests {
     #[test]
     fn json_is_bare_array() {
         let r = PublishReport::new(vec![PublishEntry {
-            reference: "grim.ocx.sh/acme/my-rule:0.1.0".to_string(),
+            reference: "registry.example/acme/my-rule:0.1.0".to_string(),
             kind: ArtifactKind::Rule,
             digest: None,
             tags: vec![],
@@ -214,7 +214,7 @@ mod tests {
         r.print_json(&mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
         assert!(v.is_array());
-        assert_eq!(v[0]["ref"], "grim.ocx.sh/acme/my-rule:0.1.0");
+        assert_eq!(v[0]["ref"], "registry.example/acme/my-rule:0.1.0");
         assert_eq!(v[0]["status"], "dry-run");
         assert!(v[0]["digest"].is_null());
     }

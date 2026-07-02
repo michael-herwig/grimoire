@@ -6,7 +6,8 @@ loop, version tagging, and registry authentication.
 
 Contents: [Build, Then Release](#build-then-release) ·
 [Cascade Tags](#cascade-tags) · [Immutability](#immutability) ·
-[Scripted Publishing](#scripted-publishing) · [Bundles](#bundles) ·
+[Scripted Publishing](#scripted-publishing) ·
+[Announcing to the Index](#announce) · [Bundles](#bundles) ·
 [Catalog Metadata](#catalog-metadata) · [Authentication](#authentication)
 
 Flags shown here are grim 0.6.x; confirm with `grim <cmd> --help` before
@@ -90,7 +91,7 @@ The manifest format uses per-entry sub-tables keyed by name. A minimal
 example:
 
 ```toml
-registry = "grim.ocx.sh"
+registry = "ghcr.io"
 
 [skills.code-review]
 version = "1.2.0"
@@ -124,10 +125,58 @@ grim publish --dry-run           # plan without pushing
 grim publish --only code-review  # publish one entry
 grim publish --tag canary        # movable tag, semver rejected
 grim publish --manifest staging/publish.toml  # alternate manifest
+grim publish --announce          # publish, then announce to the index
 ```
 
 See [Batch publishing with a manifest][batch-publish] for the full schema,
 source layout conventions, and disambiguation from bundle TOML files.
+
+## Announcing to the Index {#announce}
+
+Most registries (GHCR included) cannot answer "what packages exist?" —
+`grim search` / the TUI / MCP browse a [package index][package-index]
+instead. `--announce` is how a publish makes itself discoverable there.
+
+```sh
+grim publish --announce                                    # default index repo
+grim publish --announce --announce-repo https://github.com/acme/index  # override
+```
+
+`--announce` only runs after every planned entry in the batch is fully
+published (freshly pushed or already present via skip-existing) and never
+under `--dry-run` (prints `announce: skipped (dry run)` instead). It
+writes one `index/github.com/<namespace>/<package>/metadata.json` pointer
+per published entry into a clone of the index repository, on a
+deterministic topic branch, then opens a pull request (`github.com` +
+the `gh` CLI) or pushes the branch and prints its URL (any other git
+host).
+
+Configure the target and ownership in an optional `[announce]` table in
+`publish.toml`:
+
+```toml
+[announce]
+repository = "https://github.com/grimoire-rs/index"  # default
+namespace = "your-login"                              # default: your gh login
+owner_id = 12345678                                   # default: live GitHub API lookup
+```
+
+`--announce-repo` overrides `[announce] repository` for one invocation.
+`namespace` with no `gh` login authenticated is a config error (exit 78,
+"no announce namespace"). `owner_id` only needs setting for hermetic/CI
+runs — otherwise grim resolves it live from the GitHub API.
+
+**Announce failure exits 69** (`Unavailable`) — the publish itself already
+succeeded and its report stands; only the index write/PR failed, and the
+index repository is the remote resource that failed.
+
+The default index auto-merges an announcement PR when: only your own
+namespace's `metadata.json` paths changed, you own that namespace (login
+match or public membership in the org), `owner.id` matches your account
+(live API check, spoof-proof against login recycling), every changed file
+passes the schema, and the `ref` is reachable (the registry lists at
+least one tag anonymously — publish before you announce). Anything else
+falls to manual maintainer review. Full spec: [The Package Index][package-index].
 
 ## Editor schema support {#editor-schema}
 
@@ -231,10 +280,13 @@ With no positional registry, `login`/`logout` resolve `--registry`, then
 
 - [Publishing][publishing] — the full workflow: support directories,
   per-kind metadata, dry runs, bundle pinning.
+- [The Package Index][package-index] — index spec, auto-merge rules,
+  hosting your own.
 - [Authentication][auth] — credential resolution, storage tiers, CI.
 - [Command reference: build, release, login, logout][commands].
 
 [publishing]: https://grimoire.rs/publishing.html
+[package-index]: https://grimoire.rs/package-index.html
 [metadata]: https://grimoire.rs/publishing.html#metadata
 [batch-publish]: https://grimoire.rs/publishing.html#batch-publish
 [editor-schema]: https://grimoire.rs/configuration.html#editor-schema
