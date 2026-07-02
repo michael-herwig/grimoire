@@ -99,11 +99,13 @@ collapse the browse set — it is the short-id resolution default and only
 applies as the single-registry fallback when no `[[registries]]` array is
 declared.
 
-Each entry has one required field and two optional fields:
+Each entry declares **exactly one** source locator (`url` or `index`)
+plus two optional fields:
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `url` | yes | Registry host and optional namespace, e.g. `ghcr.io/acme`. Same form as `[options].default_registry`. |
+| `url` | one of `url`/`index` | Registry host and optional namespace, e.g. `ghcr.io/acme`. Same form as `[options].default_registry`. Lists packages via the OCI `_catalog` endpoint. |
+| `index` | one of `url`/`index` | A [package index](./package-index.md) locator: an `http(s)://` static base or a git repository (`git+…`, `ssh://`, `git@…`, or ending in `.git`). Replaces the `_catalog` listing; index entries carry their own registry refs. Mutually exclusive with `url` — setting both is a parse error (exit 78). |
 | `alias` | no | Short name for use in [qualified references](#qualified-references). Must be unique across the array. The TUI uses the alias as the display label in the flat list's Registry column and as the tree registry-root row label; entries without an alias fall back to the raw URL. |
 | `default` | no | Marks this entry as the primary registry short identifiers expand against. At most one entry may set it; when none do, the first entry is primary. |
 
@@ -180,6 +182,11 @@ An empty browse result on these registries is **expected behavior, not
 an error**. Install, add, release, and publish work through explicit
 references and are unaffected — every registry in the table below
 supports explicit-reference operations.
+
+To browse packages hosted on a `_catalog`-gated registry, use a
+[package index](./package-index.md) entry (`index = …`) instead of a
+registry `url` — the index lists the packages; the registry only serves
+them.
 
 | Registry | `_catalog` browse (`grim search`, TUI) | Explicit-ref ops (install / add / release / publish) |
 |---|---|---|

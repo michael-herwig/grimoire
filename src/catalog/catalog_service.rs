@@ -174,15 +174,23 @@ pub async fn load_catalog(
     for (idx, reg) in registries.iter().enumerate() {
         let path = paths.catalog_file_for(&reg.url);
         let registry = reg.url.clone();
+        let kind = reg.kind;
+        let git_dir = paths.index_git_dir_for(&reg.url);
         let access = Arc::clone(access);
         set.spawn(async move {
             // Browse scope (empty query) — the in-memory filter below applies
             // the real query so summary/description/keyword-only matches are
-            // not dropped at build time.
-            match Catalog::load_or_refresh_coordinated(&path, &registry, "", &access, offline, force).await {
+            // not dropped at build time. An index source lists from the
+            // package index; a registry source walks `_catalog`.
+            let result = if kind.is_index() {
+                Catalog::load_or_refresh_index_coordinated(&path, &registry, kind, "", &git_dir, offline, force).await
+            } else {
+                Catalog::load_or_refresh_coordinated(&path, &registry, "", &access, offline, force).await
+            };
+            match result {
                 Ok(catalog) => (idx, Some(catalog)),
                 Err(e) => {
-                    tracing::warn!("catalog for registry '{registry}' unavailable: {e}");
+                    tracing::warn!("catalog for source '{registry}' unavailable: {e}");
                     (idx, None)
                 }
             }
@@ -328,11 +336,13 @@ mod tests {
                 url: "registry.one/ns".to_string(),
                 alias: Some("one".to_string()),
                 is_default: true,
+                kind: crate::config::registry_resolve::SourceKind::Registry,
             },
             ResolvedRegistry {
                 url: "registry.two".to_string(),
                 alias: None,
                 is_default: false,
+                kind: crate::config::registry_resolve::SourceKind::Registry,
             },
         ];
         let access: Arc<dyn OciAccess> = Arc::new(FailingAccess);

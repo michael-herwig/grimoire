@@ -89,13 +89,18 @@ pub struct RegistryArgs {
 /// The `config registry` subcommand tree.
 #[derive(Debug, Subcommand)]
 pub enum RegistryCommand {
-    /// Add a registry entry.
+    /// Add a registry or package-index entry (exactly one of --url / --index).
     Add {
         /// Alias to assign (must be non-empty, no `/`, no surrounding whitespace).
         alias: String,
-        /// Registry URL.
+        /// Registry URL (lists packages via the OCI `_catalog` endpoint).
         #[arg(long)]
-        url: String,
+        url: Option<String>,
+        /// Package-index locator (http(s):// static base, or a git repository);
+        /// replaces the `_catalog` listing — index entries carry their own
+        /// registry refs.
+        #[arg(long, conflicts_with = "url")]
+        index: Option<String>,
         /// Mark this registry as the default (clears any prior default).
         #[arg(long)]
         default: bool,
@@ -137,7 +142,12 @@ pub async fn run(ctx: &Context, args: &ConfigArgs) -> anyhow::Result<(ConfigRepo
         ConfigCommand::Unset { key } => run_unset(ctx, args, key),
         ConfigCommand::List => run_list(ctx, args),
         ConfigCommand::Registry(r) => match &r.command {
-            RegistryCommand::Add { alias, url, default } => run_registry_add(ctx, args, alias, url, *default),
+            RegistryCommand::Add {
+                alias,
+                url,
+                index,
+                default,
+            } => run_registry_add(ctx, args, alias, url.as_deref(), index.as_deref(), *default),
             RegistryCommand::Rm { alias } => run_registry_rm(ctx, args, alias),
             RegistryCommand::Use { alias } => run_registry_use(ctx, args, alias),
             RegistryCommand::Show { alias } => run_registry_show(ctx, args, alias),
@@ -168,6 +178,7 @@ enum ParsedKey {
 
 enum RegistryField {
     Url,
+    Index,
     Default,
 }
 
@@ -190,10 +201,11 @@ fn parse_key(key: &str) -> anyhow::Result<ParsedKey> {
             if !alias.is_empty() && !field_str.is_empty() {
                 let field = match field_str {
                     "url" => RegistryField::Url,
+                    "index" => RegistryField::Index,
                     "default" => RegistryField::Default,
                     other => {
                         return Err(super::config_usage(format!(
-                            "unknown registry field '{other}'; valid fields: url, default"
+                            "unknown registry field '{other}'; valid fields: url, index, default"
                         )));
                     }
                 };
@@ -215,7 +227,7 @@ fn parse_key(key: &str) -> anyhow::Result<ParsedKey> {
         "unknown config key '{key}'; valid keys: options.clients, \
          options.default_registry, options.tui.default_view, \
          options.tui.group_by_type, options.tui.tree_separators, \
-         registry.<alias>.url, registry.<alias>.default"
+         registry.<alias>.url, registry.<alias>.index, registry.<alias>.default"
     )))
 }
 
@@ -274,7 +286,8 @@ fn get_value(
                 super::config_usage(format!("no registry '{alias}'; add it with `grim config registry add`"))
             })?;
             match field {
-                RegistryField::Url => Some(rc.url.clone()),
+                RegistryField::Url => rc.url.clone(),
+                RegistryField::Index => rc.index.clone(),
                 RegistryField::Default => Some(rc.default.to_string()),
             }
         }
@@ -345,7 +358,30 @@ fn apply_set(
             match field {
                 RegistryField::Url => {
                     reject_control_chars(value_str, &format!("registry.{alias}.url"))?;
-                    set_registry_url(registries, alias, value_str.to_string());
+                    if find_registry(registries, alias).is_some_and(|rc| rc.index.is_some()) {
+                        return Err(super::config_value(format!(
+                            "registry '{alias}' is an index entry; url and index are mutually \
+                             exclusive — unset registry.{alias}.index first"
+                        )));
+                    }
+                    set_registry_field(registries, alias, |rc| rc.url = Some(value_str.to_string()));
+                    Ok(value_str.to_string())
+                }
+                RegistryField::Index => {
+                    reject_control_chars(value_str, &format!("registry.{alias}.index"))?;
+                    if find_registry(registries, alias).is_some_and(|rc| rc.url.is_some()) {
+                        return Err(super::config_value(format!(
+                            "registry '{alias}' is a registry entry; url and index are mutually \
+                             exclusive — unset registry.{alias}.url first"
+                        )));
+                    }
+                    if crate::config::registry_resolve::classify_index(value_str).is_none() {
+                        return Err(super::config_value(format!(
+                            "invalid index locator '{value_str}': must be an http(s):// base or a \
+                             git repository (git+…, ssh://, git@…, or ending in .git)"
+                        )));
+                    }
+                    set_registry_field(registries, alias, |rc| rc.index = Some(value_str.to_string()));
                     Ok(value_str.to_string())
                 }
                 RegistryField::Default => {
@@ -397,10 +433,36 @@ fn apply_unset(
             Ok(())
         }
         ParsedKey::RegistryAliasField { alias, field } => match field {
-            RegistryField::Url => Err(super::config_usage(format!(
-                "cannot unset registry.{alias}.url: url is required; \
-                 use `grim config registry rm {alias}` to remove the entry"
-            ))),
+            RegistryField::Url => {
+                let Some(rc) = find_registry(registries, alias) else {
+                    return Err(super::config_usage(format!(
+                        "no registry '{alias}'; cannot unset a field on a registry that does not exist"
+                    )));
+                };
+                if rc.index.is_none() {
+                    return Err(super::config_usage(format!(
+                        "cannot unset registry.{alias}.url: the entry would have no source; \
+                         set registry.{alias}.index first or use `grim config registry rm {alias}`"
+                    )));
+                }
+                set_registry_field(registries, alias, |rc| rc.url = None);
+                Ok(())
+            }
+            RegistryField::Index => {
+                let Some(rc) = find_registry(registries, alias) else {
+                    return Err(super::config_usage(format!(
+                        "no registry '{alias}'; cannot unset a field on a registry that does not exist"
+                    )));
+                };
+                if rc.url.is_none() {
+                    return Err(super::config_usage(format!(
+                        "cannot unset registry.{alias}.index: the entry would have no source; \
+                         set registry.{alias}.url first or use `grim config registry rm {alias}`"
+                    )));
+                }
+                set_registry_field(registries, alias, |rc| rc.index = None);
+                Ok(())
+            }
             RegistryField::Default => {
                 if find_registry(registries, alias).is_none() {
                     return Err(super::config_usage(format!(
@@ -454,10 +516,18 @@ fn collect_entries(options: &ConfigOptions, registries: &[RegistryConfig]) -> Ve
     }
     for rc in registries {
         if let Some(alias) = &rc.alias {
-            entries.push(ConfigEntry {
-                key: format!("registry.{alias}.url"),
-                value: rc.url.clone(),
-            });
+            if let Some(url) = &rc.url {
+                entries.push(ConfigEntry {
+                    key: format!("registry.{alias}.url"),
+                    value: url.clone(),
+                });
+            }
+            if let Some(index) = &rc.index {
+                entries.push(ConfigEntry {
+                    key: format!("registry.{alias}.index"),
+                    value: index.clone(),
+                });
+            }
             entries.push(ConfigEntry {
                 key: format!("registry.{alias}.default"),
                 value: rc.default.to_string(),
@@ -568,9 +638,9 @@ fn find_registry<'a>(registries: &'a [RegistryConfig], alias: &str) -> Option<&'
     registries.iter().find(|r| r.alias.as_deref() == Some(alias))
 }
 
-fn set_registry_url(registries: &mut [RegistryConfig], alias: &str, url: String) {
+fn set_registry_field(registries: &mut [RegistryConfig], alias: &str, mutate: impl FnOnce(&mut RegistryConfig)) {
     if let Some(rc) = registries.iter_mut().find(|r| r.alias.as_deref() == Some(alias)) {
-        rc.url = url;
+        mutate(rc);
     }
 }
 
@@ -697,12 +767,32 @@ fn run_registry_add(
     ctx: &Context,
     args: &ConfigArgs,
     alias: &str,
-    url: &str,
+    url: Option<&str>,
+    index: Option<&str>,
     make_default: bool,
 ) -> anyhow::Result<(ConfigReport, ExitCode)> {
     // FIX 1: pre-validate alias at the CLI boundary (exit 64) so a bad alias
     // exits UsageError rather than ConfigError after write → validate_registries.
     validate_alias_format(alias)?;
+
+    // Exactly one source locator (clap already rejects both via
+    // `conflicts_with`; neither is checked here).
+    let (locator, is_index) = match (url, index) {
+        (Some(u), None) => (u, false),
+        (None, Some(i)) => (i, true),
+        _ => {
+            return Err(super::config_usage(
+                "exactly one of --url / --index must be given".to_string(),
+            ));
+        }
+    };
+    reject_control_chars(locator, if is_index { "registry.index" } else { "registry.url" })?;
+    if is_index && crate::config::registry_resolve::classify_index(locator).is_none() {
+        return Err(super::config_value(format!(
+            "invalid index locator '{locator}': must be an http(s):// base or a \
+             git repository (git+…, ssh://, git@…, or ending in .git)"
+        )));
+    }
 
     let scope = super::grim(scope_resolution::resolve(ctx, args.global, args.config.as_deref()))?;
     let origin = scope_to_origin(scope.scope);
@@ -718,14 +808,13 @@ fn run_registry_add(
         )));
     }
 
-    reject_control_chars(url, "registry.url")?;
-
     if make_default {
         clear_all_defaults(&mut registries);
     }
     registries.push(RegistryConfig {
         alias: Some(alias.to_string()),
-        url: url.to_string(),
+        url: (!is_index).then(|| locator.to_string()),
+        index: is_index.then(|| locator.to_string()),
         default: make_default,
     });
 
@@ -735,7 +824,7 @@ fn run_registry_add(
         ConfigReport::Write(ConfigWriteReport {
             action: WriteAction::RegistryAdded,
             key: format!("registry.{alias}"),
-            value: Some(url.to_string()),
+            value: Some(locator.to_string()),
             scope: origin,
         }),
         ExitCode::Success,
@@ -805,6 +894,7 @@ fn run_registry_show(ctx: &Context, args: &ConfigArgs, alias: &str) -> anyhow::R
         ConfigReport::RegistryShow(RegistryShowReport {
             alias: alias.to_string(),
             url: rc.url.clone(),
+            index: rc.index.clone(),
             default: rc.default,
         }),
         ExitCode::Success,
@@ -819,6 +909,7 @@ fn run_registry_list(ctx: &Context, args: &ConfigArgs) -> anyhow::Result<(Config
         .map(|rc| RegistryRow {
             alias: rc.alias.clone(),
             url: rc.url.clone(),
+            index: rc.index.clone(),
             default: rc.default,
         })
         .collect();
@@ -887,9 +978,15 @@ mod tests {
         let a = parse(&["registry", "add", "acme", "--url", "ghcr.io/acme"]).expect("registry add parses");
         match a.command {
             ConfigCommand::Registry(r) => match r.command {
-                RegistryCommand::Add { alias, url, default } => {
+                RegistryCommand::Add {
+                    alias,
+                    url,
+                    index,
+                    default,
+                } => {
                     assert_eq!(alias, "acme");
-                    assert_eq!(url, "ghcr.io/acme");
+                    assert_eq!(url.as_deref(), Some("ghcr.io/acme"));
+                    assert_eq!(index, None);
                     assert!(!default);
                 }
                 _ => panic!("expected Add"),
@@ -941,9 +1038,35 @@ mod tests {
     }
 
     #[test]
-    fn registry_add_missing_url_fails() {
-        // --url is required for registry add.
-        assert!(parse(&["registry", "add", "acme"]).is_err());
+    fn registry_add_source_arg_combinations() {
+        // Neither --url nor --index parses at the clap level (exactly-one is
+        // a runtime usage error, 64, so the message can explain the choice);
+        // both together conflict at the clap level; each alone parses.
+        assert!(parse(&["registry", "add", "acme"]).is_ok());
+        assert!(
+            parse(&[
+                "registry",
+                "add",
+                "acme",
+                "--url",
+                "ghcr.io/acme",
+                "--index",
+                "https://idx"
+            ])
+            .is_err()
+        );
+        assert!(parse(&["registry", "add", "acme", "--url", "ghcr.io/acme"]).is_ok());
+        let a = parse(&["registry", "add", "hub", "--index", "https://index.grimoire.rs"]).expect("parses");
+        match a.command {
+            ConfigCommand::Registry(r) => match r.command {
+                RegistryCommand::Add { url, index, .. } => {
+                    assert_eq!(url, None);
+                    assert_eq!(index.as_deref(), Some("https://index.grimoire.rs"));
+                }
+                _ => panic!("expected Add"),
+            },
+            _ => panic!("expected Registry"),
+        }
     }
 
     // ── F3: parse_key, value-parser, and registry mutation unit tests ────────
@@ -1055,12 +1178,14 @@ mod tests {
         let mut registries = vec![
             RegistryConfig {
                 alias: Some("a".to_string()),
-                url: "u1".to_string(),
+                url: Some("u1".to_string()),
+                index: None,
                 default: true,
             },
             RegistryConfig {
                 alias: Some("b".to_string()),
-                url: "u2".to_string(),
+                url: Some("u2".to_string()),
+                index: None,
                 default: false,
             },
         ];
@@ -1189,12 +1314,14 @@ mod tests {
         let mut registries = vec![
             RegistryConfig {
                 alias: Some("x".to_string()),
-                url: "u1".to_string(),
+                url: Some("u1".to_string()),
+                index: None,
                 default: true,
             },
             RegistryConfig {
                 alias: Some("y".to_string()),
-                url: "u2".to_string(),
+                url: Some("u2".to_string()),
+                index: None,
                 default: false,
             },
         ];

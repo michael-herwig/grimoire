@@ -102,6 +102,15 @@ impl GrimPaths {
         self.catalog_dir().join(format!("{hash}.json"))
     }
 
+    /// The shallow-clone directory for a git-hosted package index:
+    /// `index-git/<hash>`, where `<hash>` is the first 16 hex chars of the
+    /// SHA-256 of the index locator. One clone per locator so multiple
+    /// configured git indices never clobber each other.
+    pub fn index_git_dir_for(&self, locator: &str) -> PathBuf {
+        let hash = crate::oci::digest::Algorithm::Sha256.hash(locator).hex()[..16].to_string();
+        self.root.join("index-git").join(hash)
+    }
+
     /// Create the root, `blobs`, `tags`, `state`, and `tmp` directories
     /// and assert the data root and temp directory share one filesystem.
     ///

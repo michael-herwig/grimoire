@@ -38,6 +38,9 @@ tempfile = "3"
 fs4 = "0.9"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 oci-client = { version = "0.17", default-features = false, features = ["rustls-tls"] }
+# Already in-tree transitively via oci-client; used directly for the
+# package-index HTTP transport (all.json). Same TLS stack (rustls).
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 docker_credential = "1.3"
 # Path containment guard for anchored install state: canonicalize both
 # sides of the prefix check without `\\?\` UNC false-negatives on Windows.

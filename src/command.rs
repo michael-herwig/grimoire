@@ -367,7 +367,8 @@ mod tests {
         let ctx = Context::hermetic(tmp.path().to_path_buf());
         let regs = vec![RegistryConfig {
             alias: None,
-            url: "array.example".to_string(),
+            url: Some("array.example".to_string()),
+            index: None,
             default: true,
         }];
         let scope = make_scope(&tmp, regs);

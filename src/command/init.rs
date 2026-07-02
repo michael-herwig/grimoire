@@ -184,7 +184,8 @@ mod tests {
                 "must have exactly one [[registries]] entry for url={url:?}"
             );
             assert_eq!(
-                cfg.registries[0].url, *url,
+                cfg.registries[0].url.as_deref(),
+                Some(&**url),
                 "url must round-trip through TOML escaping for url={url:?}"
             );
         }

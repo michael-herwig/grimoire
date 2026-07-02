@@ -279,14 +279,16 @@ impl Printable for RegistryListReport {
             .rows
             .iter()
             .map(|r| {
+                let (ty, source) = type_and_source(r.url.as_deref(), r.index.as_deref());
                 vec![
                     r.alias.as_deref().unwrap_or("").to_string(),
-                    r.url.clone(),
+                    ty.to_string(),
+                    source.to_string(),
                     r.default.to_string(),
                 ]
             })
             .collect();
-        print_table(w, &["Alias", "URL", "Default"], &rows)
+        print_table(w, &["Alias", "Type", "Source", "Default"], &rows)
     }
 
     fn print_json(&self, w: &mut impl Write) -> io::Result<()> {
@@ -295,28 +297,47 @@ impl Printable for RegistryListReport {
     }
 }
 
+/// The `Type | Source` cell pair for a registry/index entry: which kind of
+/// browse source it is and its locator. Empty pair only for an invalid
+/// entry that validation would reject.
+fn type_and_source<'a>(url: Option<&'a str>, index: Option<&'a str>) -> (&'static str, &'a str) {
+    match (url, index) {
+        (Some(url), _) => ("registry", url),
+        (None, Some(index)) => ("index", index),
+        (None, None) => ("", ""),
+    }
+}
+
 /// One row in `grim config registry list`.
 #[derive(Debug, Serialize)]
 pub struct RegistryRow {
-    /// The registry alias, or `None` for alias-less (url-only) entries.
+    /// The registry alias, or `None` for alias-less (locator-only) entries.
     pub alias: Option<String>,
-    /// The registry URL.
-    pub url: String,
+    /// The registry URL (`None` for index entries).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// The package-index locator (`None` for registry entries).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index: Option<String>,
     /// Whether this is the default registry.
     pub default: bool,
 }
 
 /// Result of `grim config registry show <alias>`.
 ///
-/// Plain format: one-row table — `Alias | URL | Default`.
+/// Plain format: one-row table — `Alias | Type | Source | Default`.
 ///
-/// JSON format: `{"alias": "…", "url": "…", "default": bool}`.
+/// JSON format: `{"alias": "…", "url"|"index": "…", "default": bool}`.
 #[derive(Debug, Serialize)]
 pub struct RegistryShowReport {
     /// The registry alias.
     pub alias: String,
-    /// The registry URL.
-    pub url: String,
+    /// The registry URL (`None` for index entries).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// The package-index locator (`None` for registry entries).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index: Option<String>,
     /// Whether this is the default registry.
     pub default: bool,
 }
@@ -324,10 +345,16 @@ pub struct RegistryShowReport {
 impl Printable for RegistryShowReport {
     fn print_plain(&self, w: &mut impl Write) -> io::Result<()> {
         use crate::cli::printer::print_table;
+        let (ty, source) = type_and_source(self.url.as_deref(), self.index.as_deref());
         print_table(
             w,
-            &["Alias", "URL", "Default"],
-            &[vec![self.alias.clone(), self.url.clone(), self.default.to_string()]],
+            &["Alias", "Type", "Source", "Default"],
+            &[vec![
+                self.alias.clone(),
+                ty.to_string(),
+                source.to_string(),
+                self.default.to_string(),
+            ]],
         )
     }
 
@@ -501,7 +528,8 @@ mod tests {
         let r = RegistryListReport {
             rows: vec![RegistryRow {
                 alias: Some("acme".to_string()),
-                url: "ghcr.io/acme".to_string(),
+                url: Some("ghcr.io/acme".to_string()),
+                index: None,
                 default: true,
             }],
         };
@@ -518,7 +546,8 @@ mod tests {
         let r = RegistryListReport {
             rows: vec![RegistryRow {
                 alias: Some("acme".to_string()),
-                url: "ghcr.io/acme".to_string(),
+                url: Some("ghcr.io/acme".to_string()),
+                index: None,
                 default: false,
             }],
         };
@@ -535,7 +564,8 @@ mod tests {
         // ADR: registry show — one-row table (Alias | URL | Default).
         let r = RegistryShowReport {
             alias: "acme".to_string(),
-            url: "ghcr.io/acme".to_string(),
+            url: Some("ghcr.io/acme".to_string()),
+            index: None,
             default: false,
         };
         let mut buf: Vec<u8> = Vec::new();

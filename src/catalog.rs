@@ -13,6 +13,8 @@
 
 pub mod catalog_error;
 pub mod catalog_service;
+pub mod index_announce;
+pub mod index_source;
 pub mod registry_catalog;
 pub mod search_match;
 

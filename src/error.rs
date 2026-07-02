@@ -10,6 +10,7 @@
 
 use crate::auth::auth_error::AuthError;
 use crate::catalog::catalog_error::{CatalogError, CatalogErrorKind};
+use crate::catalog::index_announce::AnnounceError;
 use crate::cli::exit_code::ExitCode;
 use crate::command::command_error::CommandError;
 use crate::config::config_error::{ConfigError, ConfigErrorKind};
@@ -72,6 +73,9 @@ pub enum Error {
 
     #[error(transparent)]
     Command(#[from] CommandError),
+
+    #[error(transparent)]
+    Announce(#[from] AnnounceError),
 }
 
 /// Maps an error chain to a process exit code.
@@ -107,6 +111,12 @@ pub fn classify_error(err: &anyhow::Error) -> ExitCode {
                     CommandError::KindInferenceFailed { .. } => ExitCode::DataError,
                     CommandError::ConfigUsage(_) => ExitCode::UsageError,
                     CommandError::ConfigValue(_) => ExitCode::DataError,
+                },
+                // Announce needs remote resources (the index repository, the
+                // GitHub API); a local I/O fault classifies as I/O.
+                Error::Announce(ae) => match ae {
+                    AnnounceError::Io(io) => classify_io(io),
+                    AnnounceError::Git { .. } | AnnounceError::OwnerLookup { .. } => ExitCode::Unavailable,
                 },
             };
         }
@@ -227,6 +237,9 @@ fn classify_catalog(err: &CatalogError) -> ExitCode {
         CatalogErrorKind::Parse(_) | CatalogErrorKind::UnsupportedVersion { .. } => ExitCode::DataError,
         CatalogErrorKind::Io(io) => classify_io(io),
         CatalogErrorKind::Access(ae) => classify_access(ae),
+        // An index fetch failure is a remote-resource fault: the index
+        // host is unreachable or served a non-success status.
+        CatalogErrorKind::IndexFetch { .. } => ExitCode::Unavailable,
     }
 }
 

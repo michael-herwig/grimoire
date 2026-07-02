@@ -103,14 +103,20 @@ pub struct ConfigOptions {
     pub tui: TuiOptions,
 }
 
-/// One configured registry in the top-level `[[registries]]` array.
+/// One configured browse source in the top-level `[[registries]]` array.
 ///
 /// Additive over the single `[options].default_registry`: a config that
 /// declares no `[[registries]]` keeps the legacy single-registry behavior.
 /// When present, the array is the authoritative browse set for
 /// `search`/`tui`/`mcp`, and its `default = true` entry (else the first)
 /// is the primary registry short identifiers expand against.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+///
+/// Exactly one of [`Self::url`] / [`Self::index`] must be set (enforced by
+/// `validate_registries`). A `url` entry lists packages via the OCI
+/// `_catalog` endpoint; an `index` entry lists packages from a package
+/// index whose entries carry their own fully-qualified registry refs — so
+/// pairing an index with a registry url would be meaningless.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RegistryConfig {
     /// Optional short alias used in qualified `alias/repo` references and
@@ -120,13 +126,31 @@ pub struct RegistryConfig {
     pub alias: Option<String>,
     /// The registry host (and optional namespace), e.g. `ghcr.io` or
     /// `ghcr.io/acme`. Same shape as `[options].default_registry`.
-    pub url: String,
+    /// Mutually exclusive with [`Self::index`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// A package-index locator replacing the `_catalog` listing: an
+    /// `http(s)://` base serving compiled static files (`all.json`), or a
+    /// git repository (`git+…`, `ssh://`, `git@…`, or a URL ending in
+    /// `.git`) holding `index/**/metadata.json`. Mutually exclusive with
+    /// [`Self::url`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<String>,
     /// Marks this registry as the primary one short identifiers expand
     /// against. Exactly one entry MAY set it; setting it on two or more
     /// entries is a parse error. When none set it, the first entry is
     /// primary at resolution time.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub default: bool,
+}
+
+impl RegistryConfig {
+    /// The entry's locator — the registry `url` or the `index` locator,
+    /// whichever is set (`url` wins if both are, which validation rejects).
+    /// Empty only for an invalid entry that validation would reject.
+    pub fn locator(&self) -> &str {
+        self.url.as_deref().or(self.index.as_deref()).unwrap_or("")
+    }
 }
 
 /// The declared skills, rules, and agents.

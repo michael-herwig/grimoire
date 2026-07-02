@@ -176,19 +176,49 @@ fn parse_config(s: &str, path: PathBuf) -> Result<ProjectConfig, ConfigError> {
     })
 }
 
-/// Validate a `[[registries]]` array: every `url` non-empty, every present
-/// `alias` non-empty and unique across the array, and at most one entry
-/// sets `default = true`. At-most-one default is checked after the
-/// per-entry structural checks so a `default = true` entry necessarily
-/// already has a non-empty url — no separate check needed.
+/// Validate a `[[registries]]` array: every entry sets exactly one of
+/// `url` / `index` (non-empty), every `index` locator classifies as an
+/// HTTP(S) or git transport, every present `alias` is non-empty and unique
+/// across the array, and at most one entry sets `default = true`.
+/// At-most-one default is checked after the per-entry structural checks so
+/// a `default = true` entry necessarily already has a valid locator.
 pub(crate) fn validate_registries(registries: &[RegistryConfig], path: &Path) -> Result<(), ConfigError> {
     let mut seen_aliases = std::collections::BTreeSet::new();
     for rc in registries {
-        if rc.url.trim().is_empty() {
+        let url_set = rc.url.as_deref().is_some_and(|u| !u.trim().is_empty());
+        let index_set = rc.index.as_deref().is_some_and(|i| !i.trim().is_empty());
+        match (url_set, index_set) {
+            (true, true) => {
+                return Err(ConfigError::new(
+                    path.to_path_buf(),
+                    ConfigErrorKind::RegistryInvalid {
+                        reason: format!(
+                            "entry '{}' sets both url and index; exactly one must be set \
+                             (index entries carry their own registry refs)",
+                            rc.locator()
+                        ),
+                    },
+                ));
+            }
+            (false, false) => {
+                return Err(ConfigError::new(
+                    path.to_path_buf(),
+                    ConfigErrorKind::RegistryInvalid {
+                        reason: "exactly one of url / index must be set (non-empty)".to_string(),
+                    },
+                ));
+            }
+            _ => {}
+        }
+        if index_set && crate::config::registry_resolve::classify_index(rc.locator()).is_none() {
             return Err(ConfigError::new(
                 path.to_path_buf(),
                 ConfigErrorKind::RegistryInvalid {
-                    reason: "url must not be empty".to_string(),
+                    reason: format!(
+                        "index '{}' must be an http(s):// base or a git repository \
+                         (git+…, ssh://, git@…, or ending in .git)",
+                        rc.locator()
+                    ),
                 },
             ));
         }
@@ -197,7 +227,7 @@ pub(crate) fn validate_registries(registries: &[RegistryConfig], path: &Path) ->
                 return Err(ConfigError::new(
                     path.to_path_buf(),
                     ConfigErrorKind::RegistryInvalid {
-                        reason: format!("alias for url '{}' must not be empty", rc.url),
+                        reason: format!("alias for '{}' must not be empty", rc.locator()),
                     },
                 ));
             }
@@ -505,7 +535,7 @@ url = "registry.corp/team"
         .expect("parse");
         assert_eq!(cfg.registries.len(), 2);
         assert_eq!(cfg.registries[0].alias.as_deref(), Some("acme"));
-        assert_eq!(cfg.registries[0].url, "ghcr.io/acme");
+        assert_eq!(cfg.registries[0].url.as_deref(), Some("ghcr.io/acme"));
         assert!(cfg.registries[0].default);
         assert_eq!(cfg.registries[1].alias, None);
         assert!(!cfg.registries[1].default);
@@ -1183,7 +1213,7 @@ default = true
         // The in-memory state carries both fields.
         assert_eq!(cfg.options.default_registry.as_deref(), Some("legacy.example"));
         assert_eq!(cfg.registries.len(), 1);
-        assert_eq!(cfg.registries[0].url, "array.example");
+        assert_eq!(cfg.registries[0].url.as_deref(), Some("array.example"));
         // When resolved: the array is authoritative, legacy is folded in only
         // when no `[[registries]]` are present (step 3 of resolve_registries).
         let set = resolve_registries(

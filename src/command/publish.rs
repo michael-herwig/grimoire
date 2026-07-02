@@ -62,6 +62,36 @@ pub struct PublishArgs {
     /// `release`; requires `git` and a repository (a non-git path fails, 65).
     #[arg(long)]
     pub git: bool,
+
+    /// After a fully successful publish, announce the published packages to
+    /// a package-index git repository: write metadata pointers on a topic
+    /// branch and open a pull request (github.com + `gh`) or push the
+    /// branch (any other git host). No-op under `--dry-run`.
+    #[arg(long)]
+    pub announce: bool,
+
+    /// The index git repository to announce to. Overrides the manifest's
+    /// `[announce] repository`; default: `https://github.com/grimoire-rs/index`.
+    #[arg(long, value_name = "REPO_URL", requires = "announce")]
+    pub announce_repo: Option<String>,
+}
+
+/// The optional `[announce]` table in `publish.toml`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AnnounceSpec {
+    /// The index git repository announcements target (https clone URL).
+    /// Default: `https://github.com/grimoire-rs/index`.
+    pub repository: Option<String>,
+
+    /// The `index/github.com/<namespace>/` the packages land under.
+    /// Default: the authenticated `gh` user's login.
+    pub namespace: Option<String>,
+
+    /// The namespace's numeric GitHub account id. Default: resolved live
+    /// from the GitHub API. Set it explicitly for hermetic/offline runs
+    /// against a custom index repository.
+    pub owner_id: Option<u64>,
 }
 
 /// A single entry in a kind table (`[skills.name]`, `[rules.name]`,
@@ -127,6 +157,11 @@ pub struct PublishManifest {
     /// Bundle entries, keyed by name.
     #[serde(default)]
     pub bundles: BTreeMap<String, PublishEntrySpec>,
+
+    /// Announcement defaults for `--announce` (target index repository,
+    /// namespace, owner id).
+    #[serde(default)]
+    pub announce: Option<AnnounceSpec>,
 }
 
 /// One planned publish operation, ready to be handed to `release::run`.
@@ -378,7 +413,88 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
         }
     }
 
+    // Announce only after a fully successful, non-dry-run publish: every
+    // planned entry is now live on the registry (freshly pushed or already
+    // present via skip-existing).
+    if args.announce {
+        if args.dry_run {
+            eprintln!("announce: skipped (dry run)");
+        } else if let Err(err) = run_announce(ctx, args, &manifest, &entries).await {
+            // The publish itself succeeded — keep the report, surface the
+            // announce failure on stderr, and exit Unavailable (69): the
+            // index repository is a remote resource the announce needs.
+            eprintln!("error: announce failed: {err:#}");
+            return Ok((PublishReport::new(report_entries), ExitCode::Unavailable));
+        }
+    }
+
     Ok((PublishReport::new(report_entries), ExitCode::Success))
+}
+
+/// Execute the `--announce` step: derive one metadata pointer per planned
+/// entry (description read back from the just-published manifest via the
+/// access seam), then hand the set to
+/// [`crate::catalog::index_announce::announce`].
+async fn run_announce(
+    ctx: &Context,
+    args: &PublishArgs,
+    manifest: &PublishManifest,
+    entries: &[PlannedEntry],
+) -> anyhow::Result<()> {
+    use crate::catalog::index_announce::{
+        AnnounceOutcome, AnnouncePackage, AnnounceRequest, DEFAULT_INDEX_REPO, announce, gh_login,
+    };
+
+    let spec = manifest.announce.as_ref();
+    let repo_url = args
+        .announce_repo
+        .clone()
+        .or_else(|| spec.and_then(|s| s.repository.clone()))
+        .unwrap_or_else(|| DEFAULT_INDEX_REPO.to_string());
+    let namespace = match spec.and_then(|s| s.namespace.clone()) {
+        Some(ns) => ns,
+        None => gh_login().await.ok_or_else(|| {
+            super::config_usage(
+                "no announce namespace: set `[announce] namespace` in publish.toml \
+                 or authenticate the `gh` CLI",
+            )
+        })?,
+    };
+
+    let access = super::access_seam(ctx)?;
+    let mut packages = Vec::with_capacity(entries.len());
+    for planned in entries {
+        let id = crate::oci::Identifier::parse(&planned.reference)
+            .map_err(|e| anyhow::Error::from(crate::error::Error::from(e)))?;
+        let reference = format!("{}/{}", id.registry(), id.repository());
+        let (description, repository_url) =
+            crate::catalog::index_announce::pointer_metadata(access.as_ref(), &id).await;
+        packages.push(AnnouncePackage {
+            name: planned.name.clone(),
+            kind: kind_str(planned.kind).to_string(),
+            reference,
+            // The index spec requires a description; grim-published
+            // artifacts always carry the annotation, but degrade honestly
+            // for foreign/unreachable manifests.
+            description: description.unwrap_or_else(|| format!("grimoire {} {}", kind_str(planned.kind), planned.name)),
+            repository_url,
+        });
+    }
+
+    let request = AnnounceRequest {
+        repo_url: repo_url.clone(),
+        namespace,
+        owner_id: spec.and_then(|s| s.owner_id),
+        packages,
+    };
+    match super::grim(announce(&request).await)? {
+        AnnounceOutcome::PullRequest { url } => eprintln!("announced: {url}"),
+        AnnounceOutcome::BranchPushed { branch } => eprintln!(
+            "announced: pushed branch '{branch}' to {repo_url} — open the merge request to publish the pointers"
+        ),
+        AnnounceOutcome::UpToDate => eprintln!("announce: index already up to date"),
+    }
+    Ok(())
 }
 
 /// Return the singular kind string for constructing `--kind` flag value.
@@ -2104,6 +2220,8 @@ mod tests {
             dry_run,
             force,
             git: false,
+            announce: false,
+            announce_repo: None,
         }
     }
 

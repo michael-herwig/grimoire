@@ -384,69 +384,7 @@ impl Catalog {
         force: bool,
     ) -> Result<Self, CatalogError> {
         let scope = query.to_lowercase();
-
-        // Phase 1 — blocking pre-flight on the blocking pool: read the cache,
-        // decide, and (when a rebuild is needed) acquire the advisory lock and
-        // double-check. The cache read, the flock syscall, and the Windows
-        // delete-pending retry `sleep` are all blocking, so they must never
-        // run on a Tokio worker (quality-rust: no blocking I/O in async).
-        let preflight = {
-            let path = path.to_path_buf();
-            let registry = registry.to_string();
-            let scope = scope.clone();
-            run_blocking(path.clone(), move || {
-                let cached = Catalog::load(&path, &registry)?;
-
-                // Offline: serve whatever is cached (any scope), never lock or
-                // reach the network. A cold cache is empty.
-                if offline {
-                    return Ok(PreFlight::Serve(cached.unwrap_or_else(|| Catalog::empty(&registry))));
-                }
-
-                // Fast path: a fresh, same-scope cache serves with no lock
-                // taken, so the common case never contends.
-                if !force
-                    && let Some(c) = &cached
-                    && c.scope == scope
-                    && c.is_fresh(chrono::Utc::now())
-                {
-                    return Ok(PreFlight::Serve(c.clone()));
-                }
-
-                // The cache file's parent (the per-registry `catalog/` dir)
-                // must exist for the sidecar and the atomic write; best-effort.
-                if let Some(parent) = path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-
-                match AdvisoryFileLock::try_acquire(&path) {
-                    Ok(guard) => {
-                        // Double-check: a peer may have rebuilt while we
-                        // contended for the lock. Serve their fresh build
-                        // instead of redoing it.
-                        if !force
-                            && let Some(c) = Catalog::load(&path, &registry)?
-                            && c.scope == scope
-                            && c.is_fresh(chrono::Utc::now())
-                        {
-                            return Ok(PreFlight::Serve(c));
-                        }
-                        Ok(PreFlight::Rebuild(Some(guard)))
-                    }
-                    // A peer owns the refresh — serve stale (or empty) and move
-                    // on rather than walking the registry redundantly.
-                    Err(e) if matches!(e.kind, crate::lock::lock_error::LockErrorKind::Locked) => {
-                        Ok(PreFlight::Serve(cached.unwrap_or_else(|| Catalog::empty(&registry))))
-                    }
-                    // A real lock I/O fault: fall back to an uncoordinated
-                    // rebuild (the atomic write still prevents corruption).
-                    Err(_) => Ok(PreFlight::Rebuild(None)),
-                }
-            })
-            .await?
-        };
-
-        let guard = match preflight {
+        let guard = match Self::coordinate(path, registry, &scope, offline, force).await? {
             PreFlight::Serve(catalog) => return Ok(catalog),
             PreFlight::Rebuild(guard) => guard,
         };
@@ -454,28 +392,142 @@ impl Catalog {
         // Phase 2 — the network rebuild, the only genuinely async work, runs on
         // the async executor. The advisory lock (an OS file handle, not a
         // `MutexGuard`) is held across this await: sound to hold across `.await`.
-        // On a build failure the guard is handed to the blocking pool for
-        // disposal — its `Drop` unlinks the sidecar (a blocking syscall that
-        // must not run on a Tokio worker), the same reason the commit below is
-        // blocking.
         let rebuilt = match Self::build(registry, &scope, access).await {
             Ok(rebuilt) => rebuilt,
             Err(build_err) => {
-                let lock_path = path.to_path_buf();
-                let _ = run_blocking(lock_path, move || {
-                    drop(guard);
-                    Ok(())
-                })
-                .await;
+                Self::dispose_guard(path, guard).await;
                 return Err(CatalogError::access(path, build_err));
             }
         };
 
-        // Phase 3 — blocking commit on the blocking pool: atomically write the
-        // rebuilt cache and release the lock (its `Drop` unlinks the sidecar).
-        // A save error exits via `?`; the guard then drops at the end of this
-        // closure — still on the blocking pool — so the sidecar unlink never
-        // runs on the async executor on either the success or the error path.
+        Self::commit(path, guard, rebuilt).await
+    }
+
+    /// Like [`Self::load_or_refresh_coordinated`], but for an index-backed
+    /// source: the same cache file, TTL, offline degrade, and advisory-lock
+    /// coordination — only the rebuild differs (the package index is
+    /// fetched over HTTP or a git shallow clone instead of walking the
+    /// registry's `_catalog`). The cache is keyed by the index `locator`.
+    ///
+    /// # Errors
+    ///
+    /// [`CatalogError`] for a cache parse/version failure, or an index
+    /// fetch/parse failure during a rebuild this process owns.
+    pub async fn load_or_refresh_index_coordinated(
+        path: &Path,
+        locator: &str,
+        kind: crate::config::registry_resolve::SourceKind,
+        query: &str,
+        git_dir: &Path,
+        offline: bool,
+        force: bool,
+    ) -> Result<Self, CatalogError> {
+        let scope = query.to_lowercase();
+        let guard = match Self::coordinate(path, locator, &scope, offline, force).await? {
+            PreFlight::Serve(catalog) => return Ok(catalog),
+            PreFlight::Rebuild(guard) => guard,
+        };
+
+        let rebuilt = match Self::build_from_index(locator, kind, &scope, git_dir, path).await {
+            Ok(rebuilt) => rebuilt,
+            Err(build_err) => {
+                Self::dispose_guard(path, guard).await;
+                return Err(build_err);
+            }
+        };
+
+        Self::commit(path, guard, rebuilt).await
+    }
+
+    /// Phase 1 — blocking pre-flight on the blocking pool: read the cache,
+    /// decide, and (when a rebuild is needed) acquire the advisory lock and
+    /// double-check. The cache read, the flock syscall, and the Windows
+    /// delete-pending retry `sleep` are all blocking, so they must never
+    /// run on a Tokio worker (quality-rust: no blocking I/O in async).
+    ///
+    /// `key` is the cache identity — the registry url for `_catalog`
+    /// sources, the index locator for index sources.
+    async fn coordinate(
+        path: &Path,
+        key: &str,
+        scope: &str,
+        offline: bool,
+        force: bool,
+    ) -> Result<PreFlight, CatalogError> {
+        let path = path.to_path_buf();
+        let key = key.to_string();
+        let scope = scope.to_string();
+        run_blocking(path.clone(), move || {
+            let cached = Catalog::load(&path, &key)?;
+
+            // Offline: serve whatever is cached (any scope), never lock or
+            // reach the network. A cold cache is empty.
+            if offline {
+                return Ok(PreFlight::Serve(cached.unwrap_or_else(|| Catalog::empty(&key))));
+            }
+
+            // Fast path: a fresh, same-scope cache serves with no lock
+            // taken, so the common case never contends.
+            if !force
+                && let Some(c) = &cached
+                && c.scope == scope
+                && c.is_fresh(chrono::Utc::now())
+            {
+                return Ok(PreFlight::Serve(c.clone()));
+            }
+
+            // The cache file's parent (the per-registry `catalog/` dir)
+            // must exist for the sidecar and the atomic write; best-effort.
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+
+            match AdvisoryFileLock::try_acquire(&path) {
+                Ok(guard) => {
+                    // Double-check: a peer may have rebuilt while we
+                    // contended for the lock. Serve their fresh build
+                    // instead of redoing it.
+                    if !force
+                        && let Some(c) = Catalog::load(&path, &key)?
+                        && c.scope == scope
+                        && c.is_fresh(chrono::Utc::now())
+                    {
+                        return Ok(PreFlight::Serve(c));
+                    }
+                    Ok(PreFlight::Rebuild(Some(guard)))
+                }
+                // A peer owns the refresh — serve stale (or empty) and move
+                // on rather than walking the registry redundantly.
+                Err(e) if matches!(e.kind, crate::lock::lock_error::LockErrorKind::Locked) => {
+                    Ok(PreFlight::Serve(cached.unwrap_or_else(|| Catalog::empty(&key))))
+                }
+                // A real lock I/O fault: fall back to an uncoordinated
+                // rebuild (the atomic write still prevents corruption).
+                Err(_) => Ok(PreFlight::Rebuild(None)),
+            }
+        })
+        .await
+    }
+
+    /// Dispose the advisory-lock guard on the blocking pool — its `Drop`
+    /// unlinks the sidecar (a blocking syscall that must not run on a
+    /// Tokio worker). Used on the rebuild error path; the success path
+    /// drops the guard inside [`Self::commit`]'s blocking closure.
+    async fn dispose_guard(path: &Path, guard: Option<AdvisoryFileLock>) {
+        let lock_path = path.to_path_buf();
+        let _ = run_blocking(lock_path, move || {
+            drop(guard);
+            Ok(())
+        })
+        .await;
+    }
+
+    /// Phase 3 — blocking commit on the blocking pool: atomically write the
+    /// rebuilt cache and release the lock (its `Drop` unlinks the sidecar).
+    /// A save error exits via `?`; the guard then drops at the end of this
+    /// closure — still on the blocking pool — so the sidecar unlink never
+    /// runs on the async executor on either the success or the error path.
+    async fn commit(path: &Path, guard: Option<AdvisoryFileLock>, rebuilt: Catalog) -> Result<Catalog, CatalogError> {
         let write_path = path.to_path_buf();
         run_blocking(write_path.clone(), move || {
             rebuilt.save(&write_path)?;
@@ -483,6 +535,40 @@ impl Catalog {
             Ok(rebuilt)
         })
         .await
+    }
+
+    /// Build an index-backed catalog: fetch the package index (HTTP static
+    /// files or a git shallow clone), apply the same lowercased name
+    /// prefilter and [`MAX_CATALOG_REPOS`] cap as the `_catalog` walk, and
+    /// key entries by their full `registry/repository` ref (index entries
+    /// span registries, so the bare repository path is not unique).
+    async fn build_from_index(
+        locator: &str,
+        kind: crate::config::registry_resolve::SourceKind,
+        scope: &str,
+        git_dir: &Path,
+        cache_path: &Path,
+    ) -> Result<Self, CatalogError> {
+        let fetched_at = now_rfc3339();
+        let fetched =
+            crate::catalog::index_source::fetch_index_entries(locator, kind, git_dir, cache_path, &fetched_at).await?;
+
+        let mut selected: Vec<CatalogEntry> = fetched
+            .into_iter()
+            .filter(|e| scope.is_empty() || e.repo().to_lowercase().contains(scope))
+            .take(MAX_CATALOG_REPOS + 1)
+            .collect();
+        let truncated = selected.len() > MAX_CATALOG_REPOS;
+        selected.truncate(MAX_CATALOG_REPOS);
+
+        let entries: BTreeMap<String, CatalogEntry> = selected.into_iter().map(|e| (e.repo(), e)).collect();
+        Ok(Self {
+            registry: locator.to_string(),
+            scope: scope.to_string(),
+            truncated,
+            built_at: fetched_at,
+            entries,
+        })
     }
 
     /// Build a bounded, query-scoped catalog over the access seam.

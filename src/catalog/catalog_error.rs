@@ -71,6 +71,18 @@ pub enum CatalogErrorKind {
     /// inflate every `Result<_, CatalogError>` (clippy `result_large_err`).
     #[error("registry access failed")]
     Access(#[source] Box<AccessError>),
+
+    /// A package-index fetch failure while (re)building an index-backed
+    /// catalog (HTTP transport or index-content parse; git subprocess
+    /// failures surface as `Io`).
+    #[error("package index fetch failed for '{locator}'")]
+    IndexFetch {
+        /// The index locator the fetch ran against.
+        locator: String,
+        /// The transport / parse cause.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 impl CatalogError {
@@ -88,6 +100,21 @@ impl CatalogError {
     /// Wrap an OCI-access failure.
     pub fn access(path: &Path, source: AccessError) -> Self {
         Self::new(path, CatalogErrorKind::Access(Box::new(source)))
+    }
+
+    /// Wrap a package-index fetch failure.
+    pub fn index_fetch(
+        path: &Path,
+        locator: impl Into<String>,
+        source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
+    ) -> Self {
+        Self::new(
+            path,
+            CatalogErrorKind::IndexFetch {
+                locator: locator.into(),
+                source: source.into(),
+            },
+        )
     }
 }
 

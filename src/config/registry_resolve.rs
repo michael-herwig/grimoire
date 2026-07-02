@@ -25,16 +25,56 @@ use crate::config::declaration::RegistryConfig;
 use crate::oci::Identifier;
 use crate::oci::identifier::error::IdentifierError;
 
-/// One registry in the resolved browse set, in precedence order.
+/// How a resolved browse source lists its packages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceKind {
+    /// An OCI registry — listing via the `/v2/_catalog` endpoint.
+    Registry,
+    /// An HTTP(S) package index serving compiled static files (`all.json`).
+    IndexHttp,
+    /// A git repository holding `index/**/metadata.json`.
+    IndexGit,
+}
+
+impl SourceKind {
+    /// Whether this source is a package index (any transport).
+    pub fn is_index(self) -> bool {
+        matches!(self, Self::IndexHttp | Self::IndexGit)
+    }
+}
+
+/// Classify an `index` locator into its transport, or `None` when the
+/// locator matches neither form (validation rejects those at parse time).
+///
+/// Git forms are checked first so `https://host/repo.git` clones rather
+/// than being read as a static-file base.
+pub fn classify_index(locator: &str) -> Option<SourceKind> {
+    let l = locator.trim();
+    if l.is_empty() {
+        return None;
+    }
+    if l.starts_with("git+") || l.starts_with("ssh://") || l.starts_with("git@") || l.ends_with(".git") {
+        return Some(SourceKind::IndexGit);
+    }
+    if l.starts_with("http://") || l.starts_with("https://") {
+        return Some(SourceKind::IndexHttp);
+    }
+    None
+}
+
+/// One browse source in the resolved set, in precedence order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedRegistry {
-    /// The registry host (and optional namespace).
+    /// The registry host (and optional namespace) — or, for an index
+    /// source, the index locator.
     pub url: String,
     /// The configured alias, when one was declared.
     pub alias: Option<String>,
     /// Whether this is the primary registry short identifiers expand
     /// against. Exactly one entry in a resolved set carries it.
     pub is_default: bool,
+    /// How this source lists its packages (`_catalog` vs package index).
+    pub kind: SourceKind,
 }
 
 /// Build the ordered, deduped registry browse set.
@@ -74,6 +114,7 @@ pub fn resolve_registries(
                 url: url.clone(),
                 alias: None,
                 is_default: forced_set.is_empty(),
+                kind: SourceKind::Registry,
             });
         }
     }
@@ -81,15 +122,28 @@ pub fn resolve_registries(
         return forced_set;
     }
 
-    // 2. Declared `[[registries]]` are authoritative when present.
+    // 2. Declared `[[registries]]` are authoritative when present. Each
+    // entry is either a registry (`url`) or an index (`index`) source —
+    // validation enforces exactly-one-of; an unclassifiable programmatic
+    // index locator degrades to the HTTP transport rather than panicking.
     let mut out: Vec<ResolvedRegistry> = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for rc in project.iter().chain(global.iter()) {
-        if seen.insert(rc.url.clone()) {
+        let (locator, kind) = match (&rc.url, &rc.index) {
+            (Some(url), _) if !url.trim().is_empty() => (url.clone(), SourceKind::Registry),
+            (_, Some(index)) if !index.trim().is_empty() => {
+                (index.clone(), classify_index(index).unwrap_or(SourceKind::IndexHttp))
+            }
+            // Invalid entry (validation rejects it on parsed configs) —
+            // skip rather than fabricate an empty source.
+            _ => continue,
+        };
+        if seen.insert(locator.clone()) {
             out.push(ResolvedRegistry {
-                url: rc.url.clone(),
+                url: locator,
                 alias: rc.alias.clone(),
                 is_default: rc.default,
+                kind,
             });
         }
     }
@@ -111,6 +165,7 @@ pub fn resolve_registries(
         url,
         alias: None,
         is_default: true,
+        kind: SourceKind::Registry,
     }]
 }
 
@@ -167,9 +222,76 @@ mod tests {
     fn rc(alias: Option<&str>, url: &str, default: bool) -> RegistryConfig {
         RegistryConfig {
             alias: alias.map(str::to_string),
-            url: url.to_string(),
+            url: Some(url.to_string()),
+            index: None,
             default,
         }
+    }
+
+    fn rc_index(alias: Option<&str>, index: &str, default: bool) -> RegistryConfig {
+        RegistryConfig {
+            alias: alias.map(str::to_string),
+            url: None,
+            index: Some(index.to_string()),
+            default,
+        }
+    }
+
+    // ── Index-source classification and resolution ──────────────────────────
+
+    #[test]
+    fn classify_index_detects_transports() {
+        assert_eq!(classify_index("https://index.grimoire.rs"), Some(SourceKind::IndexHttp));
+        assert_eq!(classify_index("http://localhost:8080"), Some(SourceKind::IndexHttp));
+        assert_eq!(
+            classify_index("https://github.com/acme/index.git"),
+            Some(SourceKind::IndexGit)
+        );
+        assert_eq!(
+            classify_index("git+https://github.com/acme/index"),
+            Some(SourceKind::IndexGit)
+        );
+        assert_eq!(
+            classify_index("git@github.com:acme/index.git"),
+            Some(SourceKind::IndexGit)
+        );
+        assert_eq!(classify_index("ssh://git@host/index"), Some(SourceKind::IndexGit));
+        assert_eq!(
+            classify_index("ghcr.io/acme"),
+            None,
+            "a bare registry url is not an index"
+        );
+        assert_eq!(classify_index(""), None);
+    }
+
+    #[test]
+    fn index_entry_resolves_with_index_kind() {
+        let set = resolve_registries(
+            &[],
+            &[
+                rc_index(Some("hub"), "https://index.grimoire.rs", true),
+                rc(Some("corp"), "registry.corp/team", false),
+            ],
+            None,
+            &[],
+            None,
+            "grim.ocx.sh",
+            None,
+        );
+        assert_eq!(set.len(), 2);
+        assert_eq!(set[0].url, "https://index.grimoire.rs");
+        assert_eq!(set[0].kind, SourceKind::IndexHttp);
+        assert!(set[0].is_default);
+        assert_eq!(set[1].kind, SourceKind::Registry);
+    }
+
+    #[test]
+    fn invalid_entry_with_neither_url_nor_index_is_skipped() {
+        // Programmatic (unvalidated) configs never fabricate an empty source.
+        let empty = RegistryConfig::default();
+        let set = resolve_registries(&[], &[empty], None, &[], None, "grim.ocx.sh", None);
+        assert_eq!(set.len(), 1, "falls through to the legacy fallback tier");
+        assert_eq!(set[0].url, "grim.ocx.sh");
     }
 
     #[test]
