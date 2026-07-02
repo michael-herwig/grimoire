@@ -1,35 +1,19 @@
-# TODO
-
-All items from the 2026-06-11 sweep are addressed (see
-`.claude/artifacts/plan_todo_overnight.md` for decisions and commits).
-
-## Open
-
-(empty — TUI init-dialog and OpenCode UX items resolved 2026-06-12; the
-reported "broken opencode.json with `$schema`" could not be reproduced
-from any grim write path — the writer is serde-based and now contract-
-pinned by unit tests for valid, pretty-printed, newline-terminated JSON.)
-
-## Follow-ups (deferred from review, warn/suggest tier)
-
-- Search/TUI: both now build the same unscoped browse window (equivalent
-  results), so any query can miss repos past the 500-repo cap. Truncation
-  is visible in CLI (stderr warning) and TUI (legend hint); a namespaced
-  `--registry host/namespace` scopes the build deterministically, and a
-  pagination/multi-fetch rework would close the gap fully.
-- Search JSON report: add a machine-readable `truncated` field (currently
-  stderr-only) so scripts can detect incomplete results.
-- TUI: background task panics are reaped but deliberately swallowed
-  (raw-mode terminal, no stderr); consider a status-line error tally.
-- TUI: string truncation in `fit()` counts chars, not terminal display
-  width (pre-existing; matters for wide glyphs).
-- TUI: selected-clients line degrades to detection when config has invalid
-  client names while install errors hard — acceptable as best-effort
-  display, revisit if confusing.
-- TUI: synchronous lock/install-state reads run on the event loop each
-  drain/schedule pass — fine at current sizes, move off-loop if it grows.
-- TUI: bundle rows get no floating-tag "outdated" re-check (the lock
-  records member pins but no bundle digest, so there is no baseline to
-  compare the registry's bundle tag against). Member rows still re-check
-  individually; recording the bundle digest in lock provenance would
-  close the gap.
+ - bundle expansion "wrong registry": ROOT-CAUSED, not a grim defect. The four
+   ghcr.io/grimoire-rs packages were NEVER PUBLISHED — the last successful
+   publish-catalog run (June 12) still targeted grim.ocx.sh; after the GHCR
+   port the workflow was never re-run, and the index refs were repointed via a
+   direct push (no ref_reachable gate). Re-dispatch (run 28614540347) FAILED:
+   the workflow publishes with the latest *released* grim (0.6.x), which
+   rejects the `[announce]` key now in main's catalog/publish.toml
+   ("unknown field `announce`"). Blocked on releasing 0.7.0 — its post-release
+   workflow_call re-runs publish-catalog with the new binary. AFTER that lands:
+   packages are created PRIVATE — flip each to public (container packages with
+   '/' in the name may not list in the Packages tab; use direct settings URLs,
+   e.g. github.com/orgs/grimoire-rs/packages/container/skills%2Fgrim-usage/settings,
+   …/skills%2Fai-config-authoring/settings, …/skills%2Fgrim-authoring/settings,
+   …/bundles%2Fgrim-essentials/settings). Then re-test TUI bundle expansion.
+ - [x] registry longest-prefix / "ghcr.io/grimoire-rs splitted into ghcr.io and
+   grimoire-rs": fixed in two commits — 7f7e609 (index-only sets corrupted short-id
+   adds with a registry-less ref; now falls back through the documented default
+   chain) and 8b12470 (TUI tree roots index-sourced rows at their source locator;
+   host/namespace chains fold into one node).
