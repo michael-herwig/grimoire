@@ -241,7 +241,7 @@ def test_index_and_registry_sources_combine(
     (project_dir / "grimoire.toml").write_text(
         f'[[registries]]\n'
         f'alias = "reg"\n'
-        f'url = "{REGISTRY_HOST}/{ns}"\n'
+        f'oci = "{REGISTRY_HOST}/{ns}"\n'
         f'default = true\n'
         f'\n'
         f'[[registries]]\n'
@@ -271,7 +271,7 @@ def test_config_registry_add_index_roundtrip(grim_at, project_dir: Path) -> None
     assert r.returncode == 0, r.stderr
     shown = json.loads(r.stdout)
     assert shown.get("index") == "https://index.grimoire.rs"
-    assert "url" not in shown or shown["url"] is None
+    assert "oci" not in shown or shown["oci"] is None
 
     r = runner.run("config", "get", "registry.hub.index", check=False)
     assert r.returncode == 0
@@ -282,7 +282,7 @@ def test_config_registry_add_requires_exactly_one_source(grim_at, project_dir: P
     (project_dir / "grimoire.toml").write_text("[skills]\n\n[rules]\n")
     runner = grim_at(project_dir)
 
-    # Neither --url nor --index: usage error 64.
+    # Neither --oci nor --index: usage error 64.
     r = runner.run("config", "registry", "add", "hub", check=False)
     assert r.returncode == 64, f"expected 64, got {r.returncode}: {r.stderr}"
 
@@ -290,7 +290,7 @@ def test_config_registry_add_requires_exactly_one_source(grim_at, project_dir: P
     # or clap's own exit; accept any non-zero usage-shaped failure).
     r = runner.run(
         "config", "registry", "add", "hub",
-        "--url", "ghcr.io/acme", "--index", "https://idx", check=False,
+        "--oci", "ghcr.io/acme", "--index", "https://idx", check=False,
     )
     assert r.returncode != 0
 
@@ -302,9 +302,13 @@ def test_config_registry_add_rejects_bad_index_locator(grim_at, project_dir: Pat
     assert r.returncode == 65, f"expected 65, got {r.returncode}: {r.stderr}"
 
 
-def test_config_set_index_on_url_entry_rejected(grim_at, project_dir: Path) -> None:
-    """url and index are mutually exclusive — switching source type requires
-    an explicit unset first (or rm/add)."""
+def test_config_set_index_on_oci_entry_rejected(grim_at, project_dir: Path) -> None:
+    """oci and index are mutually exclusive — switching source type requires
+    an explicit unset first (or rm/add).
+
+    The entry is written with the legacy ``url`` key on purpose: it must
+    keep parsing as ``oci`` (serde alias, 0.6.x back-compat).
+    """
     (project_dir / "grimoire.toml").write_text(
         '[[registries]]\nalias = "acme"\nurl = "ghcr.io/acme"\n\n[skills]\n\n[rules]\n'
     )
@@ -313,16 +317,16 @@ def test_config_set_index_on_url_entry_rejected(grim_at, project_dir: Path) -> N
     assert r.returncode == 65, f"expected 65, got {r.returncode}: {r.stderr}"
 
     # Unsetting the only source is refused (the entry would be sourceless).
-    r = runner.run("config", "unset", "registry.acme.url", check=False)
+    r = runner.run("config", "unset", "registry.acme.oci", check=False)
     assert r.returncode == 64, f"expected 64, got {r.returncode}: {r.stderr}"
 
 
-def test_config_file_with_url_and_index_rejected(grim_at, project_dir: Path) -> None:
-    """A hand-edited entry setting both url and index fails config parse (78)."""
+def test_config_file_with_oci_and_index_rejected(grim_at, project_dir: Path) -> None:
+    """A hand-edited entry setting both oci and index fails config parse (78)."""
     (project_dir / "grimoire.toml").write_text(
         '[[registries]]\n'
         'alias = "bad"\n'
-        'url = "ghcr.io/acme"\n'
+        'oci = "ghcr.io/acme"\n'
         'index = "https://idx.example"\n'
         '\n[skills]\n\n[rules]\n'
     )

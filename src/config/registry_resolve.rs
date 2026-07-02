@@ -129,8 +129,8 @@ pub fn resolve_registries(
     let mut out: Vec<ResolvedRegistry> = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for rc in project.iter().chain(global.iter()) {
-        let (locator, kind) = match (&rc.url, &rc.index) {
-            (Some(url), _) if !url.trim().is_empty() => (url.clone(), SourceKind::Registry),
+        let (locator, kind) = match (&rc.oci, &rc.index) {
+            (Some(oci), _) if !oci.trim().is_empty() => (oci.clone(), SourceKind::Registry),
             (_, Some(index)) if !index.trim().is_empty() => {
                 (index.clone(), classify_index(index).unwrap_or(SourceKind::IndexHttp))
             }
@@ -231,10 +231,10 @@ pub fn resolve_reference(input: &str, registries: &[ResolvedRegistry]) -> Result
 mod tests {
     use super::*;
 
-    fn rc(alias: Option<&str>, url: &str, default: bool) -> RegistryConfig {
+    fn rc(alias: Option<&str>, oci: &str, default: bool) -> RegistryConfig {
         RegistryConfig {
             alias: alias.map(str::to_string),
-            url: Some(url.to_string()),
+            oci: Some(oci.to_string()),
             index: None,
             default,
         }
@@ -243,7 +243,7 @@ mod tests {
     fn rc_index(alias: Option<&str>, index: &str, default: bool) -> RegistryConfig {
         RegistryConfig {
             alias: alias.map(str::to_string),
-            url: None,
+            oci: None,
             index: Some(index.to_string()),
             default,
         }

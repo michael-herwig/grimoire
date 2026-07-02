@@ -33,11 +33,11 @@ default = true
 
 [[registries]]
 alias = "corp"
-url = "registry.corp.example/team"    # plain OCI registry (_catalog)
+oci = "registry.corp.example/team"    # plain OCI registry (_catalog)
 ```
 
-`url` and `index` are mutually exclusive because they answer the same
-question differently: a `url` entry lists what *that registry* holds via
+`oci` and `index` are mutually exclusive because they answer the same
+question differently: an `oci` entry lists what *that registry* holds via
 `_catalog`; an `index` entry lists whatever the index points to — its
 entries carry their own fully-qualified registry refs and may span many
 registries.
@@ -58,7 +58,7 @@ CLI equivalent of the config above:
 
 ```console
 $ grim config registry add hub --index https://index.grimoire.rs --default
-$ grim config registry add corp --url registry.corp.example/team
+$ grim config registry add corp --oci registry.corp.example/team
 ```
 
 ## Index Specification (v1) {#spec}

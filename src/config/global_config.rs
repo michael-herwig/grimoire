@@ -127,11 +127,11 @@ rust-style = "ghcr.io/acme/rules/rust-style:v3"
             r#"
 [[registries]]
 alias = "acme"
-url = "ghcr.io/acme"
+oci = "ghcr.io/acme"
 
 [[registries]]
 alias = "acme"
-url = "registry.corp/team"
+oci = "registry.corp/team"
 "#,
         )
         .expect_err("duplicate alias must reject for global config");
@@ -147,11 +147,11 @@ url = "registry.corp/team"
             r#"
 [[registries]]
 alias = "acme"
-url = "ghcr.io/acme"
+oci = "ghcr.io/acme"
 
 [[registries]]
 alias = "acme"
-url = "registry.corp/team"
+oci = "registry.corp/team"
 "#,
         )
         .unwrap();
@@ -166,7 +166,7 @@ url = "registry.corp/team"
             r#"
 [[registries]]
 alias = "a/b"
-url = "ghcr.io/acme"
+oci = "ghcr.io/acme"
 "#,
         )
         .expect_err("alias with '/' must reject for global config");
@@ -179,7 +179,7 @@ url = "ghcr.io/acme"
             r#"
 [[registries]]
 alias = " acme"
-url = "ghcr.io/acme"
+oci = "ghcr.io/acme"
 "#,
         )
         .expect_err("alias with whitespace must reject for global config");
@@ -192,12 +192,12 @@ url = "ghcr.io/acme"
             r#"
 [[registries]]
 alias = "acme"
-url = "ghcr.io/acme"
+oci = "ghcr.io/acme"
 default = true
 
 [[registries]]
 alias = "corp"
-url = "registry.corp/team"
+oci = "registry.corp/team"
 "#,
         )
         .expect("valid multi-registry global config must parse");
@@ -215,11 +215,11 @@ url = "registry.corp/team"
         let err = GlobalConfig::from_toml_str(
             r#"
 [[registries]]
-url = "ghcr.io/acme"
+oci = "ghcr.io/acme"
 default = true
 
 [[registries]]
-url = "registry.corp/team"
+oci = "registry.corp/team"
 default = true
 "#,
         )

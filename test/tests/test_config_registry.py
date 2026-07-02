@@ -6,7 +6,7 @@ Additional coverage (review-fix round 1):
 - Security regression: injection payloads in URL / default_registry rejected or
   produce no extra registries in the written config.
 - D2: unset registry.<alias> removes the whole entry; set registry.<alias>.default
-  true; unset registry.<alias>.url exits 64.
+  true; unset registry.<alias>.oci exits 64.
 
 Specification-phase suite: every test expresses expected behavior from
 ``adr_grim_config_command.md`` and ``plan_grim_config.md``.  All tests
@@ -18,12 +18,12 @@ Behaviors covered:
   defaults, leaving exactly one.
 - ``registry add`` with a duplicate alias exits 64 (UsageError).
 - ``registry rm`` / ``show`` / ``use`` with a missing alias exits 64.
-- Dotted ``config get registry.<alias>.url`` returns the URL.
-- Dotted ``config set registry.<alias>.url`` on a MISSING alias exits 64
+- Dotted ``config get registry.<alias>.oci`` returns the URL.
+- Dotted ``config set registry.<alias>.oci`` on a MISSING alias exits 64
   (creation is ``registry add`` only — keeps validation in one path).
 - End-to-end: ``config registry add`` at project scope then ``grim add``
   with an alias-qualified ref resolves and installs the artifact.
-- End-to-end (global): ``--global registry add corp --url <host>`` writes
+- End-to-end (global): ``--global registry add corp --oci <host>`` writes
   to ``$GRIM_HOME/grimoire.toml``.
 """
 from __future__ import annotations
@@ -61,12 +61,12 @@ def test_registry_add_then_list_shows_entry(
     must return a JSON array that contains an entry with alias ``acme``
     and the configured URL.
 
-    Traces to ADR: ``grim config registry add <alias> --url <url>``.
+    Traces to ADR: ``grim config registry add <alias> --oci <ref>``.
     """
     write_config(project_dir)
     runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
 
-    runner.run("config", "registry", "add", "acme", "--url", "ghcr.io/acme")
+    runner.run("config", "registry", "add", "acme", "--oci", "ghcr.io/acme")
 
     result = runner.json("config", "registry", "list")
 
@@ -77,9 +77,34 @@ def test_registry_add_then_list_shows_entry(
     assert "acme" in aliases, (
         f"registry list must include 'acme' after add; aliases: {aliases}"
     )
-    urls = [r.get("url") for r in result if isinstance(r, dict)]
+    urls = [r.get("oci") for r in result if isinstance(r, dict)]
     assert "ghcr.io/acme" in urls, (
         f"registry list must include the configured URL; urls: {urls}"
+    )
+
+
+def test_registry_add_legacy_url_flag_and_key_still_work(
+    grim_at: object,
+    project_dir: Path,
+) -> None:
+    """0.6.x back-compat: ``--url`` is a hidden alias for ``--oci`` and the
+    dotted field ``registry.<alias>.url`` maps to ``oci``.
+
+    End-to-end alias proof: add via the legacy flag, read back via both the
+    new and the legacy dotted key.
+    """
+    write_config(project_dir)
+    runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
+
+    runner.run("config", "registry", "add", "legacy", "--url", "ghcr.io/legacy")
+
+    new_key = runner.plain("config", "get", "registry.legacy.oci")
+    assert new_key.stdout.strip() == "ghcr.io/legacy", (
+        f"registry.legacy.oci must return the value added via --url; got: {new_key.stdout!r}"
+    )
+    old_key = runner.plain("config", "get", "registry.legacy.url")
+    assert old_key.stdout.strip() == "ghcr.io/legacy", (
+        f"legacy dotted key registry.legacy.url must keep working; got: {old_key.stdout!r}"
     )
 
 
@@ -89,22 +114,22 @@ def test_registry_add_then_show_returns_fields(
 ) -> None:
     """``registry show <alias>`` returns all fields for a specific registry.
 
-    The JSON object must contain ``alias``, ``url``, and ``default``.
+    The JSON object must contain ``alias``, ``oci``, and ``default``.
 
     Traces to ADR: ``grim config registry show <alias>`` → one-row table
-    (Alias | URL | Default); JSON ``{"alias":"…","url":"…","default":bool}``.
+    (Alias | Type | Source | Default); JSON ``{"alias":"…","oci":"…","default":bool}``.
     """
     write_config(project_dir)
     runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
 
-    runner.run("config", "registry", "add", "acme", "--url", "ghcr.io/acme")
+    runner.run("config", "registry", "add", "acme", "--oci", "ghcr.io/acme")
 
     result = runner.json("config", "registry", "show", "acme")
 
     assert result.get("alias") == "acme", (
         f"show must return alias='acme'; got: {result!r}"
     )
-    assert result.get("url") == "ghcr.io/acme", (
+    assert result.get("oci") == "ghcr.io/acme", (
         f"show must return the configured URL; got: {result!r}"
     )
     assert "default" in result, (
@@ -130,11 +155,11 @@ def test_registry_use_transfers_default_at_most_one(
 
     runner.run(
         "config", "registry", "add", "acme",
-        "--url", "ghcr.io/acme", "--default",
+        "--oci", "ghcr.io/acme", "--default",
     )
     runner.run(
         "config", "registry", "add", "corp",
-        "--url", "registry.corp/team",
+        "--oci", "registry.corp/team",
     )
 
     runner.run("config", "registry", "use", "corp")
@@ -163,7 +188,7 @@ def test_registry_add_duplicate_alias_exits_64(
 ) -> None:
     """``registry add`` with an already-existing alias exits 64 (UsageError).
 
-    To change a registry URL, use dotted ``set registry.<alias>.url`` or
+    To change a registry URL, use dotted ``set registry.<alias>.oci`` or
     ``rm`` + ``add`` — there is no overwrite/upsert verb.
 
     Traces to ADR: "``registry add`` of an existing alias → UsageError 64".
@@ -171,10 +196,10 @@ def test_registry_add_duplicate_alias_exits_64(
     write_config(project_dir)
     runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
 
-    runner.run("config", "registry", "add", "acme", "--url", "ghcr.io/acme")
+    runner.run("config", "registry", "add", "acme", "--oci", "ghcr.io/acme")
 
     result = runner.run(
-        "config", "registry", "add", "acme", "--url", "ghcr.io/acme-v2",
+        "config", "registry", "add", "acme", "--oci", "ghcr.io/acme-v2",
         check=False,
     )
     assert result.returncode == 64, (
@@ -198,7 +223,7 @@ def test_registry_rm_removes_entry_then_show_exits_64(
     write_config(project_dir)
     runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
 
-    runner.run("config", "registry", "add", "acme", "--url", "ghcr.io/acme")
+    runner.run("config", "registry", "add", "acme", "--oci", "ghcr.io/acme")
     runner.run("config", "registry", "rm", "acme")
 
     result = runner.run("config", "registry", "show", "acme", check=False)
@@ -280,19 +305,19 @@ def test_dotted_get_registry_alias_url_returns_url(
     grim_at: object,
     project_dir: Path,
 ) -> None:
-    """``config get registry.<alias>.url`` returns the URL via dotted-key.
+    """``config get registry.<alias>.oci`` returns the URL via dotted-key.
 
-    After ``registry add acme --url ghcr.io/acme``, the dotted key
-    ``registry.acme.url`` must return ``ghcr.io/acme`` and exit 0.
+    After ``registry add acme --oci ghcr.io/acme``, the dotted key
+    ``registry.acme.oci`` must return ``ghcr.io/acme`` and exit 0.
 
-    Traces to ADR: key-namespace table row ``registry.<alias>.url``.
+    Traces to ADR: key-namespace table row ``registry.<alias>.oci``.
     """
     write_config(project_dir)
     runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
 
-    runner.run("config", "registry", "add", "acme", "--url", "ghcr.io/acme")
+    runner.run("config", "registry", "add", "acme", "--oci", "ghcr.io/acme")
 
-    result = runner.plain("config", "get", "registry.acme.url")
+    result = runner.plain("config", "get", "registry.acme.oci")
     assert result.returncode == 0, (
         f"dotted get of registry URL must exit 0; got {result.returncode}; "
         f"stderr: {result.stderr.strip()}"
@@ -306,7 +331,7 @@ def test_dotted_set_registry_url_on_missing_alias_exits_64(
     grim_at: object,
     project_dir: Path,
 ) -> None:
-    """``config set registry.<alias>.url`` on an absent alias exits 64.
+    """``config set registry.<alias>.oci`` on an absent alias exits 64.
 
     Registry entries are created ONLY via ``registry add`` to keep the
     url-required validation invariant in one path.  A dotted ``set`` on a
@@ -319,7 +344,7 @@ def test_dotted_set_registry_url_on_missing_alias_exits_64(
     runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
 
     result = runner.run(
-        "config", "set", "registry.phantom.url", "ghcr.io/phantom",
+        "config", "set", "registry.phantom.oci", "ghcr.io/phantom",
         check=False,
     )
     assert result.returncode == 64, (
@@ -341,7 +366,7 @@ def test_registry_add_then_grim_add_resolves_alias(
 ) -> None:
     """A registry added via ``grim config`` is used to resolve alias refs.
 
-    After ``config registry add corp --url <host>/<ns> --default``, a
+    After ``config registry add corp --oci <host>/<ns> --default``, a
     ``grim add corp/<repo>:tag`` must expand the alias to the full URL
     and succeed.
 
@@ -372,7 +397,7 @@ def test_registry_add_then_grim_add_resolves_alias(
     # Register the test registry under the "corp" alias.
     runner.run(
         "config", "registry", "add", "corp",
-        "--url", f"{REGISTRY_HOST}/{ns}", "--default",
+        "--oci", f"{REGISTRY_HOST}/{ns}", "--default",
     )
 
     # Add via the alias-qualified reference; grim must expand corp → the URL.
@@ -401,7 +426,7 @@ def test_global_registry_add_writes_grim_home_config(
     so that subsequent global-scope commands (lock, install) can use it.
 
     Traces to ADR: ``--global`` flag selects ``$GRIM_HOME/grimoire.toml``;
-    "``--global registry add corp --url <REGISTRY_HOST>`` then a short-id
+    "``--global registry add corp --oci <REGISTRY_HOST>`` then a short-id
     resolves against it".
     """
     _minimal_global_config(grim_home)
@@ -410,7 +435,7 @@ def test_global_registry_add_writes_grim_home_config(
 
     runner.run(
         "config", "--global", "registry", "add", "corp",
-        "--url", f"{REGISTRY_HOST}/grim-test/e2e", "--default",
+        "--oci", f"{REGISTRY_HOST}/grim-test/e2e", "--default",
     )
 
     cfg_text = (grim_home / "grimoire.toml").read_text()
@@ -459,7 +484,7 @@ def test_injection_via_registry_add_url_is_rejected_or_harmless(
 
     result = runner.run(
         "config", "registry", "add", "probe",
-        "--url", injection,
+        "--oci", injection,
         check=False,
     )
 
@@ -545,7 +570,7 @@ def test_unset_registry_alias_removes_whole_entry(
     write_config(project_dir)
     runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
 
-    runner.run("config", "registry", "add", "acme", "--url", "ghcr.io/acme")
+    runner.run("config", "registry", "add", "acme", "--oci", "ghcr.io/acme")
 
     runner.run("config", "unset", "registry.acme")
 
@@ -637,8 +662,8 @@ def test_set_registry_alias_default_true(
     write_config(project_dir)
     runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
 
-    runner.run("config", "registry", "add", "acme", "--url", "ghcr.io/acme")
-    runner.run("config", "registry", "add", "corp", "--url", "ghcr.io/corp")
+    runner.run("config", "registry", "add", "acme", "--oci", "ghcr.io/acme")
+    runner.run("config", "registry", "add", "corp", "--oci", "ghcr.io/corp")
 
     runner.run("config", "set", "registry.acme.default", "true")
 
@@ -653,7 +678,7 @@ def test_set_registry_alias_default_true(
 
 
 # ---------------------------------------------------------------------------
-# D2: unset registry.<alias>.url exits 64
+# D2: unset registry.<alias>.oci exits 64
 # ---------------------------------------------------------------------------
 
 
@@ -661,23 +686,23 @@ def test_unset_registry_alias_url_exits_64(
     grim_at: object,
     project_dir: Path,
 ) -> None:
-    """``config unset registry.<alias>.url`` exits 64 (UsageError).
+    """``config unset registry.<alias>.oci`` exits 64 (UsageError).
 
     The URL is required for a registry entry; it cannot be unset without
     removing the whole entry via ``registry rm`` or ``unset registry.<alias>``.
 
-    Traces to D2: ``unset registry.<alias>.url`` → exit 64.
+    Traces to D2: ``unset registry.<alias>.oci`` → exit 64.
     """
     write_config(project_dir)
     runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
 
-    runner.run("config", "registry", "add", "acme", "--url", "ghcr.io/acme")
+    runner.run("config", "registry", "add", "acme", "--oci", "ghcr.io/acme")
 
     result = runner.run(
-        "config", "unset", "registry.acme.url", check=False
+        "config", "unset", "registry.acme.oci", check=False
     )
     assert result.returncode == 64, (
-        f"unset registry.acme.url must exit 64 (UsageError); "
+        f"unset registry.acme.oci must exit 64 (UsageError); "
         f"got {result.returncode}; stderr: {result.stderr.strip()}"
     )
 
@@ -693,7 +718,7 @@ def test_registry_add_slash_alias_exits_64(
 ) -> None:
     """``registry add`` with a slash in the alias exits 64 (UsageError), not 78.
 
-    Before FIX 1, ``registry add "a/b" --url x`` pushed the entry and let
+    Before FIX 1, ``registry add "a/b" --oci x`` pushed the entry and let
     ``validate_registries`` reject it → ``RegistryInvalid`` → exit 78
     (ConfigError).  A bad CLI argument must exit 64 (UsageError).
 
@@ -704,7 +729,7 @@ def test_registry_add_slash_alias_exits_64(
     runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
 
     result = runner.run(
-        "config", "registry", "add", "a/b", "--url", "ghcr.io/test",
+        "config", "registry", "add", "a/b", "--oci", "ghcr.io/test",
         check=False,
     )
     assert result.returncode == 64, (
@@ -722,10 +747,10 @@ def test_dotted_alias_roundtrips_via_get(
     grim_at: object,
     project_dir: Path,
 ) -> None:
-    """``registry add a.b`` then ``config get registry.a.b.url`` returns the URL.
+    """``registry add a.b`` then ``config get registry.a.b.oci`` returns the URL.
 
     Before FIX 2, ``parse_key`` split at the FIRST dot, so
-    ``registry.a.b.url`` → alias=``a``, field=``b.url`` → unknown field
+    ``registry.a.b.oci`` → alias=``a``, field=``b.url`` → unknown field
     error.  After fixing parse_key to split at the RIGHTMOST dot, aliases
     containing dots are fully addressable.
 
@@ -734,11 +759,11 @@ def test_dotted_alias_roundtrips_via_get(
     write_config(project_dir)
     runner: GrimRunner = grim_at(project_dir)  # type: ignore[call-arg]
 
-    runner.run("config", "registry", "add", "a.b", "--url", "ghcr.io/dotted")
+    runner.run("config", "registry", "add", "a.b", "--oci", "ghcr.io/dotted")
 
-    result = runner.plain("config", "get", "registry.a.b.url")
+    result = runner.plain("config", "get", "registry.a.b.oci")
     assert result.returncode == 0, (
-        f"config get registry.a.b.url must exit 0; got {result.returncode}; "
+        f"config get registry.a.b.oci must exit 0; got {result.returncode}; "
         f"stderr: {result.stderr.strip()}"
     )
     assert "ghcr.io/dotted" in result.stdout, (

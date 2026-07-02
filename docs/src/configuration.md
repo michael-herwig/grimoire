@@ -17,7 +17,7 @@ The declaration file. An `[options]` table holds defaults, and `[skills]` /
 ```toml
 #:schema https://grimoire.rs/schemas/grimoire-config.schema.json
 [[registries]]
-url = "ghcr.io/acme"
+oci = "ghcr.io/acme"
 default = true
 
 [options]
@@ -99,31 +99,31 @@ collapse the browse set — it is the short-id resolution default and only
 applies as the single-registry fallback when no `[[registries]]` array is
 declared.
 
-Each entry declares **exactly one** source locator (`url` or `index`)
+Each entry declares **exactly one** source locator (`oci` or `index`)
 plus two optional fields:
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `url` | one of `url`/`index` | Registry host and optional namespace, e.g. `ghcr.io/acme`. Same form as `[options].default_registry`. Lists packages via the OCI `_catalog` endpoint. |
-| `index` | one of `url`/`index` | A [package index](./package-index.md) locator: an `http(s)://` static base or a git repository (`git+…`, `ssh://`, `git@…`, or ending in `.git`). Replaces the `_catalog` listing; index entries carry their own registry refs. Mutually exclusive with `url` — setting both is a parse error (exit 78). |
-| `alias` | no | Short name for use in [qualified references](#qualified-references). Must be unique across the array. The TUI uses the alias as the display label in the flat list's Registry column and as the tree registry-root row label; entries without an alias fall back to the raw URL. |
+| `oci` | one of `oci`/`index` | Plain OCI registry ref — host and optional namespace, e.g. `ghcr.io/acme`. Same form as `[options].default_registry`. Lists packages via the OCI `_catalog` endpoint. The pre-0.7.0 key `url` is still accepted as a parse-time alias, so existing configs keep working; new writes use `oci`. |
+| `index` | one of `oci`/`index` | A [package index](./package-index.md) locator: an `http(s)://` static base or a git repository (`git+…`, `ssh://`, `git@…`, or ending in `.git`). Replaces the `_catalog` listing; index entries carry their own registry refs. Mutually exclusive with `oci` — setting both is a parse error (exit 78). |
+| `alias` | no | Short name for use in [qualified references](#qualified-references). Must be unique across the array. The TUI uses the alias as the display label in the flat list's Registry column and as the tree registry-root row label; entries without an alias fall back to the raw locator. |
 | `default` | no | Marks this entry as the primary registry short identifiers expand against. At most one entry may set it; when none do, the first entry is primary. |
 
 ```toml
 #:schema https://grimoire.rs/schemas/grimoire-config.schema.json
 [[registries]]
 alias = "acme"
-url = "ghcr.io/acme"
+oci = "ghcr.io/acme"
 default = true
 
 [[registries]]
 alias = "internal"
-url = "registry.corp.example/team"
+oci = "registry.corp.example/team"
 ```
 
 The same `[[registries]]` array can appear in the global config
 (`$GRIM_HOME/grimoire.toml`). Project entries take precedence over global
-entries; duplicate URLs are deduped, first occurrence wins.
+entries; duplicate locators are deduped, first occurrence wins.
 
 **Backward compatibility**: a config that omits `[[registries]]` entirely
 behaves exactly as before — `[options].default_registry`, the environment

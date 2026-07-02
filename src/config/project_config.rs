@@ -177,7 +177,7 @@ fn parse_config(s: &str, path: PathBuf) -> Result<ProjectConfig, ConfigError> {
 }
 
 /// Validate a `[[registries]]` array: every entry sets exactly one of
-/// `url` / `index` (non-empty), every `index` locator classifies as an
+/// `oci` / `index` (non-empty), every `index` locator classifies as an
 /// HTTP(S) or git transport, every present `alias` is non-empty and unique
 /// across the array, and at most one entry sets `default = true`.
 /// At-most-one default is checked after the per-entry structural checks so
@@ -185,15 +185,15 @@ fn parse_config(s: &str, path: PathBuf) -> Result<ProjectConfig, ConfigError> {
 pub(crate) fn validate_registries(registries: &[RegistryConfig], path: &Path) -> Result<(), ConfigError> {
     let mut seen_aliases = std::collections::BTreeSet::new();
     for rc in registries {
-        let url_set = rc.url.as_deref().is_some_and(|u| !u.trim().is_empty());
+        let oci_set = rc.oci.as_deref().is_some_and(|u| !u.trim().is_empty());
         let index_set = rc.index.as_deref().is_some_and(|i| !i.trim().is_empty());
-        match (url_set, index_set) {
+        match (oci_set, index_set) {
             (true, true) => {
                 return Err(ConfigError::new(
                     path.to_path_buf(),
                     ConfigErrorKind::RegistryInvalid {
                         reason: format!(
-                            "entry '{}' sets both url and index; exactly one must be set \
+                            "entry '{}' sets both oci and index; exactly one must be set \
                              (index entries carry their own registry refs)",
                             rc.locator()
                         ),
@@ -204,7 +204,7 @@ pub(crate) fn validate_registries(registries: &[RegistryConfig], path: &Path) ->
                 return Err(ConfigError::new(
                     path.to_path_buf(),
                     ConfigErrorKind::RegistryInvalid {
-                        reason: "exactly one of url / index must be set (non-empty)".to_string(),
+                        reason: "exactly one of oci / index must be set (non-empty)".to_string(),
                     },
                 ));
             }
@@ -525,32 +525,47 @@ rust-style = "ghcr.io/acme/rules/rust-style:v3"
             r#"
 [[registries]]
 alias = "acme"
-url = "ghcr.io/acme"
+oci = "ghcr.io/acme"
 default = true
 
 [[registries]]
-url = "registry.corp/team"
+oci = "registry.corp/team"
 "#,
         )
         .expect("parse");
         assert_eq!(cfg.registries.len(), 2);
         assert_eq!(cfg.registries[0].alias.as_deref(), Some("acme"));
-        assert_eq!(cfg.registries[0].url.as_deref(), Some("ghcr.io/acme"));
+        assert_eq!(cfg.registries[0].oci.as_deref(), Some("ghcr.io/acme"));
         assert!(cfg.registries[0].default);
         assert_eq!(cfg.registries[1].alias, None);
         assert!(!cfg.registries[1].default);
     }
 
     #[test]
-    fn registries_empty_url_rejected() {
+    fn registries_empty_oci_rejected() {
         let err = ProjectConfig::from_toml_str(
             r#"
 [[registries]]
-url = ""
+oci = ""
 "#,
         )
-        .expect_err("empty url must reject");
+        .expect_err("empty oci must reject");
         assert!(matches!(err.kind, ConfigErrorKind::RegistryInvalid { .. }));
+    }
+
+    #[test]
+    fn registries_legacy_url_key_parses_as_oci_alias() {
+        // Back-compat: the pre-0.7.0 key `url` deserializes into `oci`
+        // via a serde alias so 0.6.x configs keep working unchanged.
+        let cfg = ProjectConfig::from_toml_str(
+            r#"
+[[registries]]
+alias = "acme"
+url = "ghcr.io/acme"
+"#,
+        )
+        .expect("legacy url key must parse");
+        assert_eq!(cfg.registries[0].oci.as_deref(), Some("ghcr.io/acme"));
     }
 
     #[test]
@@ -559,11 +574,11 @@ url = ""
             r#"
 [[registries]]
 alias = "acme"
-url = "ghcr.io/acme"
+oci = "ghcr.io/acme"
 
 [[registries]]
 alias = "acme"
-url = "registry.corp/team"
+oci = "registry.corp/team"
 "#,
         )
         .expect_err("duplicate alias must reject");
@@ -576,7 +591,7 @@ url = "registry.corp/team"
             r#"
 [[registries]]
 alias = "a/b"
-url = "ghcr.io/acme"
+oci = "ghcr.io/acme"
 "#,
         )
         .expect_err("alias with '/' must reject");
@@ -606,7 +621,7 @@ url = "ghcr.io/acme"
             r#"
 [[registries]]
 alias = " acme"
-url = "ghcr.io/acme"
+oci = "ghcr.io/acme"
 "#,
         )
         .expect_err("alias with leading whitespace must reject");
@@ -625,7 +640,7 @@ url = "ghcr.io/acme"
             r#"
 [[registries]]
 alias = "acme "
-url = "ghcr.io/acme"
+oci = "ghcr.io/acme"
 "#,
         )
         .expect_err("alias with trailing whitespace must reject");
@@ -644,15 +659,15 @@ url = "ghcr.io/acme"
             r#"
 [[registries]]
 alias = "acme"
-url = "ghcr.io/acme"
+oci = "ghcr.io/acme"
 default = true
 
 [[registries]]
 alias = "corp"
-url = "registry.corp/team"
+oci = "registry.corp/team"
 
 [[registries]]
-url = "other.registry.io"
+oci = "other.registry.io"
 "#,
         )
         .expect("valid multi-registry config must parse");
@@ -668,7 +683,7 @@ url = "other.registry.io"
         let err = ProjectConfig::from_toml_str(
             r#"
 [[registries]]
-url = "ghcr.io/acme"
+oci = "ghcr.io/acme"
 surprise = "x"
 "#,
         )
@@ -1138,11 +1153,11 @@ tree_separators = ["/", "::"]
         let err = ProjectConfig::from_toml_str(
             r#"
 [[registries]]
-url = "ghcr.io/acme"
+oci = "ghcr.io/acme"
 default = true
 
 [[registries]]
-url = "registry.corp/team"
+oci = "registry.corp/team"
 default = true
 "#,
         )
@@ -1159,11 +1174,11 @@ default = true
         let cfg = ProjectConfig::from_toml_str(
             r#"
 [[registries]]
-url = "ghcr.io/acme"
+oci = "ghcr.io/acme"
 default = true
 
 [[registries]]
-url = "registry.corp/team"
+oci = "registry.corp/team"
 "#,
         )
         .expect("exactly one default must be accepted");
@@ -1178,10 +1193,10 @@ url = "registry.corp/team"
         let cfg = ProjectConfig::from_toml_str(
             r#"
 [[registries]]
-url = "ghcr.io/acme"
+oci = "ghcr.io/acme"
 
 [[registries]]
-url = "registry.corp/team"
+oci = "registry.corp/team"
 "#,
         )
         .expect("zero defaults must be accepted");
@@ -1205,7 +1220,7 @@ url = "registry.corp/team"
 default_registry = "legacy.example"
 
 [[registries]]
-url = "array.example"
+oci = "array.example"
 default = true
 "#,
         )
@@ -1213,7 +1228,7 @@ default = true
         // The in-memory state carries both fields.
         assert_eq!(cfg.options.default_registry.as_deref(), Some("legacy.example"));
         assert_eq!(cfg.registries.len(), 1);
-        assert_eq!(cfg.registries[0].url.as_deref(), Some("array.example"));
+        assert_eq!(cfg.registries[0].oci.as_deref(), Some("array.example"));
         // When resolved: the array is authoritative, legacy is folded in only
         // when no `[[registries]]` are present (step 3 of resolve_registries).
         let set = resolve_registries(

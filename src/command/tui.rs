@@ -177,10 +177,13 @@ fn config_missing(ctx: &Context, args: &TuiArgs) -> bool {
 
 /// Interactive missing-config prompt, run as a popup-style modal TUI
 /// session ([`crate::tui::init_dialog`]): confirm initialization, edit
-/// the default registry — pre-filled with the **effective** default
-/// (`--registry` flag > `$GRIM_DEFAULT_REGISTRY` > global config > the
-/// built-in fallback), so plain Enter persists a working registry — and
-/// create the scope's `grimoire.toml` via `grim init`.
+/// the default browse source — pre-filled with the **effective** browse
+/// primary (`--registry` flag > `[[registries]]` primary > legacy
+/// `default_registry` chain > the built-in fallback **index**,
+/// [`crate::command::FALLBACK_INDEX`]), so plain Enter persists a browse
+/// source that actually lists packages — and create the scope's
+/// `grimoire.toml` via `grim init` (which keys the entry `index` vs `oci`
+/// by the locator's shape).
 ///
 /// Accepting the pre-filled value deliberately snapshots it as a
 /// `[[registries]]` entry with `default = true` in the new config: the
@@ -209,9 +212,9 @@ async fn prompt_init(ctx: &Context, args: &TuiArgs) -> anyhow::Result<InitPrompt
     };
 
     // The same precedence the session itself browses with — including the
-    // built-in fallback — so the dialog's default and the browsed registry
+    // built-in fallback — so the dialog's default and the browsed source
     // can never diverge.
-    let default_registry = resolve_registry(ctx, args);
+    let default_registry = resolve_browse_default(ctx, args);
     let mut dialog = InitDialog::new(&label, scope_label(scope), default_registry);
     let registry = match crate::tui::init_dialog::run(&mut dialog)? {
         InitDialogOutcome::Cancelled => return Ok(InitPrompt::Cancelled),
@@ -227,34 +230,33 @@ async fn prompt_init(ctx: &Context, args: &TuiArgs) -> anyhow::Result<InitPrompt
     Ok(InitPrompt::Ready)
 }
 
-/// Resolve the registry to browse via the unified primary-registry seam,
-/// mirroring `grim add` / `grim search`: an explicit `--registry` flag wins
-/// outright, then the scope is resolved and `primary_registry_for_scope`
-/// returns the `[[registries]]` primary (or falls through to the legacy
-/// `default_registry` chain and finally the built-in
-/// [`crate::command::FALLBACK_REGISTRY`]).
+/// Resolve the init dialog's pre-fill: the primary **browse** source's
+/// locator. An explicit `--registry` flag wins outright; otherwise the
+/// scope's browse set resolves via the same seam the session browses with
+/// ([`crate::command::registries_for_scope`]) and the primary entry's
+/// locator is returned — which for an unconfigured user is the built-in
+/// fallback **index** ([`crate::command::FALLBACK_INDEX`]), not the
+/// push-side [`crate::command::FALLBACK_REGISTRY`] (a GHCR-style OCI entry
+/// would browse empty because `_catalog` is gated).
 ///
-/// On scope-resolution failure (no `grimoire.toml` discoverable),
-/// [`crate::command::primary_registry_global_fallback`] is used so a
-/// `[[registries]]`-only global config is still honored — a user who
-/// configured only `[[registries]]` in their global config and runs `grim tui`
-/// from a directory without a project config gets the right registry.
-fn resolve_registry(ctx: &Context, args: &TuiArgs) -> String {
+/// On scope-resolution failure (no `grimoire.toml` discoverable — the
+/// normal case for this dialog), the global-`[[registries]]`-aware
+/// fallback set ([`crate::command::registries_global_fallback`]) is used so
+/// a `[[registries]]`-only global config is still honored.
+fn resolve_browse_default(ctx: &Context, args: &TuiArgs) -> String {
     if let Some(r) = args.registry.first() {
         return r.clone();
     }
-    match scope_resolution::resolve(ctx, args.global, args.config.as_deref()) {
-        Ok(scope) => crate::command::primary_registry_for_scope(ctx, &scope),
-        Err(_) => {
-            // Defensive branch: `run()` independently re-resolves scope and
-            // exits first if that fails, so this branch is effectively
-            // unreachable through `run()`. It is kept for the function
-            // contract, unit tests, and future direct callers. Fall back
-            // through the global-[[registries]]-aware helper so a
-            // [[registries]]-only global config is still honored.
-            crate::command::primary_registry_global_fallback(ctx)
-        }
-    }
+    let set = match scope_resolution::resolve(ctx, args.global, args.config.as_deref()) {
+        Ok(scope) => crate::command::registries_for_scope(ctx, &scope),
+        Err(_) => crate::command::registries_global_fallback(ctx),
+    };
+    set.iter()
+        .find(|r| r.is_default)
+        .or_else(|| set.first())
+        .map(|r| r.url.clone())
+        // resolve_registries never returns an empty set; defensive only.
+        .unwrap_or_else(|| crate::command::FALLBACK_INDEX.to_string())
 }
 
 /// Resolve the ordered registry set for a TUI session, mirroring the
@@ -331,15 +333,16 @@ mod tests {
             global: false,
             config: None,
         };
-        assert_eq!(resolve_registry(&ctx, &a), "ghcr.io");
+        assert_eq!(resolve_browse_default(&ctx, &a), "ghcr.io");
     }
 
     #[test]
-    fn no_registry_anywhere_uses_builtin_fallback() {
+    fn no_registry_anywhere_prefills_builtin_index() {
         // Hermetic: the developer's $GRIM_DEFAULT_REGISTRY / $GRIM_HOME /
         // a CWD-discovered project config must not leak in — pin all
         // three tiers explicitly. Nothing configured ⇒ the built-in
-        // fallback registry, never an error.
+        // fallback INDEX (the public package index), never the push-side
+        // OCI fallback — a GHCR-style entry would browse empty.
         let tmp = tempfile::tempdir().unwrap();
         let cfg = tmp.path().join("grimoire.toml");
         std::fs::write(&cfg, "[options]\n").unwrap();
@@ -350,11 +353,11 @@ mod tests {
             global: false,
             config: Some(cfg),
         };
-        assert_eq!(resolve_registry(&ctx, &a), crate::command::FALLBACK_REGISTRY);
+        assert_eq!(resolve_browse_default(&ctx, &a), crate::command::FALLBACK_INDEX);
     }
 
     #[test]
-    fn resolve_registry_honors_global_registries_array_when_no_project_config() {
+    fn resolve_browse_default_honors_global_registries_array_when_no_project_config() {
         // Regression guard: a user with a [[registries]]-only global config
         // (no [options].default_registry) running `grim tui` from a directory
         // without a project grimoire.toml must get their declared registry —
@@ -383,7 +386,7 @@ mod tests {
             global: false,
             config: Some(missing_cfg),
         };
-        assert_eq!(resolve_registry(&ctx, &a), "global-tui.example");
+        assert_eq!(resolve_browse_default(&ctx, &a), "global-tui.example");
     }
 
     #[test]

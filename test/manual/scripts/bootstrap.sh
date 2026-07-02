@@ -204,8 +204,8 @@ release "$CATALOG/skills/cut-release" "playbooks/ci/release" cut-release 1.0.0
 #    state — and the first `registry add` recreates the file from scratch.
 log "writing global config ($GRIM_HOME/grimoire.toml) with two registries"
 rm -f "$GRIM_HOME/grimoire.toml"
-"$GRIM" config --global registry add primary --url "$REGISTRY/$NS" --default
-"$GRIM" config --global registry add tools --url "$REGISTRY2/$NS2"
+"$GRIM" config --global registry add primary --oci "$REGISTRY/$NS" --default
+"$GRIM" config --global registry add tools --oci "$REGISTRY2/$NS2"
 
 log "done. Primary catalog at $REGISTRY/$NS/{skills,rules,bundles}/*; multi-registry subset at $REGISTRY2/$NS2/{skills,rules}/*; deep-fold solo package at $REGISTRY/$NS/playbooks/ci/release/cut-release"
 cat >&2 <<EOF

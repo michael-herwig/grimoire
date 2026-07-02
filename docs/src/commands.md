@@ -46,10 +46,13 @@ These apply to every subcommand:
 ## grim init {#init}
 
 Writes a fresh `grimoire.toml` in the current directory. `--registry <ref>`
-seeds the default registry as a `[[registries]]` entry with `default = true`;
-without the flag, a set `GRIM_DEFAULT_REGISTRY` is snapshotted the same way
-(the built-in default registry is never written — it keeps floating with the
-binary). `--global` creates the global config at `$GRIM_HOME/grimoire.toml`
+seeds the default browse source as a `[[registries]]` entry with
+`default = true` — the locator's shape picks the key: an index-shaped value
+(`http(s)://`, `git+…`, `ssh://`, `git@…`, `….git`) is written as
+`index = …`, anything else as a plain OCI `oci = …`. Without the flag, a
+set `GRIM_DEFAULT_REGISTRY` is snapshotted the same way (the built-in
+defaults are never written — they keep floating with the binary).
+`--global` creates the global config at `$GRIM_HOME/grimoire.toml`
 instead of a project-local one.
 
 ```sh
@@ -92,8 +95,8 @@ The supported dotted keys are:
 | `options.tui.default_view` | `flat` or `tree` | Other values exit `65`. |
 | `options.tui.group_by_type` | `true` or `false` | `false` is the default; setting it to `false` removes the key, so a subsequent `get` exits 1 (consistent with `list`, which omits default values). |
 | `options.tui.tree_separators` | comma-separated single-character strings | Each character must be non-control and non-whitespace; other values exit `65`. |
-| `registry.<alias>.url` | string | The registry entry must already exist. Mutually exclusive with `index` (setting it on an index entry exits `65`); unsettable only when `index` is set — else use `grim config registry rm <alias>`. |
-| `registry.<alias>.index` | string | A [package-index](./package-index.md) locator (`http(s)://` base or git repository). Mutually exclusive with `url` (same rules mirrored); a locator matching neither transport exits `65`. |
+| `registry.<alias>.oci` | string | The registry entry must already exist. Mutually exclusive with `index` (setting it on an index entry exits `65`); unsettable only when `index` is set — else use `grim config registry rm <alias>`. The pre-0.7.0 field name `url` is accepted as an alias. |
+| `registry.<alias>.index` | string | A [package-index](./package-index.md) locator (`http(s)://` base or git repository). Mutually exclusive with `oci` (same rules mirrored); a locator matching neither transport exits `65`. |
 | `registry.<alias>.default` | `true` or `false` | Setting to `true` clears all other entries' `default` flag, the same as `grim config registry use`. |
 
 Registry dotted keys require the entry to already exist — only `grim config registry add` creates entries. Passing `registry.<alias>` without a trailing field to `unset` removes the whole entry, equivalent to `grim config registry rm <alias>`.
@@ -103,8 +106,8 @@ Registry dotted keys require the entry to already exist — only `grim config re
 `grim config registry` manages the `[[registries]]` array through dedicated lifecycle verbs:
 
 ```sh
-grim config registry add  acme --url ghcr.io/acme
-grim config registry add  acme --url ghcr.io/acme --default
+grim config registry add  acme --oci ghcr.io/acme
+grim config registry add  acme --oci ghcr.io/acme --default
 grim config registry add  hub  --index https://index.grimoire.rs
 grim config registry use  acme     # mark as default; clears the prior default
 grim config registry show acme     # print one registry's fields
@@ -112,15 +115,16 @@ grim config registry rm   acme
 grim config registry list
 ```
 
-`registry add` requires exactly one of `--url` / `--index` — a registry
+`registry add` requires exactly one of `--oci` / `--index` — a registry
 entry lists via the OCI `_catalog` endpoint, an index entry lists from a
-[package index](./package-index.md). Adding an alias that already exists
+[package index](./package-index.md). (`--url` remains a hidden alias for
+`--oci` from before 0.7.0.) Adding an alias that already exists
 exits `64` — update the locator with `grim config set
-registry.<alias>.url <new-url>`, or remove and re-add.
+registry.<alias>.oci <new-ref>`, or remove and re-add.
 
 `registry use` is the correct way to change the default registry. It sets the target entry's `default` flag and clears the flag on all others in one atomic write. Dotted `grim config set registry.<alias>.default true` routes through the same logic.
 
-`registry list` shows all `[[registries]]` entries in the scope. Entries without an alias (url-only entries hand-authored before aliases were introduced) appear with an empty `Alias` cell and are **not addressable by dotted key** — assign them an alias to manage them with `grim config`.
+`registry list` shows all `[[registries]]` entries in the scope. Entries without an alias (locator-only entries hand-authored before aliases were introduced) appear with an empty `Alias` cell and are **not addressable by dotted key** — assign them an alias to manage them with `grim config`.
 
 ### JSON output {#config-json}
 
@@ -355,11 +359,13 @@ browse all declared registries regardless of whether the env var is set.
 
 When the active scope has no `grimoire.toml` yet, the TUI offers to create
 one before starting, as popup dialogs: confirm the init, then accept or
-edit the registry. The input is pre-filled with the effective default — the
-`--registry` flag, then `GRIM_DEFAULT_REGISTRY`, then the global config, then
-the built-in `ghcr.io/grimoire-rs` fallback — and the accepted value is persisted as a
-`[[registries]]` entry with `default = true` in the new config (clearing the
-input seeds nothing). Cancelling closes the TUI.
+edit the browse source. The input is pre-filled with the effective browse
+primary — the `--registry` flag, then the configured `[[registries]]`
+primary / legacy default chain, then the built-in fallback **index**
+`https://index.grimoire.rs` — and the accepted value is persisted as a
+`[[registries]]` entry with `default = true` in the new config, keyed
+`index` or `oci` by the locator's shape (clearing the input seeds
+nothing). Cancelling closes the TUI.
 
 `enter` opens the detail pane for the selected row: the centered artifact
 reference, its `Summary:` and `Description:` sections, and a `Metadata:`

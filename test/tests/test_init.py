@@ -25,7 +25,7 @@ def test_init_with_registry_seeds_options(grim_at, project_dir: Path) -> None:
     body = (project_dir / "grimoire.toml").read_text()
     # P2: init now emits [[registries]] + default = true, NOT [options]/default_registry
     assert "[[registries]]" in body
-    assert 'url = "ghcr.io/acme"' in body
+    assert 'oci = "ghcr.io/acme"' in body
     assert "default = true" in body
     assert "default_registry" not in body
 
@@ -39,7 +39,7 @@ def test_init_snapshots_env_default_registry(grim_at, project_dir: Path) -> None
     assert result.returncode == 0, result.stderr
     body = (project_dir / "grimoire.toml").read_text()
     assert "[[registries]]" in body
-    assert 'url = "snap.example"' in body
+    assert 'oci = "snap.example"' in body
     assert "default = true" in body
     assert "default_registry" not in body
 
@@ -51,7 +51,7 @@ def test_init_explicit_registry_beats_env(grim_at, project_dir: Path) -> None:
     runner.run("init", "--registry", "flag.example", check=False)
     body = (project_dir / "grimoire.toml").read_text()
     assert "[[registries]]" in body
-    assert 'url = "flag.example"' in body
+    assert 'oci = "flag.example"' in body
     assert "default = true" in body
     assert "env.example" not in body
 
@@ -129,7 +129,7 @@ def test_init_registry_resolves_for_add(
     runner.run("init", "--registry", registry, check=False)
     body = (project_dir / "grimoire.toml").read_text()
     assert "[[registries]]" in body, f"init must write [[registries]]: {body}"
-    assert f'url = "{registry}"' in body
+    assert f'oci = "{registry}"' in body
     assert "default = true" in body
 
     # A short reference (no host) must expand against the [[registries]] primary.

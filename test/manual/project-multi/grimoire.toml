@@ -25,16 +25,16 @@
 clients = ["claude"]
 
 # Primary registry (5050). `default = true` anchors short-id + `grim add`
-# resolution. `url` is the host + namespace its alias expands against.
+# resolution. `oci` is the host + namespace its alias expands against.
 [[registries]]
 alias = "primary"
-url = "localhost:5050/grimoire"
+oci = "localhost:5050/grimoire"
 default = true
 
 # Second registry (5051) — the multi-registry demo target.
 [[registries]]
 alias = "tools"
-url = "localhost:5051/tools"
+oci = "localhost:5051/tools"
 
 [skills]
 # Primary registry (5050).

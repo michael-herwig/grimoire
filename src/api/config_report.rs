@@ -8,14 +8,14 @@
 //! - `Write`: one-row table (`Action | Key | Value | Scope`) — the shared
 //!   confirmation for `set`, `unset`, and `registry add`/`rm`/`use`.
 //! - `List`: one table per invocation (`Key | Value`).
-//! - `RegistryList`: one table (`Alias | URL | Default`).
-//! - `RegistryShow`: one-row table (`Alias | URL | Default`).
+//! - `RegistryList`: one table (`Alias | Type | Source | Default`).
+//! - `RegistryShow`: one-row table (`Alias | Type | Source | Default`).
 //!
 //! JSON format:
 //! - `Get`: `{"key":"…","value":"…"|null,"set":bool,"scope":"…"}`.
 //! - `Write`: single object matching struct fields.
 //! - `List`: flat array of `{"key","value"}` objects.
-//! - `RegistryList`: flat array of `{"alias","url","default"}` objects.
+//! - `RegistryList`: flat array of `{"alias","oci"|"index","default"}` objects.
 //! - `RegistryShow`: single object matching struct fields.
 
 use std::fmt;
@@ -279,7 +279,7 @@ impl Printable for RegistryListReport {
             .rows
             .iter()
             .map(|r| {
-                let (ty, source) = type_and_source(r.url.as_deref(), r.index.as_deref());
+                let (ty, source) = type_and_source(r.oci.as_deref(), r.index.as_deref());
                 vec![
                     r.alias.as_deref().unwrap_or("").to_string(),
                     ty.to_string(),
@@ -300,9 +300,9 @@ impl Printable for RegistryListReport {
 /// The `Type | Source` cell pair for a registry/index entry: which kind of
 /// browse source it is and its locator. Empty pair only for an invalid
 /// entry that validation would reject.
-fn type_and_source<'a>(url: Option<&'a str>, index: Option<&'a str>) -> (&'static str, &'a str) {
-    match (url, index) {
-        (Some(url), _) => ("registry", url),
+fn type_and_source<'a>(oci: Option<&'a str>, index: Option<&'a str>) -> (&'static str, &'a str) {
+    match (oci, index) {
+        (Some(oci), _) => ("registry", oci),
         (None, Some(index)) => ("index", index),
         (None, None) => ("", ""),
     }
@@ -313,9 +313,9 @@ fn type_and_source<'a>(url: Option<&'a str>, index: Option<&'a str>) -> (&'stati
 pub struct RegistryRow {
     /// The registry alias, or `None` for alias-less (locator-only) entries.
     pub alias: Option<String>,
-    /// The registry URL (`None` for index entries).
+    /// The plain OCI registry ref (`None` for index entries).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
+    pub oci: Option<String>,
     /// The package-index locator (`None` for registry entries).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub index: Option<String>,
@@ -327,14 +327,14 @@ pub struct RegistryRow {
 ///
 /// Plain format: one-row table — `Alias | Type | Source | Default`.
 ///
-/// JSON format: `{"alias": "…", "url"|"index": "…", "default": bool}`.
+/// JSON format: `{"alias": "…", "oci"|"index": "…", "default": bool}`.
 #[derive(Debug, Serialize)]
 pub struct RegistryShowReport {
     /// The registry alias.
     pub alias: String,
-    /// The registry URL (`None` for index entries).
+    /// The plain OCI registry ref (`None` for index entries).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
+    pub oci: Option<String>,
     /// The package-index locator (`None` for registry entries).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub index: Option<String>,
@@ -345,7 +345,7 @@ pub struct RegistryShowReport {
 impl Printable for RegistryShowReport {
     fn print_plain(&self, w: &mut impl Write) -> io::Result<()> {
         use crate::cli::printer::print_table;
-        let (ty, source) = type_and_source(self.url.as_deref(), self.index.as_deref());
+        let (ty, source) = type_and_source(self.oci.as_deref(), self.index.as_deref());
         print_table(
             w,
             &["Alias", "Type", "Source", "Default"],
@@ -523,12 +523,12 @@ mod tests {
     }
 
     #[test]
-    fn registry_list_report_plain_shows_alias_url_default() {
-        // ADR: registry list — one table (Alias | URL | Default).
+    fn registry_list_report_plain_shows_alias_oci_default() {
+        // ADR: registry list — one table (Alias | Type | Source | Default).
         let r = RegistryListReport {
             rows: vec![RegistryRow {
                 alias: Some("acme".to_string()),
-                url: Some("ghcr.io/acme".to_string()),
+                oci: Some("ghcr.io/acme".to_string()),
                 index: None,
                 default: true,
             }],
@@ -546,7 +546,7 @@ mod tests {
         let r = RegistryListReport {
             rows: vec![RegistryRow {
                 alias: Some("acme".to_string()),
-                url: Some("ghcr.io/acme".to_string()),
+                oci: Some("ghcr.io/acme".to_string()),
                 index: None,
                 default: false,
             }],
@@ -556,15 +556,15 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
         assert!(v.is_array(), "registry list JSON must be a bare array; got: {v}");
         assert_eq!(v[0]["alias"], "acme");
-        assert_eq!(v[0]["url"], "ghcr.io/acme");
+        assert_eq!(v[0]["oci"], "ghcr.io/acme");
     }
 
     #[test]
     fn registry_show_report_plain_is_one_row_table() {
-        // ADR: registry show — one-row table (Alias | URL | Default).
+        // ADR: registry show — one-row table (Alias | Type | Source | Default).
         let r = RegistryShowReport {
             alias: "acme".to_string(),
-            url: Some("ghcr.io/acme".to_string()),
+            oci: Some("ghcr.io/acme".to_string()),
             index: None,
             default: false,
         };

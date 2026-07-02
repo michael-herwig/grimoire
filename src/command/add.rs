@@ -374,8 +374,8 @@ pub(crate) fn write_config(
         if let Some(alias) = &rc.alias {
             let _ = writeln!(out, "alias = {}", toml::Value::String(alias.clone()));
         }
-        if let Some(url) = &rc.url {
-            let _ = writeln!(out, "url = {}", toml::Value::String(url.clone()));
+        if let Some(oci) = &rc.oci {
+            let _ = writeln!(out, "oci = {}", toml::Value::String(oci.clone()));
         }
         if let Some(index) = &rc.index {
             let _ = writeln!(out, "index = {}", toml::Value::String(index.clone()));
@@ -462,13 +462,13 @@ mod tests {
         let registries = vec![
             RegistryConfig {
                 alias: Some("acme".to_string()),
-                url: Some("ghcr.io/acme".to_string()),
+                oci: Some("ghcr.io/acme".to_string()),
                 index: None,
                 default: true,
             },
             RegistryConfig {
                 alias: None,
-                url: Some("registry.corp/team".to_string()),
+                oci: Some("registry.corp/team".to_string()),
                 index: None,
                 default: false,
             },
@@ -565,7 +565,7 @@ mod tests {
         let set = DesiredSet::from_parts(BTreeMap::new(), BTreeMap::new());
         let registries = vec![RegistryConfig {
             alias: Some("acme".to_string()),
-            url: Some("ghcr.io/acme".to_string()),
+            oci: Some("ghcr.io/acme".to_string()),
             index: None,
             default: true,
         }];
@@ -697,7 +697,7 @@ tree_separators_typo = 1
         };
         let registries = vec![RegistryConfig {
             alias: None,
-            url: Some("array.example".to_string()),
+            oci: Some("array.example".to_string()),
             index: None,
             default: true,
         }];

@@ -80,18 +80,29 @@ fn snapshot_registry<'a>(ctx: &'a Context, explicit: Option<&'a str>) -> Option<
 /// treats as authoritative. When none is given, emit only the empty
 /// `[skills]` / `[rules]` tables (no `[[registries]]`, no `[options]`).
 ///
-/// The registry URL is TOML-escaped via `toml::Value::String` to handle any
-/// embedded quotes or backslashes in the URL (e.g. from unusual registry
+/// The locator's shape picks the key: an index-shaped value (`http(s)://`,
+/// `git+…`, `ssh://`, `git@…`, `….git`) seeds `index = …`, anything else is
+/// a plain OCI registry ref and seeds `oci = …` — so accepting the TUI init
+/// dialog's index pre-fill persists a browse source that actually lists
+/// packages (GHCR-style registries gate `_catalog`).
+///
+/// The locator is TOML-escaped via `toml::Value::String` to handle any
+/// embedded quotes or backslashes (e.g. from unusual registry
 /// configurations).
 fn render_config(registry: Option<&str>) -> String {
     let mut out = String::new();
     if let Some(reg) = registry {
-        // TOML-escape the url value so quotes or backslashes in the registry
-        // string produce valid TOML, consistent with how `write_config` in
+        // TOML-escape the value so quotes or backslashes in the locator
+        // produce valid TOML, consistent with how `write_config` in
         // `add.rs` escapes tree_separators.
-        let escaped_url = toml::Value::String(reg.to_string()).to_string();
+        let escaped = toml::Value::String(reg.to_string()).to_string();
+        let key = if crate::config::registry_resolve::classify_index(reg).is_some() {
+            "index"
+        } else {
+            "oci"
+        };
         out.push_str("[[registries]]\n");
-        out.push_str(&format!("url = {escaped_url}\n"));
+        out.push_str(&format!("{key} = {escaped}\n"));
         out.push_str("default = true\n\n");
     }
     out.push_str("[skills]\n\n[rules]\n");
@@ -108,7 +119,7 @@ mod tests {
         // NOT [options]/default_registry.
         let body = render_config(Some("ghcr.io/acme"));
         assert!(body.contains("[[registries]]"), "must contain [[registries]]");
-        assert!(body.contains("url = \"ghcr.io/acme\""), "must contain url");
+        assert!(body.contains("oci = \"ghcr.io/acme\""), "must contain oci ref");
         assert!(body.contains("default = true"), "must contain default = true");
         assert!(
             !body.contains("default_registry ="),
@@ -184,11 +195,27 @@ mod tests {
                 "must have exactly one [[registries]] entry for url={url:?}"
             );
             assert_eq!(
-                cfg.registries[0].url.as_deref(),
+                cfg.registries[0].oci.as_deref(),
                 Some(&**url),
-                "url must round-trip through TOML escaping for url={url:?}"
+                "locator must round-trip through TOML escaping for url={url:?}"
             );
         }
+    }
+
+    #[test]
+    fn render_seeds_index_key_for_index_shaped_locator() {
+        // An index-shaped locator (e.g. the public package index the TUI
+        // init dialog pre-fills) must seed `index = …`, not an OCI `oci = …`
+        // entry — an OCI entry pointing at an index browses empty.
+        let body = render_config(Some("https://index.grimoire.rs"));
+        assert!(
+            body.contains("index = \"https://index.grimoire.rs\""),
+            "index-shaped locator must seed the index key; got: {body}"
+        );
+        assert!(!body.contains("oci = "), "must not seed an oci key; got: {body}");
+        let cfg = crate::config::project_config::ProjectConfig::from_toml_str(&body).expect("must parse");
+        assert_eq!(cfg.registries[0].index.as_deref(), Some("https://index.grimoire.rs"));
+        assert!(cfg.registries[0].default, "seeded entry must be the default");
     }
 
     #[test]

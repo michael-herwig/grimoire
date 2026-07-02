@@ -21,11 +21,11 @@ on the same host and declare them as two ``[[registries]]`` entries:
 
     [[registries]]
     alias = "ns1"
-    url = "localhost:5000/<namespace1>"
+    oci = "localhost:5000/<namespace1>"
 
     [[registries]]
     alias = "ns2"
-    url = "localhost:5000/<namespace2>"
+    oci = "localhost:5000/<namespace2>"
 
 This mirrors real multi-registry usage (namespaced orgs on ghcr.io, etc.) and
 is the recommended pattern in ``test_search_namespaced.py``.
@@ -52,12 +52,12 @@ def _two_namespace_config(project_dir: Path, ns1: str, ns2: str) -> None:
     text = (
         f'[[registries]]\n'
         f'alias = "reg1"\n'
-        f'url = "{REGISTRY_HOST}/{ns1}"\n'
+        f'oci = "{REGISTRY_HOST}/{ns1}"\n'
         f'default = true\n'
         f'\n'
         f'[[registries]]\n'
         f'alias = "reg2"\n'
-        f'url = "{REGISTRY_HOST}/{ns2}"\n'
+        f'oci = "{REGISTRY_HOST}/{ns2}"\n'
         f'\n'
         f'[skills]\n'
         f'\n'
@@ -165,7 +165,7 @@ def test_search_multi_registry_flag_browses_all(
 
     # Config declares only ns1; the flag must override and span both.
     (project_dir / "grimoire.toml").write_text(
-        f'[[registries]]\nurl = "{REGISTRY_HOST}/{ns1}"\ndefault = true\n\n[skills]\n\n[rules]\n'
+        f'[[registries]]\noci = "{REGISTRY_HOST}/{ns1}"\ndefault = true\n\n[skills]\n\n[rules]\n'
     )
     runner = grim_at(project_dir)
 
@@ -220,7 +220,7 @@ def test_add_qualified_alias_reference_resolves(
     cfg_text = (
         f'[[registries]]\n'
         f'alias = "reg1"\n'
-        f'url = "{REGISTRY_HOST}/{ns1}"\n'
+        f'oci = "{REGISTRY_HOST}/{ns1}"\n'
         f'default = true\n'
         f'\n'
         f'[skills]\n'
@@ -352,12 +352,12 @@ def test_search_partial_registry_failure_degrades_to_reachable(
     cfg_text = (
         f'[[registries]]\n'
         f'alias = "good"\n'
-        f'url = "{REGISTRY_HOST}/{ns_good}"\n'
+        f'oci = "{REGISTRY_HOST}/{ns_good}"\n'
         f'default = true\n'
         f'\n'
         f'[[registries]]\n'
         f'alias = "bad"\n'
-        f'url = "localhost:9999/grim-test/unreachable"\n'
+        f'oci = "localhost:9999/grim-test/unreachable"\n'
         f'\n'
         f'[skills]\n'
         f'\n'
@@ -528,7 +528,7 @@ def test_both_fields_array_wins(
         f'default_registry = "{REGISTRY_HOST}"\n'
         f'\n'
         f'[[registries]]\n'
-        f'url = "{dead_host}"\n'
+        f'oci = "{dead_host}"\n'
         f'default = true\n'
         f'\n'
         f'[skills]\n'
@@ -562,11 +562,11 @@ def test_two_defaults_rejected(
     """
     (project_dir / "grimoire.toml").write_text(
         '[[registries]]\n'
-        'url = "ghcr.io/acme"\n'
+        'oci = "ghcr.io/acme"\n'
         'default = true\n'
         '\n'
         '[[registries]]\n'
-        'url = "registry.corp/team"\n'
+        'oci = "registry.corp/team"\n'
         'default = true\n'
         '\n'
         '[skills]\n'

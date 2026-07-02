@@ -55,29 +55,30 @@ instead of one. In the TUI each registry becomes its own collapsible tree
 root, with the registry prefix shown only when more than one registry
 resolves.
 
-Each entry declares **exactly one** of `url` (a plain OCI registry) or
-`index` (a package index) — never both:
+Each entry declares **exactly one** of `oci` (a plain OCI registry) or
+`index` (a package index) — never both (`url` is accepted as a pre-0.7.0
+parse-time alias for `oci`):
 
 | Field | Required | Purpose |
 |-------|----------|---------|
-| `url` | one of `url`/`index` | Registry host and optional namespace — same form as `[options].default_registry`; browsed via `_catalog` |
-| `index` | one of `url`/`index` | Package index locator (see [Index Sources](#index-sources)) |
+| `oci` | one of `oci`/`index` | Registry host and optional namespace — same form as `[options].default_registry`; browsed via `_catalog` |
+| `index` | one of `oci`/`index` | Package index locator (see [Index Sources](#index-sources)) |
 | `alias` | no | Short name for qualified `alias/repo` references |
 | `default` | no | Marks the primary registry for short-id expansion; first entry is primary when none set it |
 
 ```toml
 [[registries]]
 alias = "acme"
-url = "ghcr.io/acme"
+oci = "ghcr.io/acme"
 default = true
 
 [[registries]]
 alias = "internal"
-url = "registry.corp.example/team"
+oci = "registry.corp.example/team"
 ```
 
-Project entries take precedence over global entries; duplicate URLs are
-deduped, first occurrence wins.
+Project entries take precedence over global entries; duplicate locators
+are deduped, first occurrence wins.
 
 Browse-set precedence (what `grim search`, `grim tui`, and `grim mcp`
 browse):
@@ -105,7 +106,7 @@ A **package index** is a phone book, not a catalog: it stores pointers
 possibly many different registries, and it never stores versions — `grim`
 still resolves tags live from each pointer's registry at install time, so
 a stale index can never serve a stale version. Registries such as GHCR,
-Docker Hub, and GitLab SaaS gate the `_catalog` endpoint `url` entries
+Docker Hub, and GitLab SaaS gate the `_catalog` endpoint `oci` entries
 need; an `index` entry sidesteps that gap. The default public index is
 `https://index.grimoire.rs` ([grimoire-rs/index][index-repo] on GitHub).
 
@@ -133,11 +134,11 @@ CLI equivalent:
 grim config registry add hub --index https://index.grimoire.rs --default
 ```
 
-`url` and `index` set together on one entry is a config error (exit 78);
+`oci` and `index` set together on one entry is a config error (exit 78);
 a locator that matches neither transport shape is a data error (exit 65).
 Both transports share the regular catalog cache (`$GRIM_HOME/catalog/`,
-1-hour TTL, `--refresh`, offline degradation) and browse exactly like a
-`url` entry — search, TUI, and MCP treat index and registry sources
+1-hour TTL, `--refresh`, offline degradation) and browse exactly like an
+`oci` entry — search, TUI, and MCP treat index and registry sources
 alike. `grim publish --announce` is the write side: it publishes
 pointers into an index repository rather than reading them — see
 [references/publish.md](publish.md#announce).
@@ -164,7 +165,7 @@ lock on every change.
 - **Registries** use lifecycle verbs under `grim config registry`:
 
   ```sh
-  grim config registry add acme --url ghcr.io/acme        # registry entry (needs --url XOR --index)
+  grim config registry add acme --oci ghcr.io/acme        # registry entry (needs --oci XOR --index)
   grim config registry add hub --index https://index.grimoire.rs  # index entry — see Index Sources
   grim config registry use acme                       # set default, clearing all others atomically
   grim config registry list                           # all entries in this scope

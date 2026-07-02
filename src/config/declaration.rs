@@ -111,11 +111,11 @@ pub struct ConfigOptions {
 /// `search`/`tui`/`mcp`, and its `default = true` entry (else the first)
 /// is the primary registry short identifiers expand against.
 ///
-/// Exactly one of [`Self::url`] / [`Self::index`] must be set (enforced by
-/// `validate_registries`). A `url` entry lists packages via the OCI
+/// Exactly one of [`Self::oci`] / [`Self::index`] must be set (enforced by
+/// `validate_registries`). An `oci` entry lists packages via the OCI
 /// `_catalog` endpoint; an `index` entry lists packages from a package
 /// index whose entries carry their own fully-qualified registry refs — so
-/// pairing an index with a registry url would be meaningless.
+/// pairing an index with an OCI registry ref would be meaningless.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RegistryConfig {
@@ -124,16 +124,18 @@ pub struct RegistryConfig {
     /// unique across the array.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alias: Option<String>,
-    /// The registry host (and optional namespace), e.g. `ghcr.io` or
-    /// `ghcr.io/acme`. Same shape as `[options].default_registry`.
-    /// Mutually exclusive with [`Self::index`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
+    /// A plain OCI registry ref — host (and optional namespace), e.g.
+    /// `ghcr.io` or `ghcr.io/acme`. Same shape as
+    /// `[options].default_registry`. Mutually exclusive with
+    /// [`Self::index`]. Accepts the pre-0.7.0 key `url` as a
+    /// deserialization alias.
+    #[serde(default, alias = "url", skip_serializing_if = "Option::is_none")]
+    pub oci: Option<String>,
     /// A package-index locator replacing the `_catalog` listing: an
     /// `http(s)://` base serving compiled static files (`all.json`), or a
     /// git repository (`git+…`, `ssh://`, `git@…`, or a URL ending in
     /// `.git`) holding `index/**/metadata.json`. Mutually exclusive with
-    /// [`Self::url`].
+    /// [`Self::oci`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index: Option<String>,
     /// Marks this registry as the primary one short identifiers expand
@@ -145,11 +147,11 @@ pub struct RegistryConfig {
 }
 
 impl RegistryConfig {
-    /// The entry's locator — the registry `url` or the `index` locator,
-    /// whichever is set (`url` wins if both are, which validation rejects).
+    /// The entry's locator — the `oci` registry ref or the `index` locator,
+    /// whichever is set (`oci` wins if both are, which validation rejects).
     /// Empty only for an invalid entry that validation would reject.
     pub fn locator(&self) -> &str {
-        self.url.as_deref().or(self.index.as_deref()).unwrap_or("")
+        self.oci.as_deref().or(self.index.as_deref()).unwrap_or("")
     }
 }
 

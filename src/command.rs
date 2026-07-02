@@ -200,19 +200,31 @@ fn or_fallback_registry(primary: &str) -> String {
 ///    `[options].default_registry` → built-in [`FALLBACK_REGISTRY`]
 ///    (legacy single-default chain, only when no `[[registries]]` present)
 pub fn primary_registry_global_fallback(ctx: &crate::context::Context) -> String {
+    or_fallback_registry(crate::config::registry_resolve::primary_registry(
+        &registries_global_fallback(ctx),
+    ))
+}
+
+/// The ordered browse set when scope resolution fails (no project config):
+/// the `--registry` flag(s), else the global `[[registries]]`, else the
+/// legacy single-default chain ending in the built-in [`FALLBACK_INDEX`].
+/// The set-building seam behind [`primary_registry_global_fallback`],
+/// exposed so browse-side consumers (the TUI init dialog pre-fill) can read
+/// the primary *browse* locator — which may be an index source that
+/// [`primary_registry_global_fallback`] deliberately substitutes away for
+/// push-side use.
+pub fn registries_global_fallback(ctx: &crate::context::Context) -> Vec<crate::config::ResolvedRegistry> {
     let global_regs = global_config_registries(ctx, crate::config::scope::ConfigScope::Project);
     let global_default = global_config_default(ctx, crate::config::scope::ConfigScope::Project);
-    or_fallback_registry(crate::config::registry_resolve::primary_registry(
-        &crate::config::resolve_registries(
-            ctx.registry_flags(),
-            &[],
-            None,
-            &global_regs,
-            global_default.as_deref(),
-            FALLBACK_INDEX,
-            ctx.registry_env(),
-        ),
-    ))
+    crate::config::resolve_registries(
+        ctx.registry_flags(),
+        &[],
+        None,
+        &global_regs,
+        global_default.as_deref(),
+        FALLBACK_INDEX,
+        ctx.registry_env(),
+    )
 }
 
 /// Build a classifiable usage error (exit 64) for a missing `login`
@@ -389,7 +401,7 @@ mod tests {
         let ctx = Context::hermetic(tmp.path().to_path_buf());
         let regs = vec![RegistryConfig {
             alias: None,
-            url: Some("array.example".to_string()),
+            oci: Some("array.example".to_string()),
             index: None,
             default: true,
         }];
