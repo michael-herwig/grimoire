@@ -92,7 +92,8 @@ The supported dotted keys are:
 | `options.tui.default_view` | `flat` or `tree` | Other values exit `65`. |
 | `options.tui.group_by_type` | `true` or `false` | `false` is the default; setting it to `false` removes the key, so a subsequent `get` exits 1 (consistent with `list`, which omits default values). |
 | `options.tui.tree_separators` | comma-separated single-character strings | Each character must be non-control and non-whitespace; other values exit `65`. |
-| `registry.<alias>.url` | string | The registry entry must already exist. Cannot be unset (URL is required); use `grim config registry rm <alias>` to remove the whole entry. |
+| `registry.<alias>.url` | string | The registry entry must already exist. Mutually exclusive with `index` (setting it on an index entry exits `65`); unsettable only when `index` is set — else use `grim config registry rm <alias>`. |
+| `registry.<alias>.index` | string | A [package-index](./package-index.md) locator (`http(s)://` base or git repository). Mutually exclusive with `url` (same rules mirrored); a locator matching neither transport exits `65`. |
 | `registry.<alias>.default` | `true` or `false` | Setting to `true` clears all other entries' `default` flag, the same as `grim config registry use`. |
 
 Registry dotted keys require the entry to already exist — only `grim config registry add` creates entries. Passing `registry.<alias>` without a trailing field to `unset` removes the whole entry, equivalent to `grim config registry rm <alias>`.
@@ -104,13 +105,18 @@ Registry dotted keys require the entry to already exist — only `grim config re
 ```sh
 grim config registry add  acme --url ghcr.io/acme
 grim config registry add  acme --url ghcr.io/acme --default
+grim config registry add  hub  --index https://index.grimoire.rs
 grim config registry use  acme     # mark as default; clears the prior default
 grim config registry show acme     # print one registry's fields
 grim config registry rm   acme
 grim config registry list
 ```
 
-`registry add` requires `--url`. Adding an alias that already exists exits `64` — update the URL with `grim config set registry.<alias>.url <new-url>`, or remove and re-add.
+`registry add` requires exactly one of `--url` / `--index` — a registry
+entry lists via the OCI `_catalog` endpoint, an index entry lists from a
+[package index](./package-index.md). Adding an alias that already exists
+exits `64` — update the locator with `grim config set
+registry.<alias>.url <new-url>`, or remove and re-add.
 
 `registry use` is the correct way to change the default registry. It sets the target entry's `default` flag and clears the flag on all others in one atomic write. Dotted `grim config set registry.<alias>.default true` routes through the same logic.
 
@@ -126,8 +132,8 @@ Add `--format json` to any subcommand for machine-readable output. The shapes ar
 | `get` (unset, exits 1) | `{"key":"…","value":null,"set":false,"scope":"project"\|"global"}` |
 | `set` / `unset` / `registry add`, `rm`, `use` | `{"action":"…","key":"…","value":string or null,"scope":"…"}` |
 | `list` | array of `{"key":"…","value":"…"}` |
-| `registry list` | array of `{"alias":string or null,"url":"…","default":bool}` |
-| `registry show` | `{"alias":"…","url":"…","default":bool}` |
+| `registry list` | array of `{"alias":string or null,"url"\|"index":"…","default":bool}` |
+| `registry show` | `{"alias":"…","url"\|"index":"…","default":bool}` |
 
 The `action` field in write confirmations takes one of: `set`, `unset`, `registry-added`, `registry-removed`, `registry-default`. The `scope` field is `project` or `global`.
 

@@ -511,6 +511,8 @@ as a usage error.
 | `--only <name>` | Publish only the named entry (repeatable). A name absent from the manifest exits 65. |
 | `--tag <tag>` | Override the published tag with a movable channel tag (e.g. `canary`). Must be non-semver — semver values exit 65, keeping all semver releases in the manifest where the repo can track them. A channel tag always moves: re-publishing with `--tag` overwrites the existing tag without skipping and without `--force`. |
 | `--registry <ref>` | The [global `--registry` flag][global-options] overrides the manifest's `registry` value for this run. `GRIM_DEFAULT_REGISTRY` and the config-file `default_registry` do **not** override the manifest — `registry` is explicit input, like a fully-qualified reference. Only the flag tier wins. |
+| `--announce` | After a fully successful, non-dry-run publish, announce the published packages to a [package index](./package-index.md): metadata pointers on a topic branch, pushed and PR'd (github.com + `gh`) or left as a branch on any other git host. Configured by the optional `[announce]` manifest table (`repository`, `namespace`, `owner_id`). An announce failure after a successful publish exits 69 — the packages **are** published; retry the announce. |
+| `--announce-repo <url>` | Override the index repository `--announce` targets (default: the manifest's `[announce] repository`, else `https://github.com/grimoire-rs/index`). Requires `--announce`. |
 
 ### Validation and fail-fast {#batch-publish-validation}
 
