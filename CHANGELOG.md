@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-07-02
+
+### Added
+
+- Package-index browse sources and publish --announce
+- Default to the public index and GHCR, retire grim.ocx.sh
+- Rename registry `url` key to `oci` and seed index-first init defaults *(config)* **BREAKING**
+- Add index/oci source-type step to the init dialog *(tui)*
+- Forge-API announce with CI auto-detection *(publish)* **BREAKING**
+
+### Documentation
+
+- Update ocx installer URL to setup.ocx.sh
+- Setup.grimoire.rs installers, setup-grimoire action, announce and index flags
+- Lead README install with setup.grimoire.rs installers
+- Publishing-from-CI page + GitLab CI/CD component coverage
+- Self-hosted GitLab setup guide + announce reference update
+
+### Fixed
+
+- Resolve GitLab user-namespace owner id via public /users lookup *(publish)*
+- Expand short ids via the default chain when the browse set is index-only *(add)*
+- Group index-sourced rows under their source root in the tree *(tui)*
+
 ## [0.6.2] - 2026-07-01
 
 ### Added
@@ -15,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Group namespaced-registry rows under their configured root *(tui)*
+
+### Release
+
+- V0.6.2
 
 ## [0.6.1] - 2026-06-30
 
@@ -273,6 +301,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Make release-update.sh executable; add rolling-release regression tests
 - Contact loopback registries over plain HTTP on any port
+[0.7.0]: https://github.com/grimoire-rs/grimoire/compare/v0.6.2..v0.7.0
 [0.6.2]: https://github.com/grimoire-rs/grimoire/compare/v0.6.1..v0.6.2
 [0.6.1]: https://github.com/grimoire-rs/grimoire/compare/v0.6.0..v0.6.1
 [0.6.0]: https://github.com/grimoire-rs/grimoire/compare/v0.5.0..v0.6.0
