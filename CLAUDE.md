@@ -40,9 +40,8 @@ is open.
 
 **Task runner**: [`task`](https://taskfile.dev) (Taskfile v3) is the
 primary runner. **Always check `task --list` before inventing ad-hoc
-commands.** Taskfiles are tree-structured: root (`taskfile.yml`),
-subsystem dirs (`test/`, `.claude/`), and `taskfiles/*.taskfile.yml` for
-cross-cutting concerns.
+commands.** Taskfiles are tree-structured: root (`taskfile.yml`), subsystem
+dirs (`test/`, `.claude/`), `taskfiles/*.taskfile.yml` for cross-cutting.
 
 **Key workflows:**
 ```sh
@@ -87,6 +86,7 @@ under `test/`. Rust edition 2024.
 | `GRIM_HOME` | Root data directory (content store, catalog, global config, global-scope install state at `$GRIM_HOME/state/global.json`). Project-scope install state lives at `<workspace>/.grimoire/state.json`. Global-scope client output lands in vendor-native dirs — see subsystem-file-structure.md | `~/.grimoire` |
 | `GRIM_DEFAULT_REGISTRY` | Default registry for short-id resolution and the single-registry fallback when no `[[registries]]` is configured. Does **not** collapse or restrict the multi-registry browse set — `[[registries]]` is authoritative for browsing even when this is set; only the `--registry` flag collapses browse to one registry. Short-id precedence: `--registry` flag > `GRIM_DEFAULT_REGISTRY` > project `default_registry` > global `default_registry` > built-in fallback `ghcr.io/grimoire-rs` (browse fallback: the public index `https://index.grimoire.rs`) | (unset) |
 | `GRIM_OFFLINE` | Disable all network access (cache-only; default is always-fresh online resolution) | false |
+| `GRIM_ANNOUNCE_TOKEN` | Forge API token for `grim publish --announce` (PR/MR creation, owner-id lookup); always wins over CI-conventional tokens (`GH_TOKEN`/`GITHUB_TOKEN`, `GITLAB_TOKEN`), which apply only when the CI server host matches the announce target host. Never logged | (unset) |
 | `DOCKER_CONFIG` | Directory holding the docker-compatible `config.json` read/written by `grim login`/`logout` (and the credential read path) | `~/.docker` |
 | `OPENCODE_CONFIG` | OpenCode config file that grim edits for global-scope rule registration (vendor variable, honored read/write). When unset, grim falls back to `$XDG_CONFIG_HOME/opencode/opencode.json` (or `~/.config/opencode/opencode.json` if `XDG_CONFIG_HOME` is also unset). Config-file-only — no effect on skill/agent paths | (unset) |
 | `CLAUDE_CONFIG_DIR`, `COPILOT_HOME`, `OPENCODE_CONFIG_DIR` | Vendor config-dir overrides (honored read-only). Global-scope installs follow them: `CLAUDE_CONFIG_DIR` replaces `~/.claude` (skills, rules, and agents), `COPILOT_HOME` replaces `~/.copilot` (skills and agents), `OPENCODE_CONFIG_DIR` is the preferred install target over the XDG default for OpenCode skills and agents (additive — OpenCode scans both). They also drive global-scope client *detection* — a client counts as present when its (possibly overridden) native root exists. Details → subsystem-file-structure.md | (unset) |

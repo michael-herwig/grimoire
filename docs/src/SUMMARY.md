@@ -11,6 +11,7 @@
 - [The Package Index](./package-index.md)
 - [Publishing Skills and Rules](./publishing.md)
 - [Publishing from CI](./ci.md)
+- [Self-Hosted GitLab Setup](./self-hosted-gitlab.md)
 - [Agent Artifacts](./agents.md)
 - [Artifact Reference](./artifacts.md)
 - [Vendor-Specific Metadata](./vendor-metadata.md)

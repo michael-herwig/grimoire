@@ -145,11 +145,12 @@ grim publish --announce --announce-repo https://github.com/acme/index  # overrid
 `--announce` only runs after every planned entry in the batch is fully
 published (freshly pushed or already present via skip-existing) and never
 under `--dry-run` (prints `announce: skipped (dry run)` instead). It
-writes one `index/github.com/<namespace>/<package>/metadata.json` pointer
-per published entry into a clone of the index repository, on a
-deterministic topic branch, then opens a pull request (`github.com` +
-the `gh` CLI) or pushes the branch and prints its URL (any other git
-host).
+writes one `index/<host>/<namespace>/<package>/metadata.json` pointer per
+published entry into a clone of the index repository, on a deterministic
+topic branch, then opens the pull/merge request via the forge REST API
+(GitHub or GitLab — enterprise instances included, no `gh`/`glab` CLI).
+A GitLab host without an API token gets the MR via git push options; a
+plain git host gets the pushed branch and its URL printed.
 
 Configure the target and ownership in an optional `[announce]` table in
 `publish.toml`:
@@ -157,18 +158,25 @@ Configure the target and ownership in an optional `[announce]` table in
 ```toml
 [announce]
 repository = "https://github.com/grimoire-rs/index"  # default
-namespace = "your-login"                              # default: your gh login
-owner_id = 12345678                                   # default: live GitHub API lookup
+forge = "github"                 # github | gitlab | plain; default: auto
+host = "github.com"              # index/<host>/ segment; default: derived from repository
+api_url = "https://api.github.com"  # default: CI env / forge convention
+namespace = "your-login"         # full group path on GitLab
+owner_id = 12345678              # default: forge API lookup
 ```
 
 `--announce-repo` overrides `[announce] repository` for one invocation.
-`namespace` with no `gh` login authenticated is a config error (exit 78,
-"no announce namespace"). `owner_id` only needs setting for hermetic/CI
-runs — otherwise grim resolves it live from the GitHub API.
+In CI, forge / API URL / token / namespace auto-detect from the standard
+environment (`GITHUB_*`, `CI_*`/`GITLAB_TOKEN`) — but **only when the CI
+server host equals the index host**; a cross-forge announce wires its
+token through `GRIM_ANNOUNCE_TOKEN` (which always wins) and sets `forge`
+explicitly. `owner_id` is resolved via the forge API (GitHub always,
+GitLab with a token) — set it explicitly for hermetic runs, plain git
+hosts, or token-less GitLab.
 
-**Announce failure exits 69** (`Unavailable`) — the publish itself already
-succeeded and its report stands; only the index write/PR failed, and the
-index repository is the remote resource that failed.
+**Announce failure after a successful publish exits 69** (`Unavailable`)
+— the publish report stands; only the index write/PR failed. Announce
+*misconfiguration* (missing `host`/`namespace`/`owner_id`) exits 64.
 
 The default index auto-merges an announcement PR when: only your own
 namespace's `metadata.json` paths changed, you own that namespace (login

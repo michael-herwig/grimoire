@@ -69,18 +69,22 @@ This section is normative for index producers and consumers.
 
 ```
 index/
-  github.com/<namespace>/          # namespace = GitHub identity
+  <host>/<namespace>/              # host = forge instance, namespace = identity there
     <package>/
       metadata.json                # one pointer per package
 scripts/                           # (optional) build/validation tooling
 ```
 
-- `<namespace>` is a GitHub login or organization name, lowercase as
-  registered.
+- `<host>` is the forge instance namespaces are anchored on —
+  `github.com` for the default index, a GitLab or GitHub Enterprise host
+  for self-hosted indexes.
+- `<namespace>` is an account or group name on `<host>`, lowercase as
+  registered. On GitLab it is the **full** group path and may span
+  multiple segments (`platform/ai`).
 - `<package>` is the package name and MUST equal the `name` field in the
   contained `metadata.json`.
-- Top-level namespaces without the `github.com/` prefix are *reserved*
-  (vanity namespaces; maintainer-approved).
+- Top-level directories that are not a host are *reserved* (vanity
+  namespaces; maintainer-approved on the default index).
 
 ### `metadata.json` {#spec-metadata}
 
@@ -104,8 +108,13 @@ scripts/                           # (optional) build/validation tooling
 | `ref` | string | yes | Fully-qualified OCI reference **without a tag**: `registry-host[/namespace]/repository`. MUST contain at least one `/`. MUST NOT carry a tag or digest — versions are resolved live. |
 | `description` | string | yes | One line, shown by `grim search` and the TUI. |
 | `repository` | string | no | Source repository URL. Consumers keep it only with an `https://` prefix. |
-| `owner.github` | string | yes | GitHub login owning the namespace. MUST match the namespace directory (case-insensitive). |
-| `owner.id` | integer | yes | The account's numeric GitHub ID. Immutable — logins can be deleted and re-registered by someone else; the ID cannot. Validation compares it against the live API. |
+| `owner.github` | string | yes* | GitHub login owning the namespace — for pointers under `index/github.com/` (and other GitHub-forge hosts). MUST match the namespace directory (case-insensitive). |
+| `owner.login` | string | yes* | The generic owner key for any non-GitHub host (the pointer's `index/<host>/` segment carries the forge context). MUST match the namespace directory (case-insensitive). |
+| `owner.id` | integer | yes | The account's numeric ID on the pointer's host — the GitHub account ID, or the GitLab *namespace* ID (uniform for users and nested groups). Immutable — logins can be deleted and re-registered by someone else; the ID cannot. Validation compares it against the live API. |
+
+\* exactly one of `owner.github` / `owner.login`, matching the pointer's
+host. grim's read side ignores `owner` entirely — the fields exist for
+the index's own server-side validation.
 
 Unknown additional fields MUST be tolerated by consumers (additive
 schema evolution without a version bump).
@@ -140,7 +149,10 @@ the namespace. A namespace can only be modified by:
 ### Validation and Auto-Merge {#spec-validation}
 
 The default index auto-merges announcement PRs when **all** of the
-following hold (anything else falls to manual maintainer review):
+following hold (anything else falls to manual maintainer review). A
+GitLab fork applies the same gate with GitLab identities — namespace
+ownership becomes group membership; see
+[Self-Hosted GitLab Setup](./self-hosted-gitlab.md).
 
 1. Only `index/github.com/<ns>/<pkg>/metadata.json` paths changed.
 2. `<ns>` is the PR author's login, or an org the author publicly
@@ -164,8 +176,13 @@ $ grim publish --announce
 ```
 
 `--announce` writes/updates your `metadata.json` pointers in a clone of
-the index repository and opens a pull request (GitHub) or pushes a
-branch (any other git host). The target repository is configurable:
+the index repository, pushes a deterministic topic branch, and opens the
+pull/merge request through the forge's REST API — GitHub and GitLab,
+enterprise instances included, no `gh`/`glab` CLI needed. A GitLab host
+without an API token gets the MR via [git push options][push-options]
+instead; a plain git host is left with the pushed branch.
+
+The full `[announce]` surface:
 
 ```toml
 # publish.toml
@@ -173,15 +190,48 @@ registry = "ghcr.io"
 
 [announce]
 repository = "https://github.com/grimoire-rs/index"  # default
-namespace = "your-login"                              # default: your gh login
+forge      = "github"            # github | gitlab | plain; default: auto
+host       = "github.com"        # index/<host>/ segment; default: derived
+api_url    = "https://api.github.com"  # default: CI env / forge convention
+namespace  = "your-login"        # full group path on GitLab
+owner_id   = 12345               # default: resolved via the forge API
 ```
 
-Point `[announce] repository` at any index repository — including a
-private company index on GitLab — to announce there instead.
+Every field except `repository` resolves automatically in the common
+cases:
+
+- **`host`** derives from the repository URL (a local-path locator has no
+  host — set it explicitly).
+- **`forge`** — explicit value > the CI environment **when its server
+  host equals the index host** > `github` for github.com > `plain`.
+- **`api_url`** — explicit > host-matched CI (`GITHUB_API_URL` /
+  `CI_API_V4_URL`) > convention: `api.github.com`, `<host>/api/v3` on
+  GitHub Enterprise, `<host>/api/v4` on GitLab.
+- **token** — `GRIM_ANNOUNCE_TOKEN` always wins; in a host-matched CI the
+  conventional variables apply (`GH_TOKEN`/`GITHUB_TOKEN`,
+  `GITLAB_TOKEN` — never `CI_JOB_TOKEN`, it cannot open MRs). Tokens are
+  sent as API headers only and never logged.
+- **`namespace`** — explicit > host-matched CI
+  (`GITHUB_REPOSITORY_OWNER` / `CI_PROJECT_NAMESPACE`) > the
+  authenticated GitHub API user.
+- **`owner_id`** — explicit > forge API lookup (GitHub always; GitLab
+  with a token). A plain host requires it explicitly.
+
+The host-match gate is deliberate: a GitLab pipeline announcing to a
+GitHub index inherits **nothing** from the GitLab CI environment — wire
+the cross-forge credential through `GRIM_ANNOUNCE_TOKEN` and set `forge`
+explicitly.
+
+> **Migrating from grim ≤ 0.6**: announces to non-GitHub hosts used to
+> write pointers under `index/github.com/…` unconditionally. They now
+> land under the real `index/<host>/…` — delete the stale
+> `index/github.com/` entries from such an index (the reader walks every
+> pointer, so leftovers appear as duplicates).
 
 Announcing straight from a pipeline (GitHub Actions or GitLab CI, with
 the token wiring each forge needs) is covered in
-[Publishing from CI](./ci.md).
+[Publishing from CI](./ci.md); running the whole index on a corporate
+GitLab is covered in [Self-Hosted GitLab Setup](./self-hosted-gitlab.md).
 
 ## Hosting Your Own Index {#self-hosting}
 
@@ -217,8 +267,12 @@ index = "https://index.your-domain.example"
 ### Fork the Default Index {#self-hosting-fork}
 
 Fork [grimoire-rs/index][index-repo] to inherit the layout, the build
-script, the Pages deployment, and the PR validation / auto-merge
-workflow in one step.
+script, the Pages deployment, and the validation / auto-merge pipeline
+in one step — the repo ships **both** a GitHub Actions workflow and a
+`.gitlab-ci.yml`, so a fork works on either forge (the foreign CI files
+stay inert). For the full corporate GitLab walkthrough — CI variables,
+auto-merge by group membership, release mirrors — see
+[Self-Hosted GitLab Setup](./self-hosted-gitlab.md).
 
 ## Relationship to Registries {#registries}
 
@@ -234,6 +288,7 @@ authenticate via [`grim login`](./authentication.md)), and a private
 index can point at public packages.
 
 <!-- external -->
+[push-options]: https://docs.gitlab.com/topics/git/commit/#push-options
 [ghcr]: https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry
 [gitlab-reg]: https://docs.gitlab.com/ee/user/packages/container_registry/
 [dockerhub]: https://hub.docker.com/

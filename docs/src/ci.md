@@ -113,10 +113,12 @@ live under a group-and-project path — `repository_prefix` handles that
 
 ### Announcing to the public index {#gitlab-announce-public}
 
-Announcing from GitLab CI to the GitHub-hosted public index crosses forges,
-so the job needs a GitHub token. Hand it to the component and it wires up
-both the git push and the pull request (the component installs the
-[`gh` CLI][gh-cli] on its default alpine image):
+Announcing from GitLab CI to the GitHub-hosted public index crosses
+forges, so the job needs a GitHub token — the GitLab CI environment
+deliberately contributes nothing when the index host differs from the CI
+server host. Hand the token to the component and grim wires up both the
+git push and the pull request (opened via the GitHub REST API — no `gh`
+CLI involved):
 
 ```yaml
 include:
@@ -135,7 +137,9 @@ fork's branch banner.
 
 A company index is [just a git repository](./package-index.md#self-hosting)
 — host it on the same GitLab instance and announce with a [project access
-token][gl-pat] (`write_repository` scope):
+token][gl-pat] (`api` scope, so grim can open the merge request through
+the GitLab API; with `write_repository` only, grim falls back to git push
+options and finally to the pushed branch):
 
 ```yaml
 include:
@@ -146,14 +150,15 @@ include:
       announce_token: $INDEX_ANNOUNCE_TOKEN
 ```
 
-On a non-GitHub host grim pushes a deterministic `announce/<ns>-<hash>`
-topic branch and reports it — open the merge request from the branch
-(GitLab suggests it on the project page after the push). Re-announcing the
-same content force-updates the same branch instead of littering new ones.
-The public index's [validation and auto-merge](./package-index.md#spec-validation)
-workflow is GitHub Actions; a self-hosted GitLab index reviews and merges
-MRs by whatever rules you set — for a small internal index, plain manual
-merges are usually enough.
+Because the index host matches the CI server host, grim auto-detects the
+GitLab forge and API from the CI environment — no `[announce] forge` or
+`api_url` config needed. Re-announcing the same content is detected as
+up-to-date; changed content force-updates the same deterministic
+`announce/<ns>-<hash>` branch (and its open MR) instead of littering new
+ones. The self-hosted index can run the same
+[validation and auto-merge](./package-index.md#spec-validation) gate as
+the public one — the index repo ships a `.gitlab-ci.yml` for exactly
+that; setup in [Self-Hosted GitLab Setup](./self-hosted-gitlab.md).
 
 Consumers then wire the index into their config as usual:
 

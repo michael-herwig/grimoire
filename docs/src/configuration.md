@@ -299,7 +299,15 @@ applies.
 | `GRIM_DEFAULT_REGISTRY` | Default registry for short references. | unset |
 | `GRIM_OFFLINE` | Disable all network access (same as `--offline`). | `false` |
 | `GRIM_INSECURE_REGISTRIES` | Comma-separated registries reachable over plain HTTP — for local or in-cluster registries without TLS. | unset |
+| `GRIM_ANNOUNCE_TOKEN` | Forge API token for [`grim publish --announce`](./package-index.md#announcing) — always wins over CI-provided tokens. Sent as an API header only, never logged. | unset |
 | `DOCKER_CONFIG` | Directory holding the Docker-compatible `config.json` that [`grim login`](./authentication.md) reads and writes. | `~/.docker` |
+
+Announce additionally reads the standard CI variables (`GITHUB_ACTIONS`,
+`GITHUB_SERVER_URL`, `GITHUB_API_URL`, `GITHUB_REPOSITORY_OWNER`,
+`GH_TOKEN`/`GITHUB_TOKEN`; `GITLAB_CI`, `CI_SERVER_HOST`, `CI_API_V4_URL`,
+`CI_PROJECT_NAMESPACE`, `GITLAB_TOKEN`) — only when the CI server host
+equals the announce target host. See
+[Announcing Packages](./package-index.md#announcing).
 
 By default Grimoire resolves floating tags fresh from the registry, then caches
 the result, so a floating tag never serves a stale pin. Pass `--offline` (or set
