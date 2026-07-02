@@ -24,6 +24,10 @@ pr-run-mode = "skip"
 # then republish the first-party catalog with the freshly released grim
 # (idempotent when catalog versions are unchanged).
 post-announce-jobs = ["./publish-ocx", "./publish-catalog"]
+# publish-catalog pushes the catalog packages to GHCR — the called workflow
+# declares `packages: write`, which the caller must grant (a reusable
+# workflow can only downscope the caller's permissions).
+github-custom-job-permissions = { "publish-catalog" = { contents = "read", packages = "write" } }
 # Generate and dist a source tarball
 source-tarball = false
 # Whether to embed dependency information using cargo-auditable
