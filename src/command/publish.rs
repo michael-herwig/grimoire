@@ -65,8 +65,10 @@ pub struct PublishArgs {
 
     /// After a fully successful publish, announce the published packages to
     /// a package-index git repository: write metadata pointers on a topic
-    /// branch and open a pull request (github.com + `gh`) or push the
-    /// branch (any other git host). No-op under `--dry-run`.
+    /// branch, push, and open the pull/merge request via the forge API
+    /// (GitHub/GitLab, enterprise instances included) — or via git push
+    /// options on a token-less GitLab host, or leave the pushed branch on a
+    /// plain git host. No-op under `--dry-run`.
     #[arg(long)]
     pub announce: bool,
 
@@ -84,13 +86,32 @@ pub struct AnnounceSpec {
     /// Default: `https://github.com/grimoire-rs/index`.
     pub repository: Option<String>,
 
-    /// The `index/github.com/<namespace>/` the packages land under.
-    /// Default: the authenticated `gh` user's login.
+    /// The forge API flavor of the index host: `github`, `gitlab`, or
+    /// `plain`. Default: auto — the CI environment when its server host
+    /// matches the index host, else `github` for github.com, else `plain`.
+    pub forge: Option<crate::catalog::forge::ForgeKind>,
+
+    /// The index host path segment pointers land under
+    /// (`index/<host>/<namespace>/…`). Default: derived from the
+    /// repository URL. Required when the locator carries no host (a local
+    /// path).
+    pub host: Option<String>,
+
+    /// The forge API base URL (e.g. `https://gitlab.example.com/api/v4`).
+    /// Default: from the host-matched CI environment, else the forge
+    /// convention (`api.github.com`, `<host>/api/v3` on GitHub Enterprise,
+    /// `<host>/api/v4` on GitLab).
+    pub api_url: Option<String>,
+
+    /// The `index/<host>/<namespace>/` the packages land under. Default:
+    /// the CI environment's namespace when the host matches, else (GitHub
+    /// with a token) the authenticated API user's login.
     pub namespace: Option<String>,
 
-    /// The namespace's numeric GitHub account id. Default: resolved live
-    /// from the GitHub API. Set it explicitly for hermetic/offline runs
-    /// against a custom index repository.
+    /// The namespace's numeric owner id on the index host (GitHub account
+    /// id, GitLab namespace id). Default: resolved live from the forge
+    /// API; required for a plain git host or a GitLab host without a
+    /// token. Set it explicitly for hermetic/offline runs.
     pub owner_id: Option<u64>,
 }
 
@@ -423,10 +444,11 @@ pub async fn run(ctx: &Context, args: &PublishArgs) -> anyhow::Result<(PublishRe
             eprintln!("announce: skipped (dry run)");
         } else if let Err(err) = run_announce(ctx, args, &manifest, &entries).await {
             // The publish itself succeeded — keep the report, surface the
-            // announce failure on stderr, and exit Unavailable (69): the
-            // index repository is a remote resource the announce needs.
+            // announce failure on stderr, and classify honestly: git/API
+            // failures exit Unavailable (69), announce misconfiguration
+            // (missing host/namespace/owner id) exits usage (64).
             eprintln!("error: announce failed: {err:#}");
-            return Ok((PublishReport::new(report_entries), ExitCode::Unavailable));
+            return Ok((PublishReport::new(report_entries), classify_error(&err)));
         }
     }
 
@@ -443,8 +465,9 @@ async fn run_announce(
     manifest: &PublishManifest,
     entries: &[PlannedEntry],
 ) -> anyhow::Result<()> {
+    use crate::catalog::forge::{self, CiEnv, ForgeKind};
     use crate::catalog::index_announce::{
-        AnnounceOutcome, AnnouncePackage, AnnounceRequest, DEFAULT_INDEX_REPO, announce, gh_login,
+        AnnounceOutcome, AnnouncePackage, AnnounceRequest, DEFAULT_INDEX_REPO, announce, index_host,
     };
 
     let spec = manifest.announce.as_ref();
@@ -453,14 +476,53 @@ async fn run_announce(
         .clone()
         .or_else(|| spec.and_then(|s| s.repository.clone()))
         .unwrap_or_else(|| DEFAULT_INDEX_REPO.to_string());
-    let namespace = match spec.and_then(|s| s.namespace.clone()) {
+
+    let host = match spec.and_then(|s| s.host.clone()) {
+        Some(host) => host,
+        None => index_host(&repo_url).ok_or_else(|| {
+            super::config_usage(format!(
+                "cannot derive the index host from '{repo_url}': set `[announce] host` \
+                 (the `index/<host>/…` path segment, e.g. `gitlab.example.com`)"
+            ))
+        })?,
+    };
+
+    let ci_env = CiEnv::from_env();
+    let forge = forge::resolve(
+        spec.and_then(|s| s.forge),
+        spec.and_then(|s| s.api_url.clone()),
+        &host,
+        &ci_env,
+    );
+
+    let namespace = match spec
+        .and_then(|s| s.namespace.clone())
+        .or_else(|| forge.ci_namespace.clone())
+    {
         Some(ns) => ns,
-        None => gh_login().await.ok_or_else(|| {
+        None => forge::github_login(&forge).await.ok_or_else(|| {
             super::config_usage(
                 "no announce namespace: set `[announce] namespace` in publish.toml \
-                 or authenticate the `gh` CLI",
+                 (auto-detection needs a host-matched CI environment or a GitHub \
+                 API token)",
             )
         })?,
+    };
+
+    let owner_id = match spec.and_then(|s| s.owner_id) {
+        Some(id) => id,
+        None => match (forge.kind, forge.token.is_some()) {
+            (ForgeKind::GitHub, _) | (ForgeKind::GitLab, true) => {
+                super::grim(forge::lookup_owner_id(&forge, &namespace).await)?
+            }
+            _ => {
+                return Err(super::config_usage(format!(
+                    "no announce owner id: announcing to '{host}' cannot resolve one \
+                     from a forge API — set `[announce] owner_id` (the numeric \
+                     account/namespace id on that host)"
+                )));
+            }
+        },
     };
 
     let access = super::access_seam(ctx)?;
@@ -485,8 +547,10 @@ async fn run_announce(
 
     let request = AnnounceRequest {
         repo_url: repo_url.clone(),
+        host,
         namespace,
-        owner_id: spec.and_then(|s| s.owner_id),
+        owner_id,
+        forge,
         packages,
     };
     match super::grim(announce(&request).await)? {
@@ -1189,6 +1253,33 @@ mod tests {
         .unwrap();
         let err = validate_manifest(&manifest, dir, Path::new("test.toml"), &[], None);
         assert!(err.is_err(), "missing explicit path override must be rejected");
+    }
+
+    // ── [announce] table: forge fields round-trip, unknown keys rejected ──
+
+    #[test]
+    fn announce_spec_deserializes_forge_fields() {
+        let manifest: PublishManifest = toml::from_str(
+            "registry = \"r.example\"\n\n[announce]\nrepository = \"https://gitlab.example.com/platform/index.git\"\nforge = \"gitlab\"\nhost = \"gitlab.example.com\"\napi_url = \"https://gitlab.example.com/api/v4\"\nnamespace = \"platform\"\nowner_id = 44\n",
+        )
+        .unwrap();
+        let spec = manifest.announce.expect("announce table parsed");
+        assert_eq!(spec.forge, Some(crate::catalog::forge::ForgeKind::GitLab));
+        assert_eq!(spec.host.as_deref(), Some("gitlab.example.com"));
+        assert_eq!(spec.api_url.as_deref(), Some("https://gitlab.example.com/api/v4"));
+        assert_eq!(spec.owner_id, Some(44));
+    }
+
+    #[test]
+    fn announce_spec_rejects_unknown_keys_and_forges() {
+        assert!(
+            toml::from_str::<PublishManifest>("registry = \"r\"\n\n[announce]\nunknown_key = \"x\"\n").is_err(),
+            "deny_unknown_fields must reject unknown announce keys"
+        );
+        assert!(
+            toml::from_str::<PublishManifest>("registry = \"r\"\n\n[announce]\nforge = \"svn\"\n").is_err(),
+            "unknown forge kinds must be rejected"
+        );
     }
 
     // ── validate_manifest: pin=true on non-bundle rejected ────────────────

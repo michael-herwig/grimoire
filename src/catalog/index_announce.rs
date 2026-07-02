@@ -4,11 +4,12 @@
 //! Package-index announcement — the write side of [`super::index_source`].
 //!
 //! `grim publish --announce` records published packages in a package-index
-//! git repository: clone, write `index/github.com/<ns>/<pkg>/metadata.json`
-//! pointers, commit on a deterministic topic branch, push, and (on
-//! github.com, when the `gh` CLI is available) open a pull request. Any
-//! other git host gets the pushed branch — open the merge request there
-//! (GitLab et al. print a ready-made MR URL on push).
+//! git repository: clone, write `index/<host>/<ns>/<pkg>/metadata.json`
+//! pointers, commit on a deterministic topic branch, push, and open the
+//! pull/merge request through the resolved forge API ([`super::forge`],
+//! GitHub or GitLab — enterprise instances included, no CLI dependency).
+//! A GitLab host without an API token gets the MR via git push options
+//! (`-o merge_request.create`); a plain git host gets the pushed branch.
 //!
 //! The announced metadata is the phone-book pointer only (name, kind,
 //! tagless ref, description, ownership) — never versions. Re-announcing
@@ -17,8 +18,21 @@
 
 use std::path::Path;
 
+use super::forge::{ForgeContext, ForgeKind};
+
 /// The default public index announcements target.
 pub const DEFAULT_INDEX_REPO: &str = "https://github.com/grimoire-rs/index";
+
+/// Derive the index host path segment (`index/<host>/…`) from the index
+/// repository locator: strip a `git+` transport prefix, normalize the
+/// remote shape (https / ssh / scp-like, credentials and ports stripped),
+/// and take the lowercased host. `None` for locators without a host (a
+/// local path, `file://`) — those need an explicit `[announce] host`.
+pub fn index_host(repo_url: &str) -> Option<String> {
+    let url = repo_url.strip_prefix("git+").unwrap_or(repo_url);
+    let https = crate::oci::git_provenance::normalize_remote_url(url)?;
+    https.strip_prefix("https://")?.split('/').next().map(str::to_lowercase)
+}
 
 /// One package pointer to announce.
 #[derive(Debug, Clone)]
@@ -40,11 +54,16 @@ pub struct AnnouncePackage {
 pub struct AnnounceRequest {
     /// The index git repository (https clone URL or local path).
     pub repo_url: String,
-    /// The `index/github.com/<namespace>/` the packages land under.
+    /// The index host path segment — pointers land under
+    /// `index/<host>/<namespace>/`.
+    pub host: String,
+    /// The `index/<host>/<namespace>/` the packages land under.
     pub namespace: String,
-    /// The namespace's numeric GitHub account id. `None` ⇒ resolved live
-    /// from the GitHub API.
-    pub owner_id: Option<u64>,
+    /// The namespace's numeric owner id on the index host (resolved by the
+    /// caller — explicitly configured or looked up via the forge API).
+    pub owner_id: u64,
+    /// The resolved forge fronting the index repository.
+    pub forge: ForgeContext,
     /// The packages to announce.
     pub packages: Vec<AnnouncePackage>,
 }
@@ -52,9 +71,10 @@ pub struct AnnounceRequest {
 /// What the announce achieved.
 #[derive(Debug, PartialEq, Eq)]
 pub enum AnnounceOutcome {
-    /// A pull request was opened (github.com + `gh`).
+    /// A pull/merge request was opened — via the forge API, or by a forge
+    /// honoring `merge_request.create` push options.
     PullRequest {
-        /// The PR URL as printed by `gh`.
+        /// The PR/MR URL.
         url: String,
     },
     /// The topic branch was pushed; open the merge request on the host.
@@ -99,11 +119,6 @@ pub enum AnnounceError {
 /// [`AnnounceError`] for a git clone/commit/push failure, a local I/O
 /// failure, or a failed owner-id lookup.
 pub async fn announce(request: &AnnounceRequest) -> Result<AnnounceOutcome, AnnounceError> {
-    let owner_id = match request.owner_id {
-        Some(id) => id,
-        None => lookup_owner_id(&request.namespace).await?,
-    };
-
     let workdir = tempfile::tempdir()?;
     let clone = workdir.path().join("index");
     git(
@@ -126,8 +141,14 @@ pub async fn announce(request: &AnnounceRequest) -> Result<AnnounceOutcome, Anno
     // tempdir every run, so absolute paths would break determinism.
     let mut rendered: Vec<(String, String)> = Vec::new();
     for pkg in &request.packages {
-        let relative = format!("index/github.com/{}/{}/metadata.json", request.namespace, pkg.name);
-        rendered.push((relative, metadata_json(pkg, &request.namespace, owner_id)));
+        let relative = format!(
+            "index/{}/{}/{}/metadata.json",
+            request.host, request.namespace, pkg.name
+        );
+        rendered.push((
+            relative,
+            metadata_json(pkg, &request.namespace, request.owner_id, request.forge.kind),
+        ));
     }
     let branch = branch_name(&request.namespace, &rendered);
 
@@ -164,16 +185,71 @@ pub async fn announce(request: &AnnounceRequest) -> Result<AnnounceOutcome, Anno
     )
     .await?;
 
-    // Force-push our own topic branch (deterministic name ⇒ safe to move).
-    git(Some(&clone), "push", &["push", "--quiet", "--force", "origin", &branch]).await?;
-
-    // On github.com with `gh` available, open the PR right away.
-    if request.repo_url.contains("github.com")
-        && let Some(url) = try_gh_pr(&clone, &branch, &message).await
-    {
-        return Ok(AnnounceOutcome::PullRequest { url });
+    // Force-push our own topic branch (deterministic name ⇒ safe to move),
+    // then open the change request the best way the forge allows.
+    let api_capable =
+        request.forge.token.is_some() && matches!(request.forge.kind, ForgeKind::GitHub | ForgeKind::GitLab);
+    if api_capable || request.forge.kind == ForgeKind::GitHub {
+        git(Some(&clone), "push", &["push", "--quiet", "--force", "origin", &branch]).await?;
+        if api_capable
+            && let Some(url) =
+                super::forge::create_change_request(&request.forge, &request.repo_url, &branch, &message).await
+        {
+            return Ok(AnnounceOutcome::PullRequest { url });
+        }
+        return Ok(AnnounceOutcome::BranchPushed { branch });
     }
-    Ok(AnnounceOutcome::BranchPushed { branch })
+
+    // GitLab without a token, or a plain git host: ask the server to open
+    // the MR via push options (native GitLab feature, harmless elsewhere).
+    // A server without push-options support fails the whole push — retry
+    // once as a plain push rather than sniffing localized git stderr.
+    let title_option = format!("merge_request.title={message}");
+    let options_push = git_stderr(
+        &clone,
+        "push",
+        &[
+            "push",
+            "--force",
+            "-o",
+            "merge_request.create",
+            "-o",
+            &title_option,
+            "origin",
+            &branch,
+        ],
+    )
+    .await;
+    match options_push {
+        Ok(stderr) => Ok(match merge_request_url(&stderr) {
+            Some(url) => AnnounceOutcome::PullRequest { url },
+            None => AnnounceOutcome::BranchPushed { branch },
+        }),
+        Err(_) => {
+            // `?` propagates the retry's error — same root cause when the
+            // push itself (not the options) is broken.
+            git(Some(&clone), "push", &["push", "--quiet", "--force", "origin", &branch]).await?;
+            Ok(AnnounceOutcome::BranchPushed { branch })
+        }
+    }
+}
+
+/// The created/updated MR URL from a `merge_request.create` push's stderr:
+/// an `http(s)://` token containing `/merge_requests/` whose final path
+/// segment is all digits. Deliberately rejects the `/merge_requests/new?…`
+/// *suggestion* URL a plain GitLab push prints.
+fn merge_request_url(push_stderr: &str) -> Option<String> {
+    push_stderr
+        .split_whitespace()
+        .find(|token| {
+            (token.starts_with("https://") || token.starts_with("http://"))
+                && token.contains("/merge_requests/")
+                && token
+                    .rsplit('/')
+                    .next()
+                    .is_some_and(|last| !last.is_empty() && last.bytes().all(|b| b.is_ascii_digit()))
+        })
+        .map(str::to_string)
 }
 
 /// Read the pointer metadata (description + HTTPS source URL) back from
@@ -218,54 +294,24 @@ pub async fn pointer_metadata(
     )
 }
 
-/// Resolve the namespace's GitHub login when none is configured: the
-/// authenticated `gh` user, if the CLI is present and logged in.
-pub async fn gh_login() -> Option<String> {
-    let output = tokio::process::Command::new("gh")
-        .args(["api", "user", "--jq", ".login"])
-        .output()
-        .await
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let login = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!login.is_empty()).then_some(login)
-}
-
-/// GET the namespace's immutable numeric account id from the GitHub API.
-async fn lookup_owner_id(namespace: &str) -> Result<u64, AnnounceError> {
-    let wrap = |source: Box<dyn std::error::Error + Send + Sync>| AnnounceError::OwnerLookup {
-        namespace: namespace.to_string(),
-        source,
-    };
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .user_agent(concat!("grim/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|e| wrap(e.into()))?;
-    let response = client
-        .get(format!("https://api.github.com/users/{namespace}"))
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .await
-        .and_then(reqwest::Response::error_for_status)
-        .map_err(|e| wrap(e.into()))?;
-    let body: serde_json::Value = response.json().await.map_err(|e| wrap(e.into()))?;
-    body.get("id")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| wrap("response carries no numeric id".into()))
-}
-
 /// Render the metadata.json pointer for `pkg` (index spec v1).
-fn metadata_json(pkg: &AnnouncePackage, namespace: &str, owner_id: u64) -> String {
+///
+/// The owner key is `github` for GitHub-forge pointers (spec-v1 compatible
+/// with the default index's validator) and the generic `login` for any
+/// other host — the pointer's `index/<host>/` segment carries the forge
+/// context.
+fn metadata_json(pkg: &AnnouncePackage, namespace: &str, owner_id: u64, forge: ForgeKind) -> String {
+    let owner_key = match forge {
+        ForgeKind::GitHub => "github",
+        ForgeKind::GitLab | ForgeKind::Plain => "login",
+    };
     let mut value = serde_json::json!({
         "schema": 1,
         "name": pkg.name,
         "kind": pkg.kind,
         "ref": pkg.reference,
         "description": pkg.description,
-        "owner": { "github": namespace, "id": owner_id },
+        "owner": { owner_key: namespace, "id": owner_id },
     });
     if let Some(repo) = &pkg.repository_url {
         value["repository"] = serde_json::Value::String(repo.clone());
@@ -296,10 +342,23 @@ async fn git(cwd: Option<&Path>, action: &'static str, args: &[&str]) -> Result<
 
 /// Run a git subprocess in `cwd` and return its stdout.
 async fn git_output(cwd: &Path, action: &'static str, args: &[&str]) -> Result<String, AnnounceError> {
-    git_output_impl(Some(cwd), action, args).await
+    let output = git_output_impl(Some(cwd), action, args).await?;
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-async fn git_output_impl(cwd: Option<&Path>, action: &'static str, args: &[&str]) -> Result<String, AnnounceError> {
+/// Run a git subprocess in `cwd` and return its stderr — where git remotes
+/// print their responses (e.g. GitLab's "View merge request" line after a
+/// `merge_request.create` push option).
+async fn git_stderr(cwd: &Path, action: &'static str, args: &[&str]) -> Result<String, AnnounceError> {
+    let output = git_output_impl(Some(cwd), action, args).await?;
+    Ok(String::from_utf8_lossy(&output.stderr).into_owned())
+}
+
+async fn git_output_impl(
+    cwd: Option<&Path>,
+    action: &'static str,
+    args: &[&str],
+) -> Result<std::process::Output, AnnounceError> {
     let mut cmd = tokio::process::Command::new("git");
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
@@ -316,37 +375,7 @@ async fn git_output_impl(cwd: Option<&Path>, action: &'static str, args: &[&str]
             detail: String::from_utf8_lossy(&output.stderr).trim().to_string(),
         });
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-/// Best-effort `gh pr create` for a pushed branch; `None` when `gh` is
-/// unavailable, unauthenticated, or the PR cannot be created (e.g. one
-/// already exists — the push above still updated it).
-async fn try_gh_pr(clone: &Path, branch: &str, title: &str) -> Option<String> {
-    let output = tokio::process::Command::new("gh")
-        .current_dir(clone)
-        .args([
-            "pr",
-            "create",
-            "--head",
-            branch,
-            "--title",
-            title,
-            "--body",
-            "Automated announcement via `grim publish --announce`.",
-        ])
-        .output()
-        .await
-        .ok()?;
-    if !output.status.success() {
-        tracing::info!(
-            "gh pr create did not succeed ({}); the branch is pushed — open the PR manually",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        return None;
-    }
-    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!url.is_empty()).then_some(url)
+    Ok(output)
 }
 
 #[cfg(test)]
@@ -365,7 +394,7 @@ mod tests {
 
     #[test]
     fn metadata_json_matches_index_spec() {
-        let rendered = metadata_json(&pkg("code-review"), "acme", 42);
+        let rendered = metadata_json(&pkg("code-review"), "acme", 42, ForgeKind::GitHub);
         let value: serde_json::Value = serde_json::from_str(&rendered).expect("valid JSON");
         assert_eq!(value["schema"], 1);
         assert_eq!(value["name"], "code-review");
@@ -373,15 +402,27 @@ mod tests {
         assert_eq!(value["ref"], "ghcr.io/acme/skills/code-review");
         assert_eq!(value["owner"]["github"], "acme");
         assert_eq!(value["owner"]["id"], 42);
+        assert!(value["owner"].get("login").is_none());
         assert_eq!(value["repository"], "https://github.com/acme/skills");
         assert!(rendered.ends_with('\n'), "trailing newline for clean diffs");
+    }
+
+    #[test]
+    fn metadata_json_uses_generic_login_key_off_github() {
+        for forge in [ForgeKind::GitLab, ForgeKind::Plain] {
+            let rendered = metadata_json(&pkg("x"), "platform/ai", 44, forge);
+            let value: serde_json::Value = serde_json::from_str(&rendered).expect("valid JSON");
+            assert_eq!(value["owner"]["login"], "platform/ai", "{forge:?}");
+            assert_eq!(value["owner"]["id"], 44, "{forge:?}");
+            assert!(value["owner"].get("github").is_none(), "{forge:?}");
+        }
     }
 
     #[test]
     fn metadata_json_omits_absent_repository() {
         let mut p = pkg("x");
         p.repository_url = None;
-        let value: serde_json::Value = serde_json::from_str(&metadata_json(&p, "acme", 1)).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&metadata_json(&p, "acme", 1, ForgeKind::GitHub)).unwrap();
         assert!(value.get("repository").is_none());
     }
 
@@ -392,5 +433,45 @@ mod tests {
         assert_eq!(branch_name("acme", &a), branch_name("acme", &a));
         assert_ne!(branch_name("acme", &a), branch_name("acme", &b));
         assert!(branch_name("acme", &a).starts_with("announce/acme-"));
+    }
+
+    #[test]
+    fn index_host_derives_from_locator_shapes() {
+        for (locator, expected) in [
+            ("https://github.com/grimoire-rs/index", Some("github.com")),
+            (
+                "https://gitlab.example.com/platform/index.git",
+                Some("gitlab.example.com"),
+            ),
+            (
+                "git+https://gitlab.example.com/platform/index.git",
+                Some("gitlab.example.com"),
+            ),
+            ("ssh://git@gitlab.corp:2222/platform/index.git", Some("gitlab.corp")),
+            ("git@GitLab.Example.com:platform/index.git", Some("gitlab.example.com")),
+            (
+                "https://oauth2:token@gitlab.example.com/g/index.git",
+                Some("gitlab.example.com"),
+            ),
+            ("/tmp/local-index.git", None),
+            ("file:///tmp/local-index.git", None),
+        ] {
+            assert_eq!(index_host(locator).as_deref(), expected, "{locator}");
+        }
+    }
+
+    #[test]
+    fn merge_request_url_extracts_created_mr_only() {
+        let created = "remote: View merge request for announce/acme-12345678:\n\
+                       remote:   https://gitlab.example.com/platform/index/-/merge_requests/7\n";
+        assert_eq!(
+            merge_request_url(created).as_deref(),
+            Some("https://gitlab.example.com/platform/index/-/merge_requests/7")
+        );
+
+        let suggestion = "remote: To create a merge request for announce/acme-12345678, visit:\n\
+                          remote:   https://gitlab.example.com/platform/index/-/merge_requests/new?merge_request%5Bsource_branch%5D=announce\n";
+        assert_eq!(merge_request_url(suggestion), None);
+        assert_eq!(merge_request_url(""), None);
     }
 }
