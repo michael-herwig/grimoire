@@ -130,7 +130,7 @@ pub struct PublishEntrySpec {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PublishManifest {
-    /// The OCI registry host to publish to (e.g. `grim.ocx.sh`). May be
+    /// The OCI registry host to publish to (e.g. `registry.example`). May be
     /// overridden by the `--registry` flag.
     pub registry: String,
 
@@ -243,7 +243,9 @@ fn validate_registry_value(registry: &str, manifest_path: &std::path::Path) -> a
     if registry.is_empty() || registry.contains('/') {
         return Err(data_error_at(
             manifest_path,
-            format!("registry '{registry}': must be a plain registry host (e.g. 'grim.ocx.sh' or 'localhost:5000')"),
+            format!(
+                "registry '{registry}': must be a plain registry host (e.g. 'registry.example' or 'localhost:5000')"
+            ),
         ));
     }
     Ok(())
@@ -950,7 +952,7 @@ mod tests {
     #[test]
     fn manifest_deserializes_all_kinds() {
         let toml = r#"
-            registry = "grim.ocx.sh"
+            registry = "registry.example"
 
             [skills.grim-usage]
             version = "0.1.1"
@@ -967,7 +969,7 @@ mod tests {
             pin = true
         "#;
         let manifest: PublishManifest = toml::from_str(toml).unwrap();
-        assert_eq!(manifest.registry, "grim.ocx.sh");
+        assert_eq!(manifest.registry, "registry.example");
         assert_eq!(manifest.skills.len(), 1);
         assert_eq!(manifest.rules.len(), 1);
         assert_eq!(manifest.agents.len(), 1);
@@ -981,7 +983,7 @@ mod tests {
     #[test]
     fn manifest_rejects_unknown_fields() {
         let toml = r#"
-            registry = "grim.ocx.sh"
+            registry = "registry.example"
             unknown_field = "oops"
         "#;
         assert!(toml::from_str::<PublishManifest>(toml).is_err());
@@ -990,7 +992,7 @@ mod tests {
     #[test]
     fn entry_spec_rejects_unknown_fields() {
         let toml = r#"
-            registry = "grim.ocx.sh"
+            registry = "registry.example"
 
             [skills.foo]
             version = "0.1.0"
@@ -1002,7 +1004,7 @@ mod tests {
     #[test]
     fn entry_spec_pin_defaults_false() {
         let toml = r#"
-            registry = "grim.ocx.sh"
+            registry = "registry.example"
 
             [bundles.foo]
             version = "0.1.0"
@@ -1313,7 +1315,7 @@ mod tests {
 
     #[test]
     fn registry_value_accepts_host_and_host_with_port() {
-        validate_registry_value("grim.ocx.sh", Path::new("t.toml")).expect("plain host valid");
+        validate_registry_value("registry.example", Path::new("t.toml")).expect("plain host valid");
         validate_registry_value("localhost:5000", Path::new("t.toml")).expect("host:port valid");
     }
 
@@ -1459,7 +1461,7 @@ mod tests {
         // Backward compat: a manifest with neither field parses, and
         // `entry_repository` falls back to the kind-subdir default.
         let m: PublishManifest =
-            toml::from_str("registry = \"grim.ocx.sh\"\n\n[skills.s]\nversion = \"1.0.0\"\n").unwrap();
+            toml::from_str("registry = \"registry.example\"\n\n[skills.s]\nversion = \"1.0.0\"\n").unwrap();
         assert!(m.repository_prefix.is_none());
         assert!(m.skills["s"].repository.is_none());
     }

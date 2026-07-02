@@ -292,7 +292,9 @@ mod tests {
     #[test]
     fn no_registry_anywhere_browses_builtin_fallback() {
         // No --registry, no env, no config default anywhere ⇒ the built-in
-        // fallback registry is the sole browse target (never an error).
+        // public package index is the sole browse target (never an error):
+        // GHCR gates `_catalog`, so a bare registry fallback would browse
+        // empty — the index lists the ecosystem instead.
         let tmp = tempfile::tempdir().unwrap();
         let cfg = tmp.path().join("grimoire.toml");
         std::fs::write(&cfg, "[options]\n").unwrap();
@@ -301,7 +303,8 @@ mod tests {
         a.config = Some(cfg);
         let (registries, ..) = resolve_scope(&ctx, &a);
         assert_eq!(registries.len(), 1);
-        assert_eq!(registries[0].url, crate::command::FALLBACK_REGISTRY);
+        assert_eq!(registries[0].url, crate::command::FALLBACK_INDEX);
+        assert!(registries[0].kind.is_index());
     }
 
     #[test]

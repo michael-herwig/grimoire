@@ -154,18 +154,27 @@ pub fn resolve_registries(
 
     // 3. Legacy single default registry: env > project > global > fallback.
     // The env var is a default (tier 3) and is NOT consulted when
-    // `[[registries]]` are declared (tier 2 wins above).
-    let url = env_default
+    // `[[registries]]` are declared (tier 2 wins above). Configured values
+    // are always registries; only the BUILT-IN fallback may be an index
+    // locator (the public package index) — classify it so an unconfigured
+    // browse lists through the index instead of an empty `_catalog`.
+    if let Some(url) = env_default
         .or(project_default)
         .or(global_default)
         .filter(|s| !s.is_empty())
-        .unwrap_or(fallback)
-        .to_string();
+    {
+        return vec![ResolvedRegistry {
+            url: url.to_string(),
+            alias: None,
+            is_default: true,
+            kind: SourceKind::Registry,
+        }];
+    }
     vec![ResolvedRegistry {
-        url,
+        url: fallback.to_string(),
         alias: None,
         is_default: true,
-        kind: SourceKind::Registry,
+        kind: classify_index(fallback).unwrap_or(SourceKind::Registry),
     }]
 }
 
@@ -179,13 +188,16 @@ fn normalize_primary(registries: &mut [ResolvedRegistry]) {
     }
 }
 
-/// The primary registry's url: the `is_default` entry, else the first, else
-/// the empty string (an empty set is never produced by [`resolve_registries`]).
+/// The primary registry's url for short-id expansion: the `is_default`
+/// entry when it is a *registry* source, else the first registry-kind
+/// entry, else the empty string. Index sources never expand short ids —
+/// their locator is not a registry host — so a set holding only index
+/// sources yields `""` (parsing then surfaces the missing registry).
 pub fn primary_registry(registries: &[ResolvedRegistry]) -> &str {
     registries
         .iter()
-        .find(|r| r.is_default)
-        .or_else(|| registries.first())
+        .find(|r| r.is_default && r.kind == SourceKind::Registry)
+        .or_else(|| registries.iter().find(|r| r.kind == SourceKind::Registry))
         .map(|r| r.url.as_str())
         .unwrap_or("")
 }
@@ -275,7 +287,7 @@ mod tests {
             None,
             &[],
             None,
-            "grim.ocx.sh",
+            "registry.example",
             None,
         );
         assert_eq!(set.len(), 2);
@@ -289,9 +301,9 @@ mod tests {
     fn invalid_entry_with_neither_url_nor_index_is_skipped() {
         // Programmatic (unvalidated) configs never fabricate an empty source.
         let empty = RegistryConfig::default();
-        let set = resolve_registries(&[], &[empty], None, &[], None, "grim.ocx.sh", None);
+        let set = resolve_registries(&[], &[empty], None, &[], None, "registry.example", None);
         assert_eq!(set.len(), 1, "falls through to the legacy fallback tier");
-        assert_eq!(set[0].url, "grim.ocx.sh");
+        assert_eq!(set[0].url, "registry.example");
     }
 
     #[test]
@@ -302,7 +314,7 @@ mod tests {
             Some("proj.example"),
             &[],
             None,
-            "grim.ocx.sh",
+            "registry.example",
             None,
         );
         assert_eq!(set.len(), 1);
@@ -320,7 +332,7 @@ mod tests {
             Some("proj.example"),
             &[],
             None,
-            "grim.ocx.sh",
+            "registry.example",
             Some("env.example"),
         );
         assert_eq!(set.len(), 2);
@@ -345,7 +357,7 @@ mod tests {
             None,
             &[],
             None,
-            "grim.ocx.sh",
+            "registry.example",
             None,
         );
         assert_eq!(set.len(), 2);
@@ -364,7 +376,7 @@ mod tests {
             None,
             &[],
             None,
-            "grim.ocx.sh",
+            "registry.example",
             None,
         );
         assert_eq!(set.len(), 1);
@@ -379,7 +391,7 @@ mod tests {
             Some("proj.example"), // ignored when [[registries]] present
             &[rc(Some("corp"), "registry.corp/team", false)],
             None,
-            "grim.ocx.sh",
+            "registry.example",
             None,
         );
         assert_eq!(set.len(), 2);
@@ -401,7 +413,7 @@ mod tests {
             None,
             &[],
             None,
-            "grim.ocx.sh",
+            "registry.example",
             None,
         );
         assert_eq!(primary_registry(&set), "registry.corp/team");
@@ -417,7 +429,7 @@ mod tests {
             None,
             &[rc(Some("b"), "ghcr.io/acme", true)], // same url, global tier
             None,
-            "grim.ocx.sh",
+            "registry.example",
             None,
         );
         assert_eq!(set.len(), 1);
@@ -432,7 +444,7 @@ mod tests {
             Some("proj.example"),
             &[],
             Some("glob.example"),
-            "grim.ocx.sh",
+            "registry.example",
             None,
         );
         assert_eq!(set.len(), 1);
@@ -442,14 +454,14 @@ mod tests {
 
     #[test]
     fn no_registries_no_default_uses_fallback() {
-        let set = resolve_registries(&[], &[], None, &[], None, "grim.ocx.sh", None);
+        let set = resolve_registries(&[], &[], None, &[], None, "registry.example", None);
         assert_eq!(set.len(), 1);
-        assert_eq!(set[0].url, "grim.ocx.sh");
+        assert_eq!(set[0].url, "registry.example");
     }
 
     #[test]
     fn reference_explicit_registry_parses_as_is() {
-        let set = resolve_registries(&[], &[], Some("ghcr.io/acme"), &[], None, "grim.ocx.sh", None);
+        let set = resolve_registries(&[], &[], Some("ghcr.io/acme"), &[], None, "registry.example", None);
         let id = resolve_reference("ghcr.io/other/x:1", &set).expect("explicit parses");
         assert_eq!(id.registry(), "ghcr.io");
         assert_eq!(id.to_string(), "ghcr.io/other/x:1");
@@ -457,7 +469,7 @@ mod tests {
 
     #[test]
     fn reference_short_id_expands_against_primary() {
-        let set = resolve_registries(&[], &[], Some("ghcr.io/acme"), &[], None, "grim.ocx.sh", None);
+        let set = resolve_registries(&[], &[], Some("ghcr.io/acme"), &[], None, "registry.example", None);
         let id = resolve_reference("code-review:stable", &set).expect("short id expands");
         assert_eq!(id.to_string(), "ghcr.io/acme/code-review:stable");
     }
@@ -470,7 +482,7 @@ mod tests {
             None,
             &[],
             None,
-            "grim.ocx.sh",
+            "registry.example",
             None,
         );
         let id = resolve_reference("corp/internal-tool:1", &set).expect("alias substitutes");
@@ -494,7 +506,7 @@ mod tests {
             None,
             &[],
             None,
-            "grim.ocx.sh",
+            "registry.example",
             None,
         );
         let id = resolve_reference("code-review:stable", &set).expect("repo:tag expands against primary");
@@ -505,7 +517,7 @@ mod tests {
     fn reference_unknown_alias_prefix_expands_against_primary() {
         // `acme/x` where `acme` is not a configured alias is a multi-segment
         // repository path under the primary registry, exactly as today.
-        let set = resolve_registries(&[], &[], Some("ghcr.io"), &[], None, "grim.ocx.sh", None);
+        let set = resolve_registries(&[], &[], Some("ghcr.io"), &[], None, "registry.example", None);
         let id = resolve_reference("acme/x:1", &set).expect("repo path expands");
         assert_eq!(id.to_string(), "ghcr.io/acme/x:1");
     }
@@ -526,7 +538,7 @@ mod tests {
             None,
             &[],
             None,
-            "grim.ocx.sh",
+            "registry.example",
             Some("env.example"), // env_default must be ignored when [[registries]] present
         );
         assert_eq!(
@@ -552,7 +564,7 @@ mod tests {
             Some("proj.example"),
             &[],
             Some("glob.example"),
-            "grim.ocx.sh",
+            "registry.example",
             Some("env.example"),
         );
         assert_eq!(set.len(), 1);
@@ -573,7 +585,7 @@ mod tests {
             None,
             &[],
             None,
-            "grim.ocx.sh",
+            "registry.example",
             Some("env.example"),
         );
         assert_eq!(set.len(), 1);
@@ -589,7 +601,7 @@ mod tests {
             Some("proj.example"),
             &[],
             Some("glob.example"),
-            "grim.ocx.sh",
+            "registry.example",
             Some("env.example"),
         );
         assert_eq!(

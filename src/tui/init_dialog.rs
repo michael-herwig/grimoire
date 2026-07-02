@@ -297,14 +297,14 @@ mod tests {
     use super::*;
 
     fn dialog() -> InitDialog {
-        InitDialog::new("./grimoire.toml", "project", "grim.ocx.sh")
+        InitDialog::new("./grimoire.toml", "project", "registry.example")
     }
 
     #[test]
     fn new_prefills_input_with_default_registry_on_confirm_step() {
         let d = dialog();
         assert_eq!(d.step, InitDialogStep::Confirm);
-        assert_eq!(d.input, "grim.ocx.sh", "the effective default pre-fills the input");
+        assert_eq!(d.input, "registry.example", "the effective default pre-fills the input");
     }
 
     #[test]
@@ -317,7 +317,7 @@ mod tests {
         assert_eq!(
             d.handle(InitDialogInput::Enter),
             Some(InitDialogOutcome::Confirmed {
-                registry: Some("grim.ocx.sh".to_string()),
+                registry: Some("registry.example".to_string()),
             })
         );
     }
@@ -345,7 +345,7 @@ mod tests {
         assert_eq!(d.handle(InitDialogInput::Char('x')), None);
         assert_eq!(d.step, InitDialogStep::Confirm, "stray keys do not advance");
         assert_eq!(d.handle(InitDialogInput::Backspace), None);
-        assert_eq!(d.input, "grim.ocx.sh", "backspace edits only the registry step");
+        assert_eq!(d.input, "registry.example", "backspace edits only the registry step");
     }
 
     #[test]
@@ -353,7 +353,7 @@ mod tests {
         let mut d = dialog();
         d.handle(InitDialogInput::Enter);
         // Clear the pre-fill, then type a custom registry.
-        for _ in 0.."grim.ocx.sh".len() {
+        for _ in 0.."registry.example".len() {
             d.handle(InitDialogInput::Backspace);
         }
         assert_eq!(d.input, "");

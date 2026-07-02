@@ -22,8 +22,8 @@ wins:
 2. `GRIM_DEFAULT_REGISTRY` environment variable
 3. project config `[[registries]]` primary (or legacy `[options].default_registry` when no `[[registries]]` declared)
 4. global config `[[registries]]` primary (or legacy `[options].default_registry`)
-5. the built-in default `grim.ocx.sh` (applies only when nothing above
-   is set)
+5. the built-in fallback registry `ghcr.io/grimoire-rs` (applies only
+   when nothing above is set; first-party packages live there)
 
 Whatever default applied, the expanded reference is persisted **fully
 qualified** in `grimoire.toml` and the lock — so a config never depends
@@ -55,11 +55,13 @@ instead of one. In the TUI each registry becomes its own collapsible tree
 root, with the registry prefix shown only when more than one registry
 resolves.
 
-Each entry:
+Each entry declares **exactly one** of `url` (a plain OCI registry) or
+`index` (a package index) — never both:
 
 | Field | Required | Purpose |
 |-------|----------|---------|
-| `url` | yes | Registry host and optional namespace — same form as `[options].default_registry` |
+| `url` | one of `url`/`index` | Registry host and optional namespace — same form as `[options].default_registry`; browsed via `_catalog` |
+| `index` | one of `url`/`index` | Package index locator (see [Index Sources](#index-sources)) |
 | `alias` | no | Short name for qualified `alias/repo` references |
 | `default` | no | Marks the primary registry for short-id expansion; first entry is primary when none set it |
 
@@ -87,12 +89,58 @@ browse):
    `GRIM_DEFAULT_REGISTRY` does **not** collapse or restrict this set.
 3. Single-default fallback (no `[[registries]]` declared): `GRIM_DEFAULT_REGISTRY`
    → project `[options].default_registry` → global `[options].default_registry`
-   → built-in `grim.ocx.sh`.
+   → built-in browse fallback: the public package index at
+   `https://index.grimoire.rs` (a bare registry fallback would browse
+   empty — GHCR gates `_catalog`).
 
 A config with no `[[registries]]` behaves exactly as before — the
 `[options].default_registry` / `GRIM_DEFAULT_REGISTRY` / `--registry` /
 built-in fallback chain still applies (see [Registry Resolution](#registry-resolution)).
 Confirm with `grim --help` and `grim search --help`.
+
+### Index Sources {#index-sources}
+
+A **package index** is a phone book, not a catalog: it stores pointers
+(name, kind, OCI ref, description, ownership) for packages that live on
+possibly many different registries, and it never stores versions — `grim`
+still resolves tags live from each pointer's registry at install time, so
+a stale index can never serve a stale version. Registries such as GHCR,
+Docker Hub, and GitLab SaaS gate the `_catalog` endpoint `url` entries
+need; an `index` entry sidesteps that gap. The default public index is
+`https://index.grimoire.rs` ([grimoire-rs/index][index-repo] on GitHub).
+
+Two transports, chosen by the locator's shape:
+
+| Locator shape | Transport |
+|---|---|
+| `http://…`, `https://…` | Static files — fetches `<base>/all.json` |
+| `git+…`, `ssh://…`, `git@…`, or ending in `.git` | Git — shallow-clones and walks `index/**/metadata.json` |
+
+```toml
+[[registries]]
+alias = "hub"
+index = "https://index.grimoire.rs"      # static-file transport
+default = true
+
+[[registries]]
+alias = "team"
+index = "https://gitlab.com/acme/index.git"  # git transport
+```
+
+CLI equivalent:
+
+```sh
+grim config registry add hub --index https://index.grimoire.rs --default
+```
+
+`url` and `index` set together on one entry is a config error (exit 78);
+a locator that matches neither transport shape is a data error (exit 65).
+Both transports share the regular catalog cache (`$GRIM_HOME/catalog/`,
+1-hour TTL, `--refresh`, offline degradation) and browse exactly like a
+`url` entry — search, TUI, and MCP treat index and registry sources
+alike. `grim publish --announce` is the write side: it publishes
+pointers into an index repository rather than reading them — see
+[references/publish.md](publish.md#announce).
 
 ## Managing Config {#managing-config}
 
@@ -116,7 +164,8 @@ lock on every change.
 - **Registries** use lifecycle verbs under `grim config registry`:
 
   ```sh
-  grim config registry add acme --url ghcr.io/acme   # create an entry (--url required)
+  grim config registry add acme --url ghcr.io/acme        # registry entry (needs --url XOR --index)
+  grim config registry add hub --index https://index.grimoire.rs  # index entry — see Index Sources
   grim config registry use acme                       # set default, clearing all others atomically
   grim config registry list                           # all entries in this scope
   grim config registry rm  acme
@@ -288,8 +337,11 @@ Confirm current flags with `grim mcp --help`.
 > the registry exposing the `_catalog` endpoint. Registries such as GHCR,
 > Docker Hub, and the GitLab Container Registry (SaaS) gate this endpoint
 > — an empty browse result there is expected, not an error. Explicit-ref
-> operations (install, add, release, publish) work on all registries. See
-> [Registry compatibility][registry-compat] for the full table.
+> operations (install, add, release, publish) work on all registries. An
+> [`index` source](#index-sources) sidesteps the gap entirely — that is
+> why the built-in browse fallback is the public index, not a bare
+> registry. See [Registry compatibility][registry-compat] for the full
+> table.
 
 ## Further Reading
 
@@ -297,6 +349,8 @@ Confirm current flags with `grim mcp --help`.
   [online-by-default][online] — the semantics behind each section above.
 - [Configuration][envvars] — environment variables, `[[registries]]`
   schema, precedence rules, data layout under `GRIM_HOME`.
+- [The Package Index][package-index] — index spec, auto-merge rules,
+  hosting your own.
 - [Command reference: search][search], [tui][tui], and [mcp][mcp].
 
 [scopes]: https://grimoire.rs/concepts.html#scopes
@@ -304,6 +358,8 @@ Confirm current flags with `grim mcp --help`.
 [online]: https://grimoire.rs/concepts.html#online-by-default-offline-on-demand
 [envvars]: https://grimoire.rs/configuration.html#environment-variables
 [registry-compat]: https://grimoire.rs/configuration.html#registry-compatibility
+[package-index]: https://grimoire.rs/package-index.html
+[index-repo]: https://github.com/grimoire-rs/index
 [config-cmd]: https://grimoire.rs/commands.html#config
 [search]: https://grimoire.rs/commands.html#search
 [tui]: https://grimoire.rs/commands.html#tui

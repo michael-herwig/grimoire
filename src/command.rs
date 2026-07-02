@@ -51,10 +51,17 @@ pub fn resolve_login_registry(ctx: &crate::context::Context, explicit: Option<&s
         .ok_or_else(|| anyhow::Error::from(crate::error::Error::from(command_error::CommandError::NoLoginRegistry)))
 }
 
-/// The built-in default registry, used only when no other tier configures
-/// one (no `--registry` flag, no `$GRIM_DEFAULT_REGISTRY`, no config
-/// `default_registry`).
-pub const FALLBACK_REGISTRY: &str = "grim.ocx.sh";
+/// The built-in default registry for push-side and short-id expansion,
+/// used only when no other tier configures one (no `--registry` flag, no
+/// `$GRIM_DEFAULT_REGISTRY`, no config `default_registry`). First-party
+/// packages live under the grimoire-rs org on GHCR.
+pub const FALLBACK_REGISTRY: &str = "ghcr.io/grimoire-rs";
+
+/// The built-in browse fallback: the public package index. Used as the
+/// final tier of the browse-set resolution so an unconfigured `grim
+/// search` / TUI / MCP lists the ecosystem through the index (GHCR gates
+/// `_catalog`, so a bare registry fallback would browse empty).
+pub const FALLBACK_INDEX: &str = "https://index.grimoire.rs";
 
 /// The single registry-precedence helper: `--registry` flag, then
 /// `$GRIM_DEFAULT_REGISTRY`, then the project config
@@ -142,7 +149,7 @@ pub fn registries_for_scope(
         scope.options.default_registry.as_deref(),
         &global_registries,
         global_default.as_deref(),
-        FALLBACK_REGISTRY,
+        FALLBACK_INDEX,
         ctx.registry_env(),
     )
 }
@@ -161,7 +168,21 @@ pub fn registries_for_scope(
 /// `[[registries]]` tier so a `[[registries]]`-only global config is still
 /// honored.
 pub fn primary_registry_for_scope(ctx: &crate::context::Context, scope: &scope_resolution::ResolvedScope) -> String {
-    crate::config::registry_resolve::primary_registry(&registries_for_scope(ctx, scope)).to_string()
+    or_fallback_registry(crate::config::registry_resolve::primary_registry(
+        &registries_for_scope(ctx, scope),
+    ))
+}
+
+/// Index sources never expand short ids, so a browse set holding only
+/// index sources (notably the built-in [`FALLBACK_INDEX`] tier) yields an
+/// empty primary — substitute the push-side [`FALLBACK_REGISTRY`] so
+/// `add`/`release` short ids keep a concrete registry host.
+fn or_fallback_registry(primary: &str) -> String {
+    if primary.is_empty() {
+        FALLBACK_REGISTRY.to_string()
+    } else {
+        primary.to_string()
+    }
 }
 
 /// The primary registry when scope resolution fails (e.g. `release` or `tui`
@@ -181,16 +202,17 @@ pub fn primary_registry_for_scope(ctx: &crate::context::Context, scope: &scope_r
 pub fn primary_registry_global_fallback(ctx: &crate::context::Context) -> String {
     let global_regs = global_config_registries(ctx, crate::config::scope::ConfigScope::Project);
     let global_default = global_config_default(ctx, crate::config::scope::ConfigScope::Project);
-    crate::config::registry_resolve::primary_registry(&crate::config::resolve_registries(
-        ctx.registry_flags(),
-        &[],
-        None,
-        &global_regs,
-        global_default.as_deref(),
-        FALLBACK_REGISTRY,
-        ctx.registry_env(),
+    or_fallback_registry(crate::config::registry_resolve::primary_registry(
+        &crate::config::resolve_registries(
+            ctx.registry_flags(),
+            &[],
+            None,
+            &global_regs,
+            global_default.as_deref(),
+            FALLBACK_INDEX,
+            ctx.registry_env(),
+        ),
     ))
-    .to_string()
 }
 
 /// Build a classifiable usage error (exit 64) for a missing `login`

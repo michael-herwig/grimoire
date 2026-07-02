@@ -558,7 +558,7 @@ mod tests {
         write(
             &f,
             // Publish-manifest shape: top-level registry key
-            "registry = \"grim.ocx.sh\"\n\n[skills.grim-usage]\nversion = \"0.1.1\"\n",
+            "registry = \"registry.example\"\n\n[skills.grim-usage]\nversion = \"0.1.1\"\n",
         );
         let err = read_bundle_members(&f)
             .expect_err("publish-manifest-shaped TOML must be rejected by read_bundle_members (ADR D7)");
@@ -573,7 +573,7 @@ mod tests {
     fn looks_like_publish_manifest_true_for_registry_keyed_doc() {
         // A document with a top-level `registry = "..."` string key is a
         // publish manifest (ADR D7 structural disambiguation)
-        let content = "registry = \"grim.ocx.sh\"\n\n[skills.grim-usage]\nversion = \"0.1.1\"\n";
+        let content = "registry = \"registry.example\"\n\n[skills.grim-usage]\nversion = \"0.1.1\"\n";
         assert!(
             looks_like_publish_manifest(content),
             "document with registry key must be detected as publish manifest (ADR D7)"

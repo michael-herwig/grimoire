@@ -2714,23 +2714,23 @@ mod spec_multi_registry_render_tests {
     fn spec_frame_single_registry_tree_yields_zero_registry_root_rows() {
         let mut s = TuiState::new();
         s.set_rows(vec![
-            row_with_reg("grim.ocx.sh", "acme/alpha", ArtifactState::NotInstalled),
-            row_with_reg("grim.ocx.sh", "acme/beta", ArtifactState::NotInstalled),
+            row_with_reg("registry.example", "acme/alpha", ArtifactState::NotInstalled),
+            row_with_reg("registry.example", "acme/beta", ArtifactState::NotInstalled),
         ]);
         // Single registry → elide (default_registry = Some(primary))
-        s.set_default_registry(Some("grim.ocx.sh".to_string()));
+        s.set_default_registry(Some("registry.example".to_string()));
         s.toggle_view_mode();
         assert_eq!(s.view_mode, ViewMode::Tree);
         let m = frame(&s);
-        // No row should have "grim.ocx.sh" as its group label
+        // No row should have "registry.example" as its group label
         let registry_root_rows: Vec<_> = m
             .rows
             .iter()
-            .filter(|r| r.group.is_some() && r.columns[0].contains("grim.ocx.sh"))
+            .filter(|r| r.group.is_some() && r.columns[0].contains("registry.example"))
             .collect();
         assert!(
             registry_root_rows.is_empty(),
-            "single-registry (elided) tree must have no 'grim.ocx.sh' registry root row; got: {registry_root_rows:?}"
+            "single-registry (elided) tree must have no 'registry.example' registry root row; got: {registry_root_rows:?}"
         );
     }
 
@@ -2939,13 +2939,13 @@ mod spec_multi_registry_render_tests {
     fn spec_flat_single_registry_no_registry_column() {
         let mut s = TuiState::new();
         s.set_rows(vec![row_with_reg(
-            "grim.ocx.sh",
+            "registry.example",
             "acme/skill-a",
             ArtifactState::Installed,
         )]);
         // Single-registry elision.
-        s.set_default_registry(Some("grim.ocx.sh".into()));
-        s.set_registry_order(vec!["grim.ocx.sh".into()]);
+        s.set_default_registry(Some("registry.example".into()));
+        s.set_registry_order(vec!["registry.example".into()]);
         assert_eq!(s.view_mode, ViewMode::Flat);
         let m = frame(&s);
 

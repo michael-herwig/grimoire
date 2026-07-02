@@ -351,7 +351,7 @@ When the active scope has no `grimoire.toml` yet, the TUI offers to create
 one before starting, as popup dialogs: confirm the init, then accept or
 edit the registry. The input is pre-filled with the effective default — the
 `--registry` flag, then `GRIM_DEFAULT_REGISTRY`, then the global config, then
-the built-in `grim.ocx.sh` fallback — and the accepted value is persisted as a
+the built-in `ghcr.io/grimoire-rs` fallback — and the accepted value is persisted as a
 `[[registries]]` entry with `default = true` in the new config (clearing the
 input seeds nothing). Cancelling closes the TUI.
 

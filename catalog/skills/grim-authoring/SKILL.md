@@ -73,7 +73,7 @@ artifact from scratch, read it FIRST — write good content, then package
 it here. If that file is missing, install it by identifier:
 
 ```sh
-grim add grim.ocx.sh/skills/ai-config-authoring:0 && grim install
+grim add ghcr.io/grimoire-rs/skills/ai-config-authoring:0 && grim install
 # fresh project (no grimoire.toml yet): run `grim init` first
 ```
 

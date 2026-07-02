@@ -6,17 +6,30 @@
 #
 # Bump rules: patch = content fix; minor = new sections/reference files;
 # major = restructure or renamed reference files.
+#
+# Packages live on GHCR under the grimoire-rs org; discovery goes through
+# the public package index (grim publish --announce opens the index PR —
+# the same path any contributor uses).
 
-registry = "grim.ocx.sh"
+registry = "ghcr.io"
+
+[announce]
+repository = "https://github.com/grimoire-rs/index"
+namespace = "grimoire-rs"
+owner_id = 298895348
 
 [skills.grim-usage]
-version = "0.4.0"
+version = "0.5.0"
+repository = "grimoire-rs/skills/grim-usage"
 
 [skills.ai-config-authoring]
-version = "0.1.0"
+version = "0.1.1"
+repository = "grimoire-rs/skills/ai-config-authoring"
 
 [skills.grim-authoring]
-version = "0.2.0"
+version = "0.2.1"
+repository = "grimoire-rs/skills/grim-authoring"
 
 [bundles.grim-essentials]
-version = "0.1.0"
+version = "0.1.1"
+repository = "grimoire-rs/bundles/grim-essentials"
