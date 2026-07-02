@@ -16,10 +16,13 @@ name: Publish Catalog
 # skills/rules/agents before bundles so bundle members always resolve.
 #
 # Announce needs a cross-repo credential: GITHUB_TOKEN is repo-scoped, so
-# the PR against grimoire-rs/index uses the INDEX_ANNOUNCE_TOKEN secret
-# (fine-grained PAT: contents + pull-requests write on grimoire-rs/index).
-# When the secret is absent the announce step is skipped with a notice —
-# publishing itself still succeeds.
+# the PR against grimoire-rs/index uses a short-lived installation token
+# minted from the org-owned "grimoire-index-announce" GitHub App (contents
+# + pull-requests write, installed on grimoire-rs/index only; secrets
+# INDEX_ANNOUNCE_APP_ID / INDEX_ANNOUNCE_APP_KEY). When the app is not
+# configured the announce step is skipped with a notice — publishing
+# itself still succeeds. The index validator allowlists the app's bot
+# login for the grimoire-rs namespace (auto-merge).
 #
 # Cost: one Linux job, ~2-3 min (released binary download, no Rust build).
 
@@ -142,19 +145,33 @@ jobs:
           fi
           task catalog:release -- "${args[@]}"
 
+      - name: Mint index app token
+        id: index-token
+        if: ${{ !inputs.dry_run }}
+        # Fails (and is tolerated) when the app secrets are absent — the
+        # announce step below then skips on the empty token output.
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.INDEX_ANNOUNCE_APP_ID }}
+          private-key: ${{ secrets.INDEX_ANNOUNCE_APP_KEY }}
+          owner: grimoire-rs
+          repositories: index
+
       - name: Announce to index
         if: ${{ !inputs.dry_run }}
         env:
-          # Cross-repo PAT (grimoire-rs/index: contents + pull-requests
-          # write). gh consumes GH_TOKEN; `gh auth setup-git` wires the
-          # same token into git pushes for the announce clone.
-          GH_TOKEN: ${{ secrets.INDEX_ANNOUNCE_TOKEN }}
+          # Short-lived (1 h) installation token scoped to grimoire-rs/index
+          # (contents + pull-requests write). gh consumes GH_TOKEN;
+          # `gh auth setup-git` wires the same token into git pushes for
+          # the announce clone.
+          GH_TOKEN: ${{ steps.index-token.outputs.token }}
           SKIP_BUILD: "true"
           GRIM_COMMAND: grim
         run: |
           set -euo pipefail
           if [[ -z "$GH_TOKEN" ]]; then
-            echo "::notice::INDEX_ANNOUNCE_TOKEN not set — skipping index announce"
+            echo "::notice::index announce app not configured — skipping index announce"
             exit 0
           fi
           gh auth setup-git
